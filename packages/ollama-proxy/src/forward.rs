@@ -21,11 +21,16 @@ pub async fn proxy_handler(
     // Wrap to reqwest::Body
     let reqwest_body = reqwest::Body::wrap_stream(body.into_data_stream());
 
-    let mut builder = state.client.request(parts.method, &target_url).body(reqwest_body);
+    // Convert axum Method to reqwest Method
+    let reqwest_method = reqwest::Method::from_bytes(parts.method.as_str().as_bytes()).unwrap();
+
+    let mut builder = state.client.request(reqwest_method, &target_url).body(reqwest_body);
 
     for (header_name, header_value) in parts.headers.iter() {
         if header_name != "host" && header_name != "authorization" {
-            builder = builder.header(header_name.as_str(), header_value);
+            // Convert axum HeaderValue to reqwest HeaderValue
+            let reqwest_header_value = reqwest::header::HeaderValue::from_bytes(header_value.as_bytes()).unwrap();
+            builder = builder.header(header_name.as_str(), reqwest_header_value);
         }
     }
 
@@ -34,11 +39,16 @@ pub async fn proxy_handler(
         StatusCode::BAD_GATEWAY
     })?;
 
-    let mut response_builder = Response::builder()
-        .status(res.status());
+    // Convert reqwest StatusCode to axum StatusCode
+    let axum_status = StatusCode::from_u16(res.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+
+    let mut response_builder = Response::builder().status(axum_status);
 
     for (header_name, header_value) in res.headers().iter() {
-        response_builder = response_builder.header(header_name.clone(), header_value.clone());
+        // Convert reqwest Header to axum Header
+        let axum_header_name = axum::http::HeaderName::from_bytes(header_name.as_str().as_bytes()).unwrap();
+        let axum_header_value = axum::http::HeaderValue::from_bytes(header_value.as_bytes()).unwrap();
+        response_builder = response_builder.header(axum_header_name, axum_header_value);
     }
 
     let stream = res.bytes_stream();

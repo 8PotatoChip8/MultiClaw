@@ -5,14 +5,9 @@ mod models_allowlist;
 mod access_log;
 
 use axum::{
-    body::Body,
-    extract::State,
-    http::Request,
-    response::Response,
     routing::any,
     Router,
 };
-use std::sync::Arc;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[derive(Clone)]
