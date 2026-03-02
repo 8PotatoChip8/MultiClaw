@@ -10,7 +10,6 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the entire workspace
-COPY Cargo.toml Cargo.lock ./
 COPY packages/ ./packages/
 
 # Build the control-plane package
