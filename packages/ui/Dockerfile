@@ -14,6 +14,7 @@ COPY packages/ui/ ./packages/ui/
 
 # Build the project
 WORKDIR /app/packages/ui
+RUN mkdir -p public
 RUN npm run build
 
 FROM node:20-alpine AS runner
