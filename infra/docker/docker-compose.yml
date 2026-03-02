@@ -1,0 +1,49 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: multiclaw
+      POSTGRES_PASSWORD: multiclaw_pass
+      POSTGRES_DB: multiclaw
+    volumes:
+      - multiclaw-db-data:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    restart: always
+
+  multiclawd:
+    build:
+      context: ../../
+      dockerfile: ./packages/control-plane/Dockerfile
+    environment:
+      - DATABASE_URL=${DB_URL}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - MASTER_KEY_PATH=${MASTER_KEY_PATH}
+    volumes:
+      - /var/lib/multiclaw:/var/lib/multiclaw
+      - /var/run/incus:/var/run/incus # Needed for MV incus CLI access
+    pid: "host" # Needs host network access to run subprocess incus CLI simply
+    network_mode: "host" # We bind to host so incus CLI works directly inside or we just mount sockets
+    depends_on:
+      - postgres
+    restart: always
+
+  ollama-proxy:
+    build:
+      context: ../../
+      dockerfile: ./packages/ollama-proxy/Dockerfile
+    network_mode: "host" 
+    restart: always
+
+  ui:
+    build:
+      context: ../../
+      dockerfile: ./packages/ui/Dockerfile
+    environment:
+      - NEXT_PUBLIC_API_URL=http://localhost:8080/v1
+      - NEXT_PUBLIC_WS_URL=ws://localhost:8080/v1/events
+    network_mode: "host"
+    restart: always
+
+volumes:
+  multiclaw-db-data:

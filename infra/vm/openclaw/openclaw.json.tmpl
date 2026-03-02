@@ -1,0 +1,40 @@
+{
+  "gateway": {
+    "port": 18789,
+    "bind": "loopback",
+    "auth": {
+      "mode": "token",
+      "token": "{{OPENCLAW_GATEWAY_TOKEN}}"
+    },
+    "http": {
+      "endpoints": {
+        "chatCompletions": {
+          "enabled": true
+        }
+      }
+    }
+  },
+  "models": {
+    "providers": {
+      "ollama": {
+        "baseUrl": "http://127.0.0.1:11435",
+        "api": "ollama",
+        "apiKey": "ollama-local"
+      }
+    }
+  },
+  "agents": {
+    "defaults": {
+      "model": {
+        "primary": "ollama/{{EFFECTIVE_MODEL}}"
+      }
+    }
+  },
+  "identity": {
+    "name": "{{AGENT_NAME}}"
+  },
+  "tools": {
+    "allow": {{TOOLS_ALLOW}},
+    "deny": {{TOOLS_DENY}}
+  }
+}

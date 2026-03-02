@@ -1,0 +1,41 @@
+#cloud-config
+hostname: {{HOSTNAME}}
+
+users:
+  - name: agent
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+
+packages:
+  - curl
+  - ca-certificates
+  - jq
+
+write_files:
+  - path: /home/agent/.openclaw/openclaw.json
+    owner: agent:agent
+    permissions: '0644'
+    content: |
+      {{OPENCLAW_JSON}}
+  
+  - path: /etc/systemd/system/openclaw-gateway.service
+    content: |
+      {{OPENCLAW_SERVICE}}
+      
+  - path: /etc/systemd/system/multiclaw-agentd.service
+    content: |
+      {{AGENTD_SERVICE}}
+
+runcmd:
+  # Install OpenClaw CLI
+  - su - agent -c "curl -fsSL https://openclaw.ai/install-cli.sh | bash"
+  
+  # Download multiclaw-agentd from the control plane
+  - curl -o /usr/local/bin/multiclaw-agentd http://{{HOST_IP}}:8080/v1/agentd/download/$(uname -m)
+  - chmod +x /usr/local/bin/multiclaw-agentd
+
+  # Reload systemd and start services
+  - systemctl daemon-reload
+  - systemctl enable --now openclaw-gateway.service
+  - systemctl enable --now multiclaw-agentd.service

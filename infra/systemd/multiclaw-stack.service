@@ -1,0 +1,13 @@
+[Unit]
+Description=MultiClaw Platform Stack
+Requires=docker.service
+After=docker.service network.target
+
+[Service]
+Restart=always
+WorkingDirectory=/opt/multiclaw
+ExecStart=/usr/bin/docker compose up
+ExecStop=/usr/bin/docker compose down
+
+[Install]
+WantedBy=multi-user.target

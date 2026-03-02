@@ -1,0 +1,19 @@
+[Unit]
+Description=MultiClaw Agent Sidecar
+After=network.target openclaw-gateway.service
+
+[Service]
+User=agent
+Group=agent
+Environment="RUST_LOG=info"
+Environment="AGENT_ID={{AGENT_ID}}"
+Environment="AGENTD_TOKEN={{AGENTD_TOKEN}}"
+Environment="OLLAMA_TOKEN={{OLLAMA_TOKEN}}"
+Environment="MULTICLAWD_URL=http://{{HOST_IP}}:8080"
+Environment="HOST_OLLAMA_PROXY_URL=http://{{HOST_IP}}:11436"
+ExecStart=/usr/local/bin/multiclaw-agentd
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
