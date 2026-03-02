@@ -68,7 +68,7 @@ pub fn can_hire_worker(requested_new_worker_count: u32, actor_role: Role) -> Dec
     }
 }
 
-pub fn can_hire_second_ceo(actor_role: Role) -> Decision {
+pub fn can_hire_second_ceo(_actor_role: Role) -> Decision {
     // Only user or main agent can init this, but ultimately requires USER.
     Decision::RequiresRequest {
         request_type: "ADD_SECOND_CEO".into(),

@@ -28,7 +28,7 @@ struct ChatResponse {
     message: MessageObj,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Serialize)]
 struct MessageObj {
     role: String,
     content: String,
@@ -155,7 +155,7 @@ impl MainAgent {
         ]
     }
 
-    async fn execute_tool(&self, db_pool: &sqlx::PgPool, name: &str, _args: Option<&serde_json::Map<String, Value>>) -> String {
+    async fn execute_tool(&self, _db_pool: &sqlx::PgPool, name: &str, _args: Option<&serde_json::Map<String, Value>>) -> String {
         match name {
             "create_company" => {
                 // e.g. execute DB insert for company. 

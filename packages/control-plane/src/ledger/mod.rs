@@ -25,30 +25,30 @@ impl Ledger {
         let mut tx = self.pool.begin().await?;
 
         // Expense for from_company
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual)
-             VALUES ($1, $2, $3, $4, 'EXPENSE', $5, 'USD', $6, true)",
-            Uuid::new_v4(),
-            from_company_id,
-            to_company_id,
-            engagement_id,
-            amount as f64, // sqlx mapped to Postgres NUMERIC requires BigDecimal/rust_decimal if you turn on features, but we didn't specify the rust_decimal feature. We will rely on sqlx casting or switch to string.
-            memo
+             VALUES ($1, $2, $3, $4, 'EXPENSE', $5, 'USD', $6, true)"
         )
+        .bind(Uuid::new_v4())
+        .bind(from_company_id)
+        .bind(to_company_id)
+        .bind(engagement_id)
+        .bind(amount as f64)
+        .bind(memo)
         .execute(&mut *tx)
         .await?;
 
         // Revenue for to_company
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual)
-             VALUES ($1, $2, $3, $4, 'REVENUE', $5, 'USD', $6, true)",
-            Uuid::new_v4(),
-            to_company_id,
-            from_company_id,
-            engagement_id,
-            amount as f64,
-            memo
+             VALUES ($1, $2, $3, $4, 'REVENUE', $5, 'USD', $6, true)"
         )
+        .bind(Uuid::new_v4())
+        .bind(to_company_id)
+        .bind(from_company_id)
+        .bind(engagement_id)
+        .bind(amount as f64)
+        .bind(memo)
         .execute(&mut *tx)
         .await?;
 

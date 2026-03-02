@@ -21,16 +21,16 @@ impl ServiceCatalog {
         rate: Value,
     ) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        sqlx::query!(
+        sqlx::query(
             "INSERT INTO service_catalog (id, provider_company_id, name, description, pricing_model, rate)
-             VALUES ($1, $2, $3, $4, $5, $6)",
-            id,
-            provider_company_id,
-            name,
-            description,
-            pricing_model,
-            rate
+             VALUES ($1, $2, $3, $4, $5, $6)"
         )
+        .bind(id)
+        .bind(provider_company_id)
+        .bind(name)
+        .bind(description)
+        .bind(pricing_model)
+        .bind(rate)
         .execute(&self.pool)
         .await?;
 

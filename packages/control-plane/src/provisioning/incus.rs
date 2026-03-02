@@ -2,7 +2,7 @@ use super::vm_provider::{VmDetails, VmProvider, VmResources};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use serde_json::Value;
-use std::process::Stdio;
+use std::process::Command as StdCommand; // Renamed to avoid conflict with tokio::process::Command
 use tokio::process::Command;
 use tokio::time::{sleep, Duration};
 

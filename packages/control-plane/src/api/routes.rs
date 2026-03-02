@@ -1,12 +1,11 @@
 use axum::{
-    extract::{Path, State},
+    extract::Path,
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
     Json, Router,
 };
 use serde_json::{json, Value};
-use std::sync::Arc;
 
 use super::ws::{events_handler, AppState};
 

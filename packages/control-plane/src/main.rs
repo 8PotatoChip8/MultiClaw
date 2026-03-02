@@ -4,14 +4,7 @@ mod config;
 mod crypto;
 mod db;
 mod api;
-mod auth;
-mod policy;
-mod provisioning;
-mod messaging;
-mod services;
-mod ledger;
 mod agents;
-mod observability;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,7 +20,7 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
     tracing::info!("Loaded config for {}", cfg.master_key_path);
 
-    let pool = db::init_db(&cfg.database_url).await?;
+    let _pool = db::init_db(&cfg.database_url).await?;
     
     // NOTE: This runs the actual API logic...
     Ok(())

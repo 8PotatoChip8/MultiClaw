@@ -33,14 +33,14 @@ impl Dispatcher {
         };
 
         for &agent_id in &target_agent_ids {
-            sqlx::query!(
+            sqlx::query(
                 "INSERT INTO dispatches (id, message_id, target_agent_id, mode, status)
-                 VALUES ($1, $2, $3, $4, 'PENDING')",
-                Uuid::new_v4(),
-                message_id,
-                agent_id,
-                mode_str,
+                 VALUES ($1, $2, $3, $4, 'PENDING')"
             )
+            .bind(Uuid::new_v4())
+            .bind(message_id)
+            .bind(agent_id)
+            .bind(mode_str)
             .execute(&self.pool)
             .await?;
         }
@@ -56,12 +56,12 @@ impl Dispatcher {
     pub async fn complete_dispatch(&self, dispatch_id: Uuid, error: Option<String>) -> Result<()> {
         let status = if error.is_some() { "ERROR" } else { "COMPLETED" };
         
-        sqlx::query!(
-            "UPDATE dispatches SET status = $1, error = $2, completed_at = NOW() WHERE id = $3",
-            status,
-            error,
-            dispatch_id
+        sqlx::query(
+            "UPDATE dispatches SET status = $1, error = $2, completed_at = NOW() WHERE id = $3"
         )
+        .bind(status)
+        .bind(error)
+        .bind(dispatch_id)
         .execute(&self.pool)
         .await?;
 
