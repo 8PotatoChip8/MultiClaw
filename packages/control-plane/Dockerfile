@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
 COPY packages/ ./packages/
 
 # Build the control-plane package
+WORKDIR /usr/src/app/packages
 RUN cargo build --release -p control-plane
 
 # Runner stage
@@ -34,7 +35,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from the builder stage
-COPY --from=builder /usr/src/app/target/release/control-plane /app/control-plane
+COPY --from=builder /usr/src/app/packages/target/release/control-plane /app/control-plane
 
 EXPOSE 8080
 
