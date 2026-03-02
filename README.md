@@ -7,7 +7,7 @@ MultiClaw orchestrates full-fledged autonomous agents inside isolated Incus VMs 
 
 ## Quick Start
 ```bash
-curl -fsSL https://raw.githubusercontent.com/pmde/multiclaw/main/infra/install/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | bash
 ```
 
 ## Architecture
