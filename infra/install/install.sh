@@ -75,7 +75,12 @@ cd /opt/multiclaw
 docker compose -f infra/docker/docker-compose.yml up -d --build
 
 log "Waiting for control-plane backend to be ready..."
-sleep 20
+for i in {1..30}; do
+  if curl -s http://127.0.0.1:8080/v1/companies > /dev/null; then
+    break
+  fi
+  sleep 2
+done
 
 log "Interactive Initialization..."
 echo "--- MultiClaw Setup ---"
