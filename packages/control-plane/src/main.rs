@@ -26,18 +26,19 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Starting MultiClaw Control Plane...");
 
     let cfg = config::Config::from_env()?;
-    tracing::info!("Loaded config for {}", cfg.master_key_path);
+    tracing::info!("Loaded config, port={}", cfg.port);
 
     let pool = db::init_db(&cfg.database_url).await?;
 
-    let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    let (tx, _rx) = tokio::sync::broadcast::channel(256);
     let app_state = api::ws::AppState { 
         db: pool,
         tx: std::sync::Arc::new(tx),
+        config: cfg.clone(),
     };
     let app = api::routes::app_router(app_state);
 
-    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cfg.port));
     tracing::info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;

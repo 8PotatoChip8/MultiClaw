@@ -1,244 +1,563 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post},
+    routing::{get, post, patch},
     Json, Router,
 };
+use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
+use tower_http::cors::{CorsLayer, Any};
 
 use super::ws::{events_handler, AppState};
-use crate::db::models::{Agent, Company, CreateCompanyRequest, Thread, Message, CreateMessageRequest};
-
-// These are mock handlers for the MVP. In a full implementation, they would wire 
-// to sqlx queries, the policy engine, and the dispatcher.
+use crate::db::models::*;
 
 pub fn app_router(state: AppState) -> Router {
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
+
     Router::new()
+        // Health & Install
+        .route("/v1/health", get(health))
         .route("/v1/install/init", post(handle_init))
+        // Companies
         .route("/v1/companies", get(list_companies).post(create_company))
+        .route("/v1/companies/:id", get(get_company))
         .route("/v1/companies/:id/org-tree", get(get_org_tree))
-        .route("/v1/agents/:id", get(get_agent))
         .route("/v1/companies/:id/hire-ceo", post(hire_ceo))
+        .route("/v1/companies/:id/ledger", get(get_ledger))
+        // Agents
+        .route("/v1/agents", get(list_agents))
+        .route("/v1/agents/:id", get(get_agent).patch(patch_agent))
         .route("/v1/agents/:id/hire-manager", post(hire_manager))
         .route("/v1/agents/:id/hire-worker", post(hire_worker))
-        .route("/v1/threads", get(get_threads))
+        .route("/v1/agents/:id/vm/start", post(vm_start))
+        .route("/v1/agents/:id/vm/stop", post(vm_stop))
+        .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
+        .route("/v1/agents/:id/panic", post(agent_panic))
+        // Threads & Messages
+        .route("/v1/threads", get(get_threads).post(create_thread))
+        .route("/v1/threads/:id", get(get_thread))
         .route("/v1/threads/:id/messages", get(get_messages).post(send_message))
+        // Requests & Approvals
+        .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/:id/approve", post(approve_request))
         .route("/v1/requests/:id/reject", post(reject_request))
+        // Services
+        .route("/v1/services", get(list_services).post(create_service))
+        .route("/v1/engagements", post(create_engagement))
+        .route("/v1/engagements/:id/activate", post(activate_engagement))
+        .route("/v1/engagements/:id/complete", post(complete_engagement))
+        // Agentd
+        .route("/v1/agentd/register", post(agentd_register))
+        .route("/v1/agentd/heartbeat", post(agentd_heartbeat))
+        // Events WS
         .route("/v1/events", get(events_handler))
+        .layer(cors)
         .with_state(state)
 }
 
-async fn handle_init() -> impl IntoResponse {
-    // 1. Create Holding Company
-    // 2. Create MainAgent DB row
-    // 3. Create tool_policies
-    (StatusCode::OK, Json(json!({"status": "success"})))
+// ═══════════════════════════════════════════════════════════════
+// Health
+// ═══════════════════════════════════════════════════════════════
+
+async fn health() -> impl IntoResponse {
+    Json(json!({"status": "ok"}))
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Install Init
+// ═══════════════════════════════════════════════════════════════
+
+async fn handle_init(
+    State(state): State<AppState>,
+    Json(payload): Json<InitRequest>,
+) -> impl IntoResponse {
+    let holding_name = payload.holding_name.unwrap_or_else(|| "Main Holding".into());
+    let agent_name = payload.main_agent_name.unwrap_or_else(|| "MainAgent".into());
+    let model = payload.default_model.unwrap_or_else(|| "glm-5:cloud".into());
+
+    let holding_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+
+    // Check if already initialized
+    let existing: Option<(i64,)> = sqlx::query_as("SELECT COUNT(*) FROM holdings")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    if let Some((count,)) = existing {
+        if count > 0 {
+            return (StatusCode::OK, Json(json!({"status": "already_initialized"})));
+        }
+    }
+
+    // Create holding
+    if let Err(e) = sqlx::query(
+        "INSERT INTO holdings (id, owner_user_id, name, main_agent_name) VALUES ($1, $2, $3, $4)"
+    ).bind(holding_id).bind(owner_id).bind(&holding_name).bind(&agent_name)
+    .execute(&state.db).await {
+        tracing::error!("Failed to create holding: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
+    }
+
+    // Create default tool policies
+    let ceo_policy_id = Uuid::new_v4();
+    let mgr_policy_id = Uuid::new_v4();
+    let wkr_policy_id = Uuid::new_v4();
+    let main_policy_id = Uuid::new_v4();
+
+    for (id, name, allow, deny) in [
+        (main_policy_id, "main_agent_policy", json!(["*"]), json!([])),
+        (ceo_policy_id, "ceo_policy", json!(["browser","files","coding","sessions"]), json!(["vm_provisioning"])),
+        (mgr_policy_id, "manager_policy", json!(["browser","files"]), json!(["system.run"])),
+        (wkr_policy_id, "worker_policy", json!(["browser","files"]), json!(["system.run","admin"])),
+    ] {
+        let _ = sqlx::query(
+            "INSERT INTO tool_policies (id, name, allowlist, denylist, notes) VALUES ($1, $2, $3, $4, $5)"
+        ).bind(id).bind(name).bind(&allow).bind(&deny).bind("Default policy")
+        .execute(&state.db).await;
+    }
+
+    // Create MainAgent
+    let agent_id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, effective_model, system_prompt, tool_policy_id, status) \
+         VALUES ($1, $2, NULL, 'MAIN', $3, 'Holding Company Management', $4, $5, $6, 'ACTIVE')"
+    )
+    .bind(agent_id).bind(holding_id).bind(&agent_name).bind(&model)
+    .bind(format!("You are {}, the Main Agent managing this holding company.", agent_name))
+    .bind(main_policy_id)
+    .execute(&state.db).await;
+
+    tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
+    (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Companies
+// ═══════════════════════════════════════════════════════════════
 
 async fn list_companies(State(state): State<AppState>) -> impl IntoResponse {
-    let result = sqlx::query_as::<_, Company>(
-        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies"
-    )
-    .fetch_all(&state.db)
-    .await;
-
-    match result {
-        Ok(companies) => (StatusCode::OK, Json(json!(companies))),
-        Err(e) => {
-            tracing::error!("Failed to fetch companies: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+    match sqlx::query_as::<_, Company>(
+        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies ORDER BY created_at DESC"
+    ).fetch_all(&state.db).await {
+        Ok(c) => (StatusCode::OK, Json(json!(c))),
+        Err(e) => { tracing::error!("list_companies: {}", e); (StatusCode::OK, Json(json!([]))) }
     }
 }
 
-async fn create_company(
-    State(state): State<AppState>,
-    Json(payload): Json<CreateCompanyRequest>,
-) -> impl IntoResponse {
+async fn get_company(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Company>(
+        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await {
+        Ok(Some(c)) => (StatusCode::OK, Json(json!(c))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error":"Not found"}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+async fn create_company(State(state): State<AppState>, Json(payload): Json<CreateCompanyRequest>) -> impl IntoResponse {
     let id = Uuid::new_v4();
-    // In a real system, holding_id comes from auth context. Using a dummy for now.
-    let holding_id = Uuid::from_u128(0); 
-    
-    let result = sqlx::query_as::<_, Company>(
-        r#"
-        INSERT INTO companies (id, holding_id, name, type, description, status)
-        VALUES ($1, $2, $3, $4, $5, 'ACTIVE')
-        RETURNING id, holding_id, name, type, description, tags, status, created_at
-        "#
-    )
-    .bind(id)
-    .bind(holding_id)
-    .bind(payload.name)
-    .bind(payload.r#type)
-    .bind(payload.description)
-    .fetch_one(&state.db)
-    .await;
+    let holding: Option<Holding> = sqlx::query_as("SELECT id, owner_user_id, name, main_agent_name, created_at FROM holdings LIMIT 1")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    let holding_id = holding.map(|h| h.id).unwrap_or(Uuid::from_u128(0));
 
-    match result {
-        Ok(company) => (StatusCode::CREATED, Json(json!(company))),
-        Err(e) => {
-            tracing::error!("Failed to create company: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
+    match sqlx::query_as::<_, Company>(
+        "INSERT INTO companies (id, holding_id, name, type, description, status) VALUES ($1,$2,$3,$4,$5,'ACTIVE') \
+         RETURNING id, holding_id, name, type, description, tags, status, created_at"
+    ).bind(id).bind(holding_id).bind(&payload.name).bind(&payload.r#type).bind(&payload.description)
+    .fetch_one(&state.db).await {
+        Ok(c) => {
+            let _ = state.tx.send(json!({"type":"company_created","company": c}).to_string());
+            (StatusCode::CREATED, Json(json!(c)))
         }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
     }
 }
 
-async fn get_org_tree(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let company_id = match Uuid::parse_str(&id) {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
-    };
+// ═══════════════════════════════════════════════════════════════
+// Org Tree
+// ═══════════════════════════════════════════════════════════════
 
-    let result = sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE company_id = $1"
-    )
-    .bind(company_id)
-    .fetch_all(&state.db)
-    .await;
+async fn get_org_tree(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Agent>(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+         FROM agents WHERE company_id = $1 ORDER BY role, name"
+    ).bind(uid).fetch_all(&state.db).await {
+        Ok(agents) => (StatusCode::OK, Json(json!({"company_id": uid, "tree": agents}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
 
-    match result {
-        Ok(agents) => {
-            // Very naive tree builder: Just dump list for now so UI has *something*
-            (StatusCode::OK, Json(json!({"tree": agents})))
+// ═══════════════════════════════════════════════════════════════
+// Agents
+// ═══════════════════════════════════════════════════════════════
+
+async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_as::<_, Agent>(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+         FROM agents ORDER BY created_at"
+    ).fetch_all(&state.db).await {
+        Ok(a) => (StatusCode::OK, Json(json!(a))),
+        Err(e) => { tracing::error!("list_agents: {}", e); (StatusCode::OK, Json(json!([]))) }
+    }
+}
+
+async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Agent>(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+         FROM agents WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await {
+        Ok(Some(a)) => (StatusCode::OK, Json(json!(a))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+async fn patch_agent(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<PatchAgentRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let _ = sqlx::query("UPDATE agents SET preferred_model = COALESCE($1, preferred_model), specialty = COALESCE($2, specialty), system_prompt = COALESCE($3, system_prompt) WHERE id = $4")
+        .bind(&p.preferred_model).bind(&p.specialty).bind(&p.system_prompt).bind(uid)
+        .execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"updated"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Hiring (CEO / Manager / Worker) — wired to policy engine
+// ═══════════════════════════════════════════════════════════════
+
+async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    // Count existing CEOs
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM company_ceos WHERE company_id = $1")
+        .bind(company_id).fetch_one(&state.db).await.unwrap_or((0,));
+
+    if count.0 >= 2 {
+        return (StatusCode::CONFLICT, Json(json!({"error":"Maximum 2 CEOs per company"})));
+    }
+
+    // If adding 2nd CEO, create approval request
+    if count.0 == 1 {
+        let req_id = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,'ADD_SECOND_CEO',$2,$3,'PENDING','USER')")
+            .bind(req_id).bind(company_id).bind(json!({"name": payload.name, "specialty": payload.specialty}))
+            .execute(&state.db).await;
+        let _ = state.tx.send(json!({"type":"approval_required","request_id": req_id, "request_type":"ADD_SECOND_CEO"}).to_string());
+        return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id})));
+    }
+
+    // Create CEO agent directly
+    let holding: Option<Holding> = sqlx::query_as("SELECT id, owner_user_id, name, main_agent_name, created_at FROM holdings LIMIT 1")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    let holding_id = holding.map(|h| h.id).unwrap_or(Uuid::from_u128(0));
+    let ceo_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'ceo_policy' LIMIT 1")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    let policy_id = ceo_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
+    let model = payload.preferred_model.unwrap_or_else(|| "glm-5:cloud".into());
+    let agent_id = Uuid::new_v4();
+
+    let _ = sqlx::query(
+        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'CEO',$4,$5,$6,$7,'ACTIVE')"
+    ).bind(agent_id).bind(holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(&model).bind(policy_id)
+    .execute(&state.db).await;
+
+    let _ = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
+        .bind(company_id).bind(agent_id).execute(&state.db).await;
+
+    let _ = state.tx.send(json!({"type":"ceo_hired","agent_id": agent_id,"company_id": company_id}).to_string());
+    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
+}
+
+async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
+    let ceo_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let ceo: Option<Agent> = sqlx::query_as(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
+    ).bind(ceo_id).fetch_optional(&state.db).await.unwrap_or(None);
+    let ceo = match ceo { Some(c) => c, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"CEO not found"}))) };
+    let company_id = match ceo.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"CEO has no company"}))) };
+
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agents WHERE company_id = $1 AND role = 'MANAGER'")
+        .bind(company_id).fetch_one(&state.db).await.unwrap_or((0,));
+    let new_count = (count.0 + 1) as u32;
+
+    use crate::policy::engine::{can_hire_manager, Role, Decision};
+    match can_hire_manager(new_count, Role::Ceo) {
+        Decision::AllowedImmediate => {},
+        Decision::RequiresRequest { request_type, approver_chain } => {
+            let approver = format!("{:?}", approver_chain.first().unwrap_or(&crate::policy::engine::ApproverType::User));
+            let req_id = Uuid::new_v4();
+            let _ = sqlx::query("INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type) VALUES ($1,$2,$3,$4,$5,'PENDING',$6)")
+                .bind(req_id).bind(&request_type).bind(ceo_id).bind(company_id)
+                .bind(json!({"name": payload.name, "count": new_count})).bind(&approver)
+                .execute(&state.db).await;
+            return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id,"approver": approver})));
         },
-        Err(e) => {
-            tracing::error!("Failed to fetch org tree: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+        Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
     }
+
+    let mgr_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'manager_policy' LIMIT 1")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    let policy_id = mgr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
+    let model = payload.preferred_model.unwrap_or_else(|| ceo.effective_model.clone());
+    let agent_id = Uuid::new_v4();
+
+    let _ = sqlx::query(
+        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'MANAGER',$4,$5,$6,$7,$8,'ACTIVE')"
+    ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
+    .execute(&state.db).await;
+
+    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
-async fn get_agent(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let agent_id = match Uuid::parse_str(&id) {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
-    };
+async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
+    let mgr_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let mgr: Option<Agent> = sqlx::query_as(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
+    ).bind(mgr_id).fetch_optional(&state.db).await.unwrap_or(None);
+    let mgr = match mgr { Some(m) => m, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Manager not found"}))) };
+    let company_id = match mgr.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Manager has no company"}))) };
 
-    let result = sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1"
-    )
-    .bind(agent_id)
-    .fetch_optional(&state.db)
-    .await;
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM agents WHERE parent_agent_id = $1 AND role = 'WORKER'")
+        .bind(mgr_id).fetch_one(&state.db).await.unwrap_or((0,));
+    let new_count = (count.0 + 1) as u32;
 
-    match result {
-        Ok(Some(agent)) => (StatusCode::OK, Json(json!(agent))),
-        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found"}))),
-        Err(e) => {
-            tracing::error!("Failed to fetch agent: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+    use crate::policy::engine::{can_hire_worker, Role, Decision};
+    match can_hire_worker(new_count, Role::Manager) {
+        Decision::AllowedImmediate => {},
+        Decision::RequiresRequest { request_type, approver_chain } => {
+            let approver = format!("{:?}", approver_chain.first().unwrap_or(&crate::policy::engine::ApproverType::User));
+            let req_id = Uuid::new_v4();
+            let _ = sqlx::query("INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type) VALUES ($1,$2,$3,$4,$5,'PENDING',$6)")
+                .bind(req_id).bind(&request_type).bind(mgr_id).bind(company_id)
+                .bind(json!({"name": payload.name, "count": new_count})).bind(&approver)
+                .execute(&state.db).await;
+            return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id})));
+        },
+        Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
     }
+
+    let wkr_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'worker_policy' LIMIT 1")
+        .fetch_optional(&state.db).await.unwrap_or(None);
+    let policy_id = wkr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
+    let model = payload.preferred_model.unwrap_or_else(|| mgr.effective_model.clone());
+    let agent_id = Uuid::new_v4();
+
+    let _ = sqlx::query(
+        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'WORKER',$4,$5,$6,$7,$8,'ACTIVE')"
+    ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
+    .execute(&state.db).await;
+
+    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
-async fn hire_ceo(Path(_id): Path<String>) -> impl IntoResponse {
-    // 1. Invoke Policy Engine `can_hire_second_ceo`
-    // 2. If immediate, create DB rows and call `Provisioning::provision`
-    (StatusCode::ACCEPTED, Json(json!({"status": "hiring_initiated"})))
+// ═══════════════════════════════════════════════════════════════
+// VM Actions
+// ═══════════════════════════════════════════════════════════════
+
+async fn vm_start(Path(id): Path<String>) -> impl IntoResponse {
+    (StatusCode::ACCEPTED, Json(json!({"status":"vm_start_initiated","agent_id": id})))
 }
 
-async fn hire_manager(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::ACCEPTED, Json(json!({"status": "hiring_initiated"})))
+async fn vm_stop(Path(id): Path<String>) -> impl IntoResponse {
+    (StatusCode::ACCEPTED, Json(json!({"status":"vm_stop_initiated","agent_id": id})))
 }
 
-async fn hire_worker(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::ACCEPTED, Json(json!({"status": "hiring_initiated"})))
+async fn vm_rebuild(Path(id): Path<String>) -> impl IntoResponse {
+    (StatusCode::ACCEPTED, Json(json!({"status":"vm_rebuild_initiated","agent_id": id})))
 }
+
+async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let _ = sqlx::query("UPDATE agents SET status = 'QUARANTINED' WHERE id = $1").bind(uid).execute(&state.db).await;
+    let _ = state.tx.send(json!({"type":"agent_quarantined","agent_id": uid}).to_string());
+    (StatusCode::OK, Json(json!({"status":"quarantined","agent_id": uid})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Threads & Messages
+// ═══════════════════════════════════════════════════════════════
 
 async fn get_threads(State(state): State<AppState>) -> impl IntoResponse {
-    let result = sqlx::query_as::<_, Thread>(
-        "SELECT id, type, title, created_by_user_id, created_at FROM threads"
-    )
-    .fetch_all(&state.db)
-    .await;
-
-    match result {
-        Ok(threads) => (StatusCode::OK, Json(json!(threads))),
-        Err(e) => {
-            tracing::error!("Failed to fetch threads: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+    match sqlx::query_as::<_, Thread>("SELECT id, type, title, created_by_user_id, created_at FROM threads ORDER BY created_at DESC")
+        .fetch_all(&state.db).await {
+        Ok(t) => (StatusCode::OK, Json(json!(t))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
     }
 }
 
-async fn get_messages(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-) -> impl IntoResponse {
-    let thread_id = match Uuid::parse_str(&id) {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
-    };
+async fn get_thread(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Thread>("SELECT id, type, title, created_by_user_id, created_at FROM threads WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await {
+        Ok(Some(t)) => (StatusCode::OK, Json(json!(t))),
+        _ => (StatusCode::NOT_FOUND, Json(json!({"error":"Thread not found"})))
+    }
+}
 
-    let result = sqlx::query_as::<_, Message>(
-        "SELECT id, thread_id, sender_type, sender_id, content, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC"
-    )
-    .bind(thread_id)
-    .fetch_all(&state.db)
-    .await;
+async fn create_thread(State(state): State<AppState>, Json(p): Json<CreateThreadRequest>) -> impl IntoResponse {
+    let id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, $2, $3)")
+        .bind(id).bind(&p.r#type).bind(&p.title).execute(&state.db).await;
+    (StatusCode::CREATED, Json(json!({"id": id, "type": p.r#type, "title": p.title})))
+}
 
-    match result {
-        Ok(messages) => (StatusCode::OK, Json(json!(messages))),
-        Err(e) => {
-            tracing::error!("Failed to fetch messages: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+async fn get_messages(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Message>("SELECT id, thread_id, sender_type, sender_id, content, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC")
+        .bind(uid).fetch_all(&state.db).await {
+        Ok(m) => (StatusCode::OK, Json(json!(m))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
     }
 }
 
 async fn send_message(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(payload): Json<CreateMessageRequest>
+    State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateMessageRequest>
 ) -> impl IntoResponse {
-    let thread_id = match Uuid::parse_str(&id) {
-        Ok(u) => u,
-        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
-    };
+    let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let msg_id = Uuid::new_v4();
+    let sender_type = p.sender_type.unwrap_or_else(|| "USER".into());
+    let sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
 
-    let message_id = Uuid::new_v4();
-
-    let result = sqlx::query_as::<_, Message>(
-        r#"
-        INSERT INTO messages (id, thread_id, sender_type, sender_id, content) 
-        VALUES ($1, $2, $3, $4, $5) 
-        RETURNING id, thread_id, sender_type, sender_id, content, created_at
-        "#
-    )
-    .bind(message_id)
-    .bind(thread_id)
-    .bind(payload.sender_type)
-    .bind(payload.sender_id)
-    .bind(payload.content)
-    .fetch_one(&state.db)
-    .await;
-
-    match result {
-        Ok(message) => {
-            // 1. In true implementation, this would trigger the messaging Dispatcher actor here
-            // to run the agent inference engine, sending events over the event broadcast channel.
-            (StatusCode::CREATED, Json(json!(message)))
+    match sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,$3,$4,$5) \
+         RETURNING id, thread_id, sender_type, sender_id, content, created_at"
+    ).bind(msg_id).bind(thread_id).bind(&sender_type).bind(sender_id).bind(&p.content)
+    .fetch_one(&state.db).await {
+        Ok(msg) => {
+            let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
+            (StatusCode::CREATED, Json(json!(msg)))
         },
-        Err(e) => {
-            tracing::error!("Failed to create message: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Database error"})))
-        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
     }
 }
 
-async fn approve_request(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "approved"})))
+// ═══════════════════════════════════════════════════════════════
+// Requests & Approvals
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct RequestQuery { status: Option<String> }
+
+async fn list_requests(State(state): State<AppState>, Query(q): Query<RequestQuery>) -> impl IntoResponse {
+    let status_filter = q.status.unwrap_or_else(|| "%".into());
+    match sqlx::query_as::<_, Request>(
+        "SELECT id, type, created_by_agent_id, created_by_user_id, company_id, payload, status, current_approver_type, current_approver_id, created_at, updated_at \
+         FROM requests WHERE status LIKE $1 ORDER BY created_at DESC"
+    ).bind(&status_filter).fetch_all(&state.db).await {
+        Ok(r) => (StatusCode::OK, Json(json!(r))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
 }
 
-async fn reject_request(Path(_id): Path<String>) -> impl IntoResponse {
-    (StatusCode::OK, Json(json!({"status": "rejected"})))
+async fn create_request(State(state): State<AppState>, Json(p): Json<CreateRequestPayload>) -> impl IntoResponse {
+    let id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,$2,$3,$4,'PENDING','USER')"
+    ).bind(id).bind(&p.r#type).bind(p.company_id).bind(&p.payload).execute(&state.db).await;
+    let _ = state.tx.send(json!({"type":"new_request","request_id": id}).to_string());
+    (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING"})))
+}
+
+async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ApprovalAction>>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let note = body.and_then(|b| b.note.clone());
+    let approval_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'USER',$3,'APPROVE',$4)")
+        .bind(approval_id).bind(uid).bind(Uuid::new_v4()).bind(&note).execute(&state.db).await;
+    let _ = sqlx::query("UPDATE requests SET status = 'APPROVED', updated_at = NOW() WHERE id = $1").bind(uid).execute(&state.db).await;
+    let _ = state.tx.send(json!({"type":"request_approved","request_id": uid}).to_string());
+    (StatusCode::OK, Json(json!({"status":"approved"})))
+}
+
+async fn reject_request(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ApprovalAction>>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let note = body.and_then(|b| b.note.clone());
+    let approval_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'USER',$3,'REJECT',$4)")
+        .bind(approval_id).bind(uid).bind(Uuid::new_v4()).bind(&note).execute(&state.db).await;
+    let _ = sqlx::query("UPDATE requests SET status = 'REJECTED', updated_at = NOW() WHERE id = $1").bind(uid).execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"rejected"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Services & Engagements
+// ═══════════════════════════════════════════════════════════════
+
+async fn list_services(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_as::<_, ServiceCatalogItem>(
+        "SELECT id, provider_company_id, name, description, pricing_model, rate, tags, active, created_at FROM service_catalog WHERE active = true"
+    ).fetch_all(&state.db).await {
+        Ok(s) => (StatusCode::OK, Json(json!(s))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
+}
+
+async fn create_service(State(state): State<AppState>, Json(p): Json<CreateServiceRequest>) -> impl IntoResponse {
+    let id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO service_catalog (id, provider_company_id, name, description, pricing_model, rate) VALUES ($1,$2,$3,$4,$5,$6)"
+    ).bind(id).bind(p.provider_company_id).bind(&p.name).bind(&p.description).bind(&p.pricing_model).bind(&p.rate)
+    .execute(&state.db).await;
+    (StatusCode::CREATED, Json(json!({"id": id})))
+}
+
+async fn create_engagement(State(state): State<AppState>, Json(p): Json<CreateEngagementRequest>) -> impl IntoResponse {
+    let thread_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'ENGAGEMENT', 'Service Engagement')")
+        .bind(thread_id).execute(&state.db).await;
+
+    let svc: Option<ServiceCatalogItem> = sqlx::query_as(
+        "SELECT id, provider_company_id, name, description, pricing_model, rate, tags, active, created_at FROM service_catalog WHERE id = $1"
+    ).bind(p.service_id).fetch_optional(&state.db).await.unwrap_or(None);
+    let provider_id = svc.map(|s| s.provider_company_id).unwrap_or(Uuid::new_v4());
+
+    let id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO service_engagements (id, service_id, client_company_id, provider_company_id, scope, status, created_by_agent_id, thread_id) VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
+    ).bind(id).bind(p.service_id).bind(p.client_company_id).bind(provider_id).bind(&p.scope).bind(p.created_by_agent_id).bind(thread_id)
+    .execute(&state.db).await;
+    (StatusCode::CREATED, Json(json!({"id": id, "thread_id": thread_id})))
+}
+
+async fn activate_engagement(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let _ = sqlx::query("UPDATE service_engagements SET status = 'ACTIVE' WHERE id = $1").bind(uid).execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"activated"})))
+}
+
+async fn complete_engagement(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let _ = sqlx::query("UPDATE service_engagements SET status = 'COMPLETED' WHERE id = $1").bind(uid).execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"completed"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Ledger
+// ═══════════════════════════════════════════════════════════════
+
+async fn get_ledger(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, LedgerEntry>(
+        "SELECT id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual, created_at \
+         FROM ledger_entries WHERE company_id = $1 ORDER BY created_at DESC"
+    ).bind(uid).fetch_all(&state.db).await {
+        Ok(l) => (StatusCode::OK, Json(json!(l))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agentd Registration (called by VMs)
+// ═══════════════════════════════════════════════════════════════
+
+async fn agentd_register() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!({"status":"registered"})))
+}
+
+async fn agentd_heartbeat() -> impl IntoResponse {
+    (StatusCode::OK, Json(json!({"status":"ok"})))
 }

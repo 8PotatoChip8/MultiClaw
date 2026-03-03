@@ -76,7 +76,7 @@ docker compose -f infra/docker/docker-compose.yml up -d --build
 
 log "Waiting for control-plane backend to be ready..."
 for i in {1..90}; do
-  if curl -s http://127.0.0.1:8080/v1/companies > /dev/null; then
+  if curl -s http://127.0.0.1:8080/v1/health > /dev/null; then
     break
   fi
   sleep 2

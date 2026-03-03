@@ -1,4 +1,5 @@
-import { useEffect, useState } from 'react';
+'use client';
+import { useState, useEffect, useCallback } from 'react';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080/v1/events';
 
@@ -6,19 +7,36 @@ export function useMultiClawEvents() {
     const [lastEvent, setLastEvent] = useState<any>(null);
 
     useEffect(() => {
-        const ws = new WebSocket(WS_URL);
+        let ws: WebSocket | null = null;
+        let reconnectTimer: ReturnType<typeof setTimeout>;
 
-        ws.onmessage = (event) => {
+        const connect = () => {
             try {
-                const data = JSON.parse(event.data);
-                setLastEvent(data);
-            } catch (e) {
-                console.error("WS Parse error", e);
+                ws = new WebSocket(WS_URL);
+                ws.onopen = () => console.log('[WS] Connected to event stream');
+                ws.onmessage = (event) => {
+                    try {
+                        const data = JSON.parse(event.data);
+                        setLastEvent(data);
+                    } catch {
+                        setLastEvent({ raw: event.data });
+                    }
+                };
+                ws.onclose = () => {
+                    console.log('[WS] Disconnected, reconnecting in 3s...');
+                    reconnectTimer = setTimeout(connect, 3000);
+                };
+                ws.onerror = () => ws?.close();
+            } catch {
+                reconnectTimer = setTimeout(connect, 3000);
             }
         };
 
+        connect();
+
         return () => {
-            ws.close();
+            clearTimeout(reconnectTimer);
+            ws?.close();
         };
     }, []);
 

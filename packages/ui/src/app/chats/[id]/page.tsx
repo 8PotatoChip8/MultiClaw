@@ -1,40 +1,19 @@
 'use client';
-
-import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
 import Chat from '../../../components/Chat';
-import { api } from '../../../lib/api';
-import React from 'react';
+import Link from 'next/link';
 
-export default function ChatViewPage({ params }: { params: { id: string } }) {
-    const [messages, setMessages] = useState<any[]>([]);
-    const [loading, setLoading] = useState(true);
-
-    useEffect(() => {
-        async function fetchMessages() {
-            try {
-                const data = await api.getThreadMessages(params.id);
-                setMessages(Array.isArray(data) ? data : []);
-            } catch (e) {
-                console.error("Failed to fetch messages", e);
-            } finally {
-                setLoading(false);
-            }
-        }
-        fetchMessages();
-    }, [params.id]);
-
-    if (loading) return <div>Loading thread...</div>;
+export default function ChatDetailPage() {
+    const params = useParams();
+    const id = params?.id as string;
 
     return (
-        <div style={{ display: 'flex', height: 'calc(100vh - 120px)', gap: '20px' }}>
-            <div className="panel" style={{ width: '250px', overflowY: 'auto' }}>
-                <h3>Threads</h3>
-                <ul style={{ listStyle: 'none', padding: 0 }}>
-                    <li style={{ padding: '10px', background: 'var(--bg)', borderRadius: '4px', cursor: 'pointer', marginBottom: '5px' }}>Current Thread: {params.id}</li>
-                </ul>
+        <div className="animate-in" style={{ height: 'calc(100vh - 96px)' }}>
+            <div style={{ marginBottom: '16px' }}>
+                <Link href="/chats" style={{ fontSize: '13px', color: 'var(--text-muted)' }}>← All Chats</Link>
             </div>
-            <div style={{ flex: 1 }}>
-                <Chat threadId={params.id} initialMessages={messages} />
+            <div style={{ height: 'calc(100% - 40px)' }}>
+                <Chat threadId={id} initialMessages={[]} />
             </div>
         </div>
     );

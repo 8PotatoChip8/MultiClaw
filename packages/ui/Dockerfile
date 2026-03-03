@@ -15,7 +15,9 @@ COPY packages/ui/ ./packages/ui/
 # Build the project
 WORKDIR /app/packages/ui
 ARG NEXT_PUBLIC_API_URL
+ARG NEXT_PUBLIC_WS_URL
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+ENV NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
 
 RUN mkdir -p public
 RUN npm run build
@@ -23,18 +25,17 @@ RUN npm run build
 FROM node:20-alpine AS runner
 WORKDIR /app
 
-# Copy necessary files from builder
-COPY --from=builder /app/packages/ui/next.config.js ./
-COPY --from=builder /app/packages/ui/public ./public
-COPY --from=builder /app/packages/ui/.next/standalone ./
-COPY --from=builder /app/packages/ui/.next/static ./.next/static
-
-# Set Next.js environment variables to run in production mode
 ENV NODE_ENV production
 ENV PORT 3000
+ENV HOSTNAME "0.0.0.0"
 
-# We use host network mode in docker-compose, so expose just documents the port.
+# Copy the standalone output. Next.js standalone nests under the original path,
+# so server.js is at .next/standalone/packages/ui/server.js
+COPY --from=builder /app/packages/ui/.next/standalone ./
+COPY --from=builder /app/packages/ui/.next/static ./packages/ui/.next/static
+COPY --from=builder /app/packages/ui/public ./packages/ui/public
+
 EXPOSE 3000
 
-# Next.js standalone output creates a server.js file
-CMD ["node", "server.js"]
+# The server.js is nested inside packages/ui/ in the standalone output
+CMD ["node", "packages/ui/server.js"]

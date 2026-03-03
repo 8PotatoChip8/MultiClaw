@@ -25,10 +25,9 @@ pub async fn init_db(database_url: &str) -> Result<PgPool> {
         }
     };
 
-    // Typically you would run migrations here, e.g. sqlx::migrate!().await?;
-    // For MV speed, we will assume they're run out of band or included.
-    // If we wanted to run them inline:
-    // sqlx::migrate!("./src/db/migrations").run(&pool).await?;
+    tracing::info!("Running database migrations...");
+    sqlx::migrate!("./src/db/migrations").run(&pool).await?;
+    tracing::info!("Migrations completed successfully");
 
     Ok(pool)
 }
