@@ -61,7 +61,7 @@ fi
 
 log "Creating env file..."
 ADMIN_TOKEN=$(cat /var/lib/multiclaw/admin.token)
-cat > /opt/multiclaw/.env <<EOF
+cat > /opt/multiclaw/infra/docker/.env <<EOF
 DB_URL=postgres://multiclaw:multiclaw_pass@127.0.0.1:5432/multiclaw
 ADMIN_TOKEN=${ADMIN_TOKEN}
 MASTER_KEY_PATH=/var/lib/multiclaw/master.key
