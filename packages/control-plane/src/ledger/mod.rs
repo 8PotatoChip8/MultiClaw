@@ -1,7 +1,7 @@
 use anyhow::Result;
 use sqlx::PgPool;
 use uuid::Uuid;
-use rust_decimal::Decimal; // Requires rust_decimal crate for proper handling, but we map to NUMERIC. For MVP simplify to f64.
+
 
 // In a real app we'd use rust_decimal. For this MVP we will just use f64 and strings.
 
