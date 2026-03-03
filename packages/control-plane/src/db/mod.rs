@@ -2,6 +2,8 @@ use anyhow::Result;
 use sqlx::{postgres::PgPoolOptions, PgPool};
 use std::time::Duration;
 
+pub mod models;
+
 pub async fn init_db(database_url: &str) -> Result<PgPool> {
     let mut retries = 10;
     

@@ -21,5 +21,20 @@ export const api = {
         const res = await fetch(`${API_URL}/companies/${companyId}/hire-ceo`, { method: 'POST', headers: getHeaders() });
         return res.json();
     },
-    // Add other methods as needed: hireManager, hireWorker, getThreads, sendMessage, getApprovals...
+    hireWorker: async (companyId: string) => {
+        const res = await fetch(`${API_URL}/companies/${companyId}/hire-worker`, { method: 'POST', headers: getHeaders() });
+        return res.json();
+    },
+    getAgent: async (agentId: string) => {
+        const res = await fetch(`${API_URL}/agents/${agentId}`, { headers: getHeaders() });
+        return res.json();
+    },
+    getThreads: async () => {
+        const res = await fetch(`${API_URL}/threads`, { headers: getHeaders() });
+        return res.json();
+    },
+    getThreadMessages: async (threadId: string) => {
+        const res = await fetch(`${API_URL}/threads/${threadId}/messages`, { headers: getHeaders() });
+        return res.json();
+    }
 };

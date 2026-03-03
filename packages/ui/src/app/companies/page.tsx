@@ -2,12 +2,26 @@
 
 import { Company } from '../../lib/types';
 import CompanyCard from '../../components/CompanyCard';
+import { api } from '../../lib/api';
+import { useEffect, useState } from 'react';
 
 export default function CompaniesPage() {
-    const companies: Company[] = [
-        { id: '1', name: 'Alpha Software', type: 'EXTERNAL', status: 'ACTIVE' },
-        { id: '2', name: 'Omega CyberServices', type: 'INTERNAL', status: 'ACTIVE' },
-    ];
+    const [companies, setCompanies] = useState<Company[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        api.getCompanies()
+            .then(data => {
+                setCompanies(Array.isArray(data) ? data : []);
+                setLoading(false);
+            })
+            .catch(err => {
+                console.error("Failed to fetch companies", err);
+                setLoading(false);
+            });
+    }, []);
+
+    if (loading) return <div>Loading companies...</div>;
 
     return (
         <div>

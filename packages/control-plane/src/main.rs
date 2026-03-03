@@ -6,6 +6,14 @@ mod db;
 mod api;
 mod agents;
 
+pub mod auth;
+pub mod policy;
+pub mod provisioning;
+pub mod messaging;
+pub mod services;
+pub mod ledger;
+pub mod observability;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()

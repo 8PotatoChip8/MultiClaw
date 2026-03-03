@@ -14,6 +14,9 @@ COPY packages/ui/ ./packages/ui/
 
 # Build the project
 WORKDIR /app/packages/ui
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+
 RUN mkdir -p public
 RUN npm run build
 
