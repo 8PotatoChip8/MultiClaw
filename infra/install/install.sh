@@ -75,7 +75,7 @@ cd /opt/multiclaw
 docker compose -f infra/docker/docker-compose.yml up -d --build
 
 log "Waiting for control-plane backend to be ready..."
-for i in {1..30}; do
+for i in {1..90}; do
   if curl -s http://127.0.0.1:8080/v1/companies > /dev/null; then
     break
   fi
@@ -104,10 +104,16 @@ if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
 # Call Init
 log "Calling /v1/install/init"
-curl -f -X POST http://127.0.0.1:8080/v1/install/init \
+if curl -f -X POST http://127.0.0.1:8080/v1/install/init \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{\"holding_name\":\"$HOLDING_NAME\", \"main_agent_name\":\"$MAIN_AGENT_NAME\", \"default_model\":\"$DEFAULT_MODEL\", \"strict_mode\":$STRICT_MODE, \"vm_provider\":\"incus\"}" || log "Init call failed, backend might still be starting."
+  -d "{\"holding_name\":\"$HOLDING_NAME\", \"main_agent_name\":\"$MAIN_AGENT_NAME\", \"default_model\":\"$DEFAULT_MODEL\", \"strict_mode\":$STRICT_MODE, \"vm_provider\":\"incus\"}"; then
+  log "Init call successful."
+else
+  log "Init call failed! Printing backend logs for diagnosis:"
+  cd /opt/multiclaw && docker compose logs multiclawd --tail 200
+  sleep 1
+fi
 
 log "Multiclaw Dashboard URL: http://localhost:3000"
 log "Admin Token location: /var/lib/multiclaw/admin.token"
