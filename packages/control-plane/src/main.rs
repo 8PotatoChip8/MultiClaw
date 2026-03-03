@@ -20,8 +20,19 @@ async fn main() -> anyhow::Result<()> {
     let cfg = config::Config::from_env()?;
     tracing::info!("Loaded config for {}", cfg.master_key_path);
 
-    let _pool = db::init_db(&cfg.database_url).await?;
+    let pool = db::init_db(&cfg.database_url).await?;
+
+    let (tx, _rx) = tokio::sync::broadcast::channel(100);
+    let app_state = api::ws::AppState { 
+        db: pool,
+        tx: std::sync::Arc::new(tx),
+    };
+    let app = api::routes::app_router(app_state);
+
+    let addr = std::net::SocketAddr::from(([0, 0, 0, 0], 8080));
+    tracing::info!("Listening on {}", addr);
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    axum::serve(listener, app).await?;
     
-    // NOTE: This runs the actual API logic...
     Ok(())
 }
