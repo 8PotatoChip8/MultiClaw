@@ -1,4 +1,14 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/v1';
+function getApiUrl() {
+    // If env var is set and non-empty, use it
+    if (process.env.NEXT_PUBLIC_API_URL) return process.env.NEXT_PUBLIC_API_URL;
+    // Otherwise derive from the current browser location
+    if (typeof window !== 'undefined') {
+        return `${window.location.protocol}//${window.location.hostname}:8080/v1`;
+    }
+    return 'http://localhost:8080/v1';
+}
+
+const API_URL = typeof window !== 'undefined' ? getApiUrl() : 'http://localhost:8080/v1';
 
 function getHeaders() {
     const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';

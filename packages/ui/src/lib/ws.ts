@@ -1,7 +1,16 @@
 'use client';
 import { useState, useEffect, useCallback } from 'react';
 
-const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8080/v1/events';
+function getWsUrl() {
+    if (process.env.NEXT_PUBLIC_WS_URL) return process.env.NEXT_PUBLIC_WS_URL;
+    if (typeof window !== 'undefined') {
+        const wsProto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+        return `${wsProto}//${window.location.hostname}:8080/v1/events`;
+    }
+    return 'ws://localhost:8080/v1/events';
+}
+
+const WS_URL = typeof window !== 'undefined' ? getWsUrl() : 'ws://localhost:8080/v1/events';
 
 export function useMultiClawEvents() {
     const [lastEvent, setLastEvent] = useState<any>(null);

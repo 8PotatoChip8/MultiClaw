@@ -19,6 +19,10 @@ if [[ "$OS_VERSION" != "24.04" ]]; then
   echo "WARNING: MultiClaw targets Ubuntu 24.04. You have $OS_VERSION. Proceeding at your own risk."
 fi
 
+# ── Determine the host IP early ──
+HOST_IP=$(hostname -I | awk '{print $1}')
+log "Detected host IP: $HOST_IP"
+
 log "Installing dependencies (incus, qemu-kvm, docker, curl, jq, git)..."
 apt-get update
 apt-get install -y apt-transport-https ca-certificates curl software-properties-common jq git qemu-kvm 
@@ -42,18 +46,18 @@ log "Ollama Login (required for cloud models)..."
 echo ""
 echo "=============================================="
 echo "  You need to log in to Ollama to use cloud"
-echo "  models. A browser will open for login."
+echo "  models. Running 'ollama login' now..."
 echo "=============================================="
 echo ""
-# Run ollama login as the real user (not root) if possible
-REAL_USER=${SUDO_USER:-$(whoami)}
-if [[ "$REAL_USER" != "root" ]]; then
-  su - "$REAL_USER" -c "ollama login" || echo "Ollama login skipped or failed. You can run 'ollama login' later."
-else
-  ollama login || echo "Ollama login skipped or failed. You can run 'ollama login' later."
-fi
+
+# Run ollama login directly — it will print a URL if no browser is available.
+# We need to preserve stdin for the read below, so don't pipe through su.
+ollama login </dev/tty || echo "Ollama login returned non-zero. You can retry later with: ollama login"
+
 echo ""
-read -p "Press ENTER once you have completed Ollama login to continue..."
+echo "If you completed the login in your browser, press ENTER to continue."
+echo "If you want to skip login for now, just press ENTER."
+read -r -p "Press ENTER to continue... " </dev/tty
 
 # ── Open firewall ports ──
 log "Configuring firewall (allowing ports 3000, 8080)..."
@@ -94,6 +98,7 @@ MASTER_KEY_PATH=/var/lib/multiclaw/master.key
 PORT=8080
 UI_PORT=3000
 PROXY_PORT=11436
+HOST_IP=${HOST_IP}
 EOF
 
 log "Starting compose stack (if active repo)..."
@@ -116,16 +121,16 @@ MAIN_AGENT_NAME=${MAIN_AGENT_NAME:-"MainAgent"}
 DEFAULT_MODEL=${DEFAULT_MODEL:-"glm-5:cloud"}
 STRICT_MODE=${STRICT_MODE:-"false"}
 
-read -p "Holding Name [$HOLDING_NAME]: " USER_HOLDING
+read -r -p "Holding Name [$HOLDING_NAME]: " USER_HOLDING </dev/tty
 if [[ -n "$USER_HOLDING" ]]; then HOLDING_NAME="$USER_HOLDING"; fi
 
-read -p "Main Agent Name [$MAIN_AGENT_NAME]: " USER_AGENT
+read -r -p "Main Agent Name [$MAIN_AGENT_NAME]: " USER_AGENT </dev/tty
 if [[ -n "$USER_AGENT" ]]; then MAIN_AGENT_NAME="$USER_AGENT"; fi
 
-read -p "Default Model [$DEFAULT_MODEL]: " USER_MODEL
+read -r -p "Default Model [$DEFAULT_MODEL]: " USER_MODEL </dev/tty
 if [[ -n "$USER_MODEL" ]]; then DEFAULT_MODEL="$USER_MODEL"; fi
 
-read -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT
+read -r -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT </dev/tty
 if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
 # ── Pull the chosen model ──
@@ -144,9 +149,6 @@ else
   cd /opt/multiclaw && docker compose -f infra/docker/docker-compose.yml logs multiclawd --tail 200
   sleep 1
 fi
-
-# Get the machine's IP for remote access
-HOST_IP=$(hostname -I | awk '{print $1}')
 
 echo ""
 log "=============================================="
