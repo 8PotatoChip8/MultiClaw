@@ -111,7 +111,7 @@ if curl -f -X POST http://127.0.0.1:8080/v1/install/init \
   log "Init call successful."
 else
   log "Init call failed! Printing backend logs for diagnosis:"
-  cd /opt/multiclaw && docker compose logs multiclawd --tail 200
+  cd /opt/multiclaw && docker compose -f infra/docker/docker-compose.yml logs multiclawd --tail 200
   sleep 1
 fi
 
