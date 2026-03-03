@@ -39,9 +39,8 @@ async fn handle_init() -> impl IntoResponse {
 }
 
 async fn list_companies(State(state): State<AppState>) -> impl IntoResponse {
-    let result = sqlx::query_as!(
-        Company,
-        "SELECT id, holding_id, name, type as \"r#type!\", description, tags, status, created_at FROM companies"
+    let result = sqlx::query_as::<_, Company>(
+        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies"
     )
     .fetch_all(&state.db)
     .await;
@@ -63,19 +62,18 @@ async fn create_company(
     // In a real system, holding_id comes from auth context. Using a dummy for now.
     let holding_id = Uuid::from_u128(0); 
     
-    let result = sqlx::query_as!(
-        Company,
+    let result = sqlx::query_as::<_, Company>(
         r#"
         INSERT INTO companies (id, holding_id, name, type, description, status)
         VALUES ($1, $2, $3, $4, $5, 'ACTIVE')
-        RETURNING id, holding_id, name, type as "r#type!", description, tags, status, created_at
-        "#,
-        id,
-        holding_id,
-        payload.name,
-        payload.r#type,
-        payload.description
+        RETURNING id, holding_id, name, type, description, tags, status, created_at
+        "#
     )
+    .bind(id)
+    .bind(holding_id)
+    .bind(payload.name)
+    .bind(payload.r#type)
+    .bind(payload.description)
     .fetch_one(&state.db)
     .await;
 
@@ -97,11 +95,10 @@ async fn get_org_tree(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
     };
 
-    let result = sqlx::query_as!(
-        Agent,
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE company_id = $1",
-        company_id
+    let result = sqlx::query_as::<_, Agent>(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE company_id = $1"
     )
+    .bind(company_id)
     .fetch_all(&state.db)
     .await;
 
@@ -126,11 +123,10 @@ async fn get_agent(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
     };
 
-    let result = sqlx::query_as!(
-        Agent,
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1",
-        agent_id
+    let result = sqlx::query_as::<_, Agent>(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1"
     )
+    .bind(agent_id)
     .fetch_optional(&state.db)
     .await;
 
@@ -159,9 +155,8 @@ async fn hire_worker(Path(_id): Path<String>) -> impl IntoResponse {
 }
 
 async fn get_threads(State(state): State<AppState>) -> impl IntoResponse {
-    let result = sqlx::query_as!(
-        Thread,
-        "SELECT id, type as \"r#type!\", title, created_by_user_id, created_at FROM threads"
+    let result = sqlx::query_as::<_, Thread>(
+        "SELECT id, type, title, created_by_user_id, created_at FROM threads"
     )
     .fetch_all(&state.db)
     .await;
@@ -184,11 +179,10 @@ async fn get_messages(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
     };
 
-    let result = sqlx::query_as!(
-        Message,
-        "SELECT id, thread_id, sender_type, sender_id, content, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC",
-        thread_id
+    let result = sqlx::query_as::<_, Message>(
+        "SELECT id, thread_id, sender_type, sender_id, content, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC"
     )
+    .bind(thread_id)
     .fetch_all(&state.db)
     .await;
 
@@ -213,19 +207,18 @@ async fn send_message(
 
     let message_id = Uuid::new_v4();
 
-    let result = sqlx::query_as!(
-        Message,
+    let result = sqlx::query_as::<_, Message>(
         r#"
         INSERT INTO messages (id, thread_id, sender_type, sender_id, content) 
         VALUES ($1, $2, $3, $4, $5) 
         RETURNING id, thread_id, sender_type, sender_id, content, created_at
-        "#,
-        message_id,
-        thread_id,
-        payload.sender_type,
-        payload.sender_id,
-        payload.content
+        "#
     )
+    .bind(message_id)
+    .bind(thread_id)
+    .bind(payload.sender_type)
+    .bind(payload.sender_id)
+    .bind(payload.content)
     .fetch_one(&state.db)
     .await;
 
