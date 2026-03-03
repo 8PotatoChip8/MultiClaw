@@ -37,6 +37,32 @@ if ! command -v ollama &> /dev/null; then
 fi
 systemctl enable --now ollama
 
+# ── Ollama Login for cloud models ──
+log "Ollama Login (required for cloud models)..."
+echo ""
+echo "=============================================="
+echo "  You need to log in to Ollama to use cloud"
+echo "  models. A browser will open for login."
+echo "=============================================="
+echo ""
+# Run ollama login as the real user (not root) if possible
+REAL_USER=${SUDO_USER:-$(whoami)}
+if [[ "$REAL_USER" != "root" ]]; then
+  su - "$REAL_USER" -c "ollama login" || echo "Ollama login skipped or failed. You can run 'ollama login' later."
+else
+  ollama login || echo "Ollama login skipped or failed. You can run 'ollama login' later."
+fi
+echo ""
+read -p "Press ENTER once you have completed Ollama login to continue..."
+
+# ── Open firewall ports ──
+log "Configuring firewall (allowing ports 3000, 8080)..."
+if command -v ufw &> /dev/null; then
+  ufw allow 3000/tcp comment "MultiClaw Dashboard" || true
+  ufw allow 8080/tcp comment "MultiClaw API" || true
+  ufw allow 11434/tcp comment "Ollama API" || true
+fi
+
 log "Generating Master Key..."
 mkdir -p /var/lib/multiclaw
 mkdir -p /opt/multiclaw
@@ -102,6 +128,10 @@ if [[ -n "$USER_MODEL" ]]; then DEFAULT_MODEL="$USER_MODEL"; fi
 read -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT
 if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
+# ── Pull the chosen model ──
+log "Pulling model '$DEFAULT_MODEL' via Ollama..."
+ollama pull "$DEFAULT_MODEL" || echo "WARNING: Failed to pull model '$DEFAULT_MODEL'. You can pull it manually with: ollama pull $DEFAULT_MODEL"
+
 # Call Init
 log "Calling /v1/install/init"
 if curl -f -X POST http://127.0.0.1:8080/v1/install/init \
@@ -115,6 +145,15 @@ else
   sleep 1
 fi
 
-log "Multiclaw Dashboard URL: http://localhost:3000"
-log "Admin Token location: /var/lib/multiclaw/admin.token"
-log "Install Complete!"
+# Get the machine's IP for remote access
+HOST_IP=$(hostname -I | awk '{print $1}')
+
+echo ""
+log "=============================================="
+log "  MultiClaw Install Complete!"
+log "=============================================="
+log "Dashboard URL:  http://${HOST_IP}:3000"
+log "API URL:        http://${HOST_IP}:8080/v1"
+log "Admin Token:    /var/lib/multiclaw/admin.token"
+log "Default Model:  $DEFAULT_MODEL"
+log "=============================================="
