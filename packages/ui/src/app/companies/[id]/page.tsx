@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
-import { Company, Agent } from '../../lib/types';
+import { api } from '../../../lib/api';
+import { Company, Agent } from '../../../lib/types';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Users2, Plus } from 'lucide-react';
