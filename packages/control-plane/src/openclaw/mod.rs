@@ -225,7 +225,7 @@ impl OpenClawManager {
             .header("Authorization", format!("Bearer {}", instance.gateway_token))
             .header("Content-Type", "application/json")
             .json(&body)
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(600))
             .send()
             .await;
 

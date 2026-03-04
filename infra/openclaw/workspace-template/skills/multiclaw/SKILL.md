@@ -21,22 +21,42 @@ All requests should include `Content-Type: application/json`.
 
 ### List Agents
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/agents | jq .
+curl -s {{MULTICLAW_API_URL}}/v1/agents
 ```
 
 ### Get Your Own Info
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}} | jq .
+curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}
 ```
 
 ### List Companies
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies | jq .
+curl -s {{MULTICLAW_API_URL}}/v1/companies
 ```
+
+### Create a Company
+
+Create a new company under the holding. **type must be either `INTERNAL` or `EXTERNAL` (uppercase).**
+
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "COMPANY_NAME", "type": "INTERNAL", "description": "DESCRIPTION"}'
+```
+
+- `INTERNAL` = wholly-owned subsidiary
+- `EXTERNAL` = external partner or client company
 
 ### View Company Org Tree
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree | jq .
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
+```
+
+### Hire a CEO for a Company (MAIN only)
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/hire-ceo \
+  -H 'Content-Type: application/json' \
+  -d '{"name": "CEO_NAME", "specialty": "DESCRIPTION"}'
 ```
 
 ### Hire a Manager (CEO or MAIN only)
@@ -55,12 +75,12 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
 
 ### Provision a VM Workstation
 ```bash
-curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/provision | jq .
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/provision
 ```
 
 ### View Financial Ledger
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger | jq .
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
 ```
 
 ### Submit a Request to Superior
@@ -76,4 +96,5 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
 2. Your agent ID is: `{{AGENT_ID}}`
 3. Always check the response status. A 2xx status means success.
 4. When hiring, the new agent automatically gets their own OpenClaw instance.
-5. Use `jq` to parse JSON responses for cleaner output.
+5. Company type MUST be uppercase `INTERNAL` or `EXTERNAL` — any other value will be rejected.
+6. All API responses are JSON. Use `python3 -m json.tool` to pretty-print if needed.
