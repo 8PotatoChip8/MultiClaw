@@ -44,11 +44,13 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
+        .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
         // Threads & Messages
         .route("/v1/threads", get(get_threads).post(create_thread))
         .route("/v1/threads/:id", get(get_thread))
         .route("/v1/threads/:id/messages", get(get_messages).post(send_message))
-        .route("/v1/threads/:id/participants", get(get_thread_participants))
+        .route("/v1/threads/:id/participants", get(get_thread_participants).post(add_thread_participant))
+        .route("/v1/threads/:id/participants/:member_id", delete(remove_thread_participant))
         // Requests & Approvals
         .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/:id/approve", post(approve_request))
@@ -782,95 +784,129 @@ async fn send_message(
                     tokio::spawn(async move {
                         tracing::info!("MainAgent processing message: '{}'", &user_text[..user_text.len().min(100)]);
 
-                        // Find which agent is a member of this thread (for DMs)
-                        let thread_agent_id: Option<Uuid> = sqlx::query_scalar(
-                            "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT' LIMIT 1"
+                        // Check thread type
+                        let thread_type: String = sqlx::query_scalar(
+                            "SELECT type FROM threads WHERE id = $1"
                         )
                         .bind(tid)
                         .fetch_optional(&state_clone.db)
                         .await
                         .ok()
-                        .flatten();
+                        .flatten()
+                        .unwrap_or_else(|| "DM".to_string());
 
-                        // Fall back to MainAgent if no specific agent is on this thread
-                        let responding_agent_id: Uuid = match thread_agent_id {
-                            Some(id) => id,
-                            None => {
-                                sqlx::query_scalar(
+                        // Get agent members of this thread
+                        let agent_ids: Vec<Uuid> = sqlx::query_scalar(
+                            "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
+                        )
+                        .bind(tid)
+                        .fetch_all(&state_clone.db)
+                        .await
+                        .unwrap_or_default();
+
+                        // Determine which agents should respond
+                        let responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
+                            // Check for @-mentions in the message (format: @agent-name or @handle)
+                            let mut mentioned: Vec<Uuid> = Vec::new();
+                            for aid in &agent_ids {
+                                let agent_info: Option<(String, Option<String>)> = sqlx::query_as(
+                                    "SELECT name, handle FROM agents WHERE id = $1"
+                                ).bind(aid).fetch_optional(&state_clone.db).await.ok().flatten();
+                                if let Some((name, handle)) = agent_info {
+                                    let lower_text = user_text.to_lowercase();
+                                    if lower_text.contains(&format!("@{}", name.to_lowercase().replace(' ', "-")))
+                                        || handle.as_ref().map(|h| lower_text.contains(&h.to_lowercase())).unwrap_or(false)
+                                        || lower_text.contains(&name.to_lowercase())
+                                    {
+                                        mentioned.push(*aid);
+                                    }
+                                }
+                            }
+                            if mentioned.is_empty() {
+                                // No specific mention — route to ALL agents in the group (max 3)
+                                agent_ids.iter().take(3).cloned().collect()
+                            } else {
+                                // Route only to mentioned agents (max 3)
+                                mentioned.into_iter().take(3).collect()
+                            }
+                        } else {
+                            // DM: single agent
+                            if let Some(aid) = agent_ids.first() {
+                                vec![*aid]
+                            } else {
+                                // Fallback to MainAgent
+                                let main_id: Option<Uuid> = sqlx::query_scalar(
                                     "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
                                 )
                                 .fetch_optional(&state_clone.db)
                                 .await
                                 .ok()
-                                .flatten()
-                                .unwrap_or(Uuid::new_v4())
+                                .flatten();
+                                main_id.into_iter().collect()
                             }
                         };
 
-                        // OpenClaw is the agent's brain — no fallback to raw LLM
-                        let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(responding_agent_id, &user_text).await {
-                            Ok(response) => {
-                                tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
-                                Ok(response)
-                            }
-                            Err(e) => {
-                                tracing::warn!("OpenClaw unavailable for agent {}: {}", responding_agent_id, e);
-                                // Agent's brain is offline — let the user know
-                                let agent_name: String = sqlx::query_scalar(
-                                    "SELECT name FROM agents WHERE id = $1"
-                                )
-                                .bind(responding_agent_id)
-                                .fetch_optional(&state_clone.db)
-                                .await
-                                .ok()
-                                .flatten()
-                                .unwrap_or_else(|| "Agent".to_string());
-
-                                Ok(format!(
-                                    "⚠️ {} is currently unavailable — their OpenClaw runtime is not running. \
-                                     Please wait for their instance to come online before sending messages.",
-                                    agent_name
-                                ))
-                            }
-                        };
-
-                        match result {
-                            Ok(response) => {
-                                let agent_id = responding_agent_id;
-
-                                // Insert agent response as a new message
-                                let resp_id = Uuid::new_v4();
-                                let content = json!({"text": response});
-                                if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4) \
-                                     RETURNING id, thread_id, sender_type, sender_id, content, created_at"
-                                )
-                                .bind(resp_id)
-                                .bind(tid)
-                                .bind(agent_id)
-                                .bind(&content)
-                                .fetch_one(&state_clone.db)
-                                .await {
-                                    let _ = state_clone.tx.send(
-                                        json!({"type":"new_message","message": agent_msg}).to_string()
-                                    );
-                                    tracing::info!("Agent {} responded on thread {}", agent_id, tid);
+                        // Send to each responding agent (sequentially to avoid token waste)
+                        for responding_agent_id in &responding_agents {
+                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(*responding_agent_id, &user_text).await {
+                                Ok(response) => {
+                                    tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
+                                    Ok(response)
                                 }
-                            }
-                            Err(e) => {
-                                tracing::error!("Agent error: {}", e);
-                                // Insert error message so user sees something
-                                let resp_id = Uuid::new_v4();
-                                let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
-                                let _ = sqlx::query(
-                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4)"
-                                )
-                                .bind(resp_id)
-                                .bind(tid)
-                                .bind(responding_agent_id)
-                                .bind(&content)
-                                .execute(&state_clone.db)
-                                .await;
+                                Err(e) => {
+                                    tracing::warn!("OpenClaw unavailable for agent {}: {}", responding_agent_id, e);
+                                    let agent_name: String = sqlx::query_scalar(
+                                        "SELECT name FROM agents WHERE id = $1"
+                                    )
+                                    .bind(responding_agent_id)
+                                    .fetch_optional(&state_clone.db)
+                                    .await
+                                    .ok()
+                                    .flatten()
+                                    .unwrap_or_else(|| "Agent".to_string());
+
+                                    Ok(format!(
+                                        "⚠️ {} is currently unavailable — their OpenClaw runtime is not running. \
+                                         Please wait for their instance to come online before sending messages.",
+                                        agent_name
+                                    ))
+                                }
+                            };
+
+                            match result {
+                                Ok(response) => {
+                                    let resp_id = Uuid::new_v4();
+                                    let content = json!({"text": response});
+                                    if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4) \
+                                         RETURNING id, thread_id, sender_type, sender_id, content, created_at"
+                                    )
+                                    .bind(resp_id)
+                                    .bind(tid)
+                                    .bind(responding_agent_id)
+                                    .bind(&content)
+                                    .fetch_one(&state_clone.db)
+                                    .await {
+                                        let _ = state_clone.tx.send(
+                                            json!({"type":"new_message","message": agent_msg}).to_string()
+                                        );
+                                        tracing::info!("Agent {} responded on thread {}", responding_agent_id, tid);
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!("Agent error: {}", e);
+                                    let resp_id = Uuid::new_v4();
+                                    let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
+                                    let _ = sqlx::query(
+                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4)"
+                                    )
+                                    .bind(resp_id)
+                                    .bind(tid)
+                                    .bind(responding_agent_id)
+                                    .bind(&content)
+                                    .execute(&state_clone.db)
+                                    .await;
+                                }
                             }
                         }
                     });
@@ -1342,4 +1378,103 @@ async fn delete_agent_memory(State(state): State<AppState>, Path((id, mid)): Pat
     let _ = sqlx::query("DELETE FROM agent_memories WHERE id = $1 AND agent_id = $2")
         .bind(mem_id).bind(agent_id).execute(&state.db).await;
     (StatusCode::OK, Json(json!({"status":"deleted"})))
+}
+
+/// Read OpenClaw's internal files (sessions, agent config) from the host filesystem.
+async fn get_openclaw_files(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    let data_root = std::env::var("MULTICLAW_OPENCLAW_DATA").unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
+    let agent_dir = std::path::Path::new(&data_root).join(agent_id.to_string());
+    let config_dir = agent_dir.join("config");
+
+    let mut files: Vec<serde_json::Value> = Vec::new();
+
+    // Read session files
+    let sessions_dir = config_dir.join("agents").join("main").join("sessions");
+    if let Ok(mut entries) = tokio::fs::read_dir(&sessions_dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let path = entry.path();
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                let meta = entry.metadata().await.ok();
+                let size = meta.as_ref().map(|m| m.len()).unwrap_or(0);
+                // Read last 50 lines max for session files
+                let content = if size < 100_000 {
+                    tokio::fs::read_to_string(&path).await.ok()
+                } else {
+                    Some(format!("[File too large: {} bytes — showing is disabled]", size))
+                };
+                files.push(json!({
+                    "name": name,
+                    "path": format!("sessions/{}", name),
+                    "type": "session",
+                    "size": size,
+                    "content": content,
+                }));
+            }
+        }
+    }
+
+    // Read agent state files
+    let agents_dir = config_dir.join("agents").join("main");
+    for filename in &["state.json", "memory.json", "context.json"] {
+        let fpath = agents_dir.join(filename);
+        if fpath.exists() {
+            let content = tokio::fs::read_to_string(&fpath).await.ok();
+            let size = tokio::fs::metadata(&fpath).await.ok().map(|m| m.len()).unwrap_or(0);
+            files.push(json!({
+                "name": filename,
+                "path": format!("agents/main/{}", filename),
+                "type": "state",
+                "size": size,
+                "content": content,
+            }));
+        }
+    }
+
+    // Read the main config
+    let config_path = config_dir.join("openclaw.json");
+    if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path).await.ok();
+        let size = tokio::fs::metadata(&config_path).await.ok().map(|m| m.len()).unwrap_or(0);
+        files.push(json!({
+            "name": "openclaw.json",
+            "path": "openclaw.json",
+            "type": "config",
+            "size": size,
+            "content": content,
+        }));
+    }
+
+    (StatusCode::OK, Json(json!(files)))
+}
+
+/// Add a participant to a thread.
+async fn add_thread_participant(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<Value>) -> impl IntoResponse {
+    let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid thread ID"}))) };
+    let member_id = match p.get("member_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok()) {
+        Some(u) => u, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"member_id required"})))
+    };
+    let member_type = p.get("member_type").and_then(|v| v.as_str()).unwrap_or("AGENT");
+
+    match sqlx::query(
+        "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING"
+    ).bind(thread_id).bind(member_type).bind(member_id).execute(&state.db).await {
+        Ok(_) => {
+            let _ = state.tx.send(json!({"type":"participant_added","thread_id": thread_id, "member_id": member_id}).to_string());
+            (StatusCode::CREATED, Json(json!({"status":"added", "member_id": member_id})))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+/// Remove a participant from a thread.
+async fn remove_thread_participant(State(state): State<AppState>, Path((id, member_id)): Path<(String, String)>) -> impl IntoResponse {
+    let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid thread ID"}))) };
+    let mid = match Uuid::parse_str(&member_id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid member ID"}))) };
+
+    let _ = sqlx::query("DELETE FROM thread_members WHERE thread_id = $1 AND member_id = $2")
+        .bind(thread_id).bind(mid).execute(&state.db).await;
+    let _ = state.tx.send(json!({"type":"participant_removed","thread_id": thread_id, "member_id": mid}).to_string());
+    (StatusCode::OK, Json(json!({"status":"removed"})))
 }

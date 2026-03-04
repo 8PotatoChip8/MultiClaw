@@ -17,6 +17,14 @@ interface Memory {
     updated_at: string;
 }
 
+interface OpenClawFile {
+    name: string;
+    path: string;
+    type: string;
+    size: number;
+    content: string | null;
+}
+
 type TabType = 'details' | 'memory';
 
 export default function AgentDetailPage() {
@@ -28,13 +36,18 @@ export default function AgentDetailPage() {
     const [hireSpecialty, setHireSpecialty] = useState('');
     const [tab, setTab] = useState<TabType>('details');
     const [memories, setMemories] = useState<Memory[]>([]);
+    const [ocFiles, setOcFiles] = useState<OpenClawFile[]>([]);
+    const [expandedFile, setExpandedFile] = useState<string | null>(null);
     const [showAddMemory, setShowAddMemory] = useState(false);
     const [newMem, setNewMem] = useState({ category: 'NOTE', key: '', content: '', importance: 5 });
 
     const load = () => { api.getAgent(id).then(d => { if (d && !d.error) setAgent(d); }); };
     useEffect(() => { if (id) load(); }, [id]);
 
-    const loadMemories = () => { api.getAgentMemories(id).then(d => setMemories(Array.isArray(d) ? d : [])); };
+    const loadMemories = () => {
+        api.getAgentMemories(id).then(d => setMemories(Array.isArray(d) ? d : []));
+        api.getOpenClawFiles(id).then(d => setOcFiles(Array.isArray(d) ? d : []));
+    };
     useEffect(() => { if (id && tab === 'memory') loadMemories(); }, [id, tab]);
 
     const handleHire = async () => {
@@ -215,6 +228,51 @@ export default function AgentDetailPage() {
                                 ))}
                             </div>
                         ))
+                    )}
+
+                    {/* OpenClaw Runtime Files */}
+                    {ocFiles.length > 0 && (
+                        <div style={{ marginTop: '20px' }}>
+                            <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <Shield size={16} style={{ color: 'var(--primary)' }} />
+                                OpenClaw Runtime Files ({ocFiles.length})
+                            </h3>
+                            {ocFiles.map(f => (
+                                <div key={f.path} className="panel" style={{ marginBottom: '8px', padding: '0' }}>
+                                    <div
+                                        onClick={() => setExpandedFile(expandedFile === f.path ? null : f.path)}
+                                        style={{
+                                            padding: '10px 14px', cursor: 'pointer',
+                                            display: 'flex', justifyContent: 'space-between', alignItems: 'center',
+                                        }}
+                                    >
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span style={{
+                                                fontSize: '10px', padding: '2px 8px', borderRadius: '10px',
+                                                background: f.type === 'session' ? 'var(--accent)' : f.type === 'state' ? 'var(--success)' : 'var(--primary)',
+                                                color: '#fff', fontWeight: 600, textTransform: 'uppercase',
+                                            }}>{f.type}</span>
+                                            <span style={{ fontSize: '13px', fontWeight: 500, fontFamily: 'monospace' }}>{f.name}</span>
+                                        </div>
+                                        <span style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                                            {f.size < 1024 ? `${f.size} B` : `${(f.size / 1024).toFixed(1)} KB`}
+                                        </span>
+                                    </div>
+                                    {expandedFile === f.path && f.content && (
+                                        <div style={{
+                                            padding: '12px 14px', borderTop: '1px solid var(--border)',
+                                            background: 'rgba(0,0,0,0.3)', maxHeight: '400px', overflowY: 'auto',
+                                        }}>
+                                            <pre style={{
+                                                fontSize: '11px', lineHeight: '1.5', fontFamily: 'monospace',
+                                                whiteSpace: 'pre-wrap', wordBreak: 'break-word', margin: 0,
+                                                color: 'var(--text-muted)',
+                                            }}>{f.content}</pre>
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                        </div>
                     )}
                 </div>
             )}

@@ -103,4 +103,13 @@ export const api = {
         request(`/agents/${agentId}/memories`, { method: 'POST', body: JSON.stringify(data) }),
     deleteAgentMemory: (agentId: string, memoryId: string) =>
         request(`/agents/${agentId}/memories/${memoryId}`, { method: 'DELETE' }),
+
+    // OpenClaw Files
+    getOpenClawFiles: (agentId: string) => request(`/agents/${agentId}/openclaw-files`),
+
+    // Thread Participants
+    addParticipant: (threadId: string, data: { member_id: string; member_type?: string }) =>
+        request(`/threads/${threadId}/participants`, { method: 'POST', body: JSON.stringify(data) }),
+    removeParticipant: (threadId: string, memberId: string) =>
+        request(`/threads/${threadId}/participants/${memberId}`, { method: 'DELETE' }),
 };
