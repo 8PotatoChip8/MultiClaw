@@ -112,6 +112,13 @@ impl OpenClawManager {
         // Render and write workspace files
         self.render_workspace(config, &workspace_dir).await?;
 
+        // Fix ownership: OpenClaw runs as 'node' (UID 1000) inside the container.
+        // The directories we just created are owned by root, so chown them.
+        let _ = tokio::process::Command::new("chown")
+            .args(["-R", "1000:1000", &agent_dir.display().to_string()])
+            .output()
+            .await;
+
         // Container name
         let container_name = format!("multiclaw-openclaw-{}", config.agent_name
             .to_lowercase()
