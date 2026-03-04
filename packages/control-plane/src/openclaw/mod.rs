@@ -216,7 +216,6 @@ impl OpenClawManager {
                 "exec", &instance.container_name,
                 "openclaw", "agent",
                 "--message", message,
-                "--no-stream",
             ])
             .output()
             .await?;
