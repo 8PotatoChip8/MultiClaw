@@ -24,11 +24,30 @@ export default function InfrastructurePage() {
 
     const copyLogs = (containerId: string) => {
         const logs = expandedLogs[containerId];
-        if (logs) {
+        if (!logs) return;
+
+        // Try modern clipboard API first (works on HTTPS / localhost)
+        if (navigator.clipboard && window.isSecureContext) {
             navigator.clipboard.writeText(logs).then(() => {
                 setCopiedId(containerId);
                 setTimeout(() => setCopiedId(null), 2000);
             });
+        } else {
+            // Fallback for HTTP: hidden textarea + execCommand
+            const textarea = document.createElement('textarea');
+            textarea.value = logs;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try {
+                document.execCommand('copy');
+                setCopiedId(containerId);
+                setTimeout(() => setCopiedId(null), 2000);
+            } catch (e) {
+                console.error('Copy failed:', e);
+            }
+            document.body.removeChild(textarea);
         }
     };
 

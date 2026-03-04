@@ -15,6 +15,7 @@ pub mod ledger;
 pub mod observability;
 
 use agents::main_agent::MainAgent;
+use agents::sub_agent::SubAgent;
 use provisioning::incus::IncusProvider;
 
 #[tokio::main]
@@ -63,12 +64,15 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let sub_agent = SubAgent::new(cfg.ollama_url.clone());
+
     let (tx, _rx) = tokio::sync::broadcast::channel(256);
     let app_state = api::ws::AppState { 
         db: pool,
         tx: std::sync::Arc::new(tx),
         config: cfg.clone(),
         main_agent: std::sync::Arc::new(main_agent),
+        sub_agent: std::sync::Arc::new(sub_agent),
         vm_provider,
     };
     let app = api::routes::app_router(app_state);

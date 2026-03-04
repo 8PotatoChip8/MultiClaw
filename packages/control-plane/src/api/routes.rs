@@ -39,6 +39,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/start", post(vm_start))
         .route("/v1/agents/:id/vm/stop", post(vm_stop))
         .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
+        .route("/v1/agents/:id/vm/provision", post(vm_provision))
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
@@ -152,9 +153,8 @@ async fn handle_init(
     .bind(format!("You are {}, the Main Agent managing this holding company.", agent_name))
     .bind(main_policy_id)
     .execute(&state.db).await;
-
-    // Provision VM for the Main Agent (runs OpenClaw runtime)
-    provision_agent_vm(state.clone(), agent_id, &agent_name, &model, "main_agent_policy").await;
+    // MainAgent runs in-process — no VM needed at init time.
+    // VMs are provisioned on-demand when agents need a workstation.
 
     tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
@@ -646,6 +646,34 @@ async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>) -> im
     }
 }
 
+/// Provision a VM on-demand for an agent (their "workstation")
+async fn vm_provision(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Check if agent already has a VM
+    let existing_vm: Option<Uuid> = sqlx::query_scalar(
+        "SELECT vm_id FROM agents WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    if existing_vm.is_some() {
+        return (StatusCode::CONFLICT, Json(json!({"error": "Agent already has a VM assigned", "vm_id": existing_vm})));
+    }
+
+    // Get agent info for provisioning
+    let agent_info: Option<(String, String, Option<String>)> = sqlx::query_as(
+        "SELECT name, effective_model, (SELECT name FROM tool_policies WHERE id = a.tool_policy_id) FROM agents a WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    match agent_info {
+        Some((name, model, policy_name)) => {
+            let policy = policy_name.unwrap_or_else(|| "worker_policy".into());
+            provision_agent_vm(state.clone(), uid, &name, &model, &policy).await;
+            (StatusCode::ACCEPTED, Json(json!({"status": "provisioning", "agent_id": uid, "message": format!("VM provisioning started for {}", name)})))
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found"})))
+    }
+}
+
 async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let _ = sqlx::query("UPDATE agents SET status = 'QUARANTINED' WHERE id = $1").bind(uid).execute(&state.db).await;
@@ -744,7 +772,25 @@ async fn send_message(
                             }
                         };
 
-                        match state_clone.main_agent.handle_message(&state_clone.db, &user_text).await {
+                        // Check if this is the MainAgent or a sub-agent
+                        let agent_role: Option<String> = sqlx::query_scalar(
+                            "SELECT role FROM agents WHERE id = $1"
+                        )
+                        .bind(responding_agent_id)
+                        .fetch_optional(&state_clone.db)
+                        .await
+                        .ok()
+                        .flatten();
+
+                        let is_main = agent_role.as_deref() == Some("MAIN");
+
+                        let result = if is_main {
+                            state_clone.main_agent.handle_message(&state_clone.db, &user_text).await
+                        } else {
+                            state_clone.sub_agent.handle_message(&state_clone.db, responding_agent_id, &user_text).await
+                        };
+
+                        match result {
                             Ok(response) => {
                                 let agent_id = responding_agent_id;
 
@@ -764,11 +810,11 @@ async fn send_message(
                                     let _ = state_clone.tx.send(
                                         json!({"type":"new_message","message": agent_msg}).to_string()
                                     );
-                                    tracing::info!("MainAgent responded on thread {}", tid);
+                                    tracing::info!("Agent {} responded on thread {}", agent_id, tid);
                                 }
                             }
                             Err(e) => {
-                                tracing::error!("MainAgent error: {}", e);
+                                tracing::error!("Agent error: {}", e);
                                 // Insert error message so user sees something
                                 let resp_id = Uuid::new_v4();
                                 let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
@@ -777,7 +823,7 @@ async fn send_message(
                                 )
                                 .bind(resp_id)
                                 .bind(tid)
-                                .bind(Uuid::new_v4())
+                                .bind(responding_agent_id)
                                 .bind(&content)
                                 .execute(&state_clone.db)
                                 .await;
