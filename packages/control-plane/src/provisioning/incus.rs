@@ -40,16 +40,28 @@ impl IncusProvider {
         let instances: Vec<Value> = serde_json::from_slice(&output.stdout).ok()?;
         let instance = instances.first()?;
         
-        let addrs = instance
+        let network = instance
             .get("state")?
             .get("network")?
-            .get("eth0")?
-            .get("addresses")?
-            .as_array()?;
-            
-        for addr in addrs {
-            if addr.get("family").and_then(|v| v.as_str()) == Some("inet") {
-                return addr.get("address").map(|v| v.as_str().unwrap().to_string());
+            .as_object()?;
+        
+        // Check all network interfaces (eth0, enp5s0, enp6s0, etc.)
+        for (_iface_name, iface) in network {
+            let addrs = iface.get("addresses")?.as_array()?;
+            for addr in addrs {
+                if addr.get("family").and_then(|v| v.as_str()) == Some("inet") {
+                    if let Some(scope) = addr.get("scope").and_then(|v| v.as_str()) {
+                        if scope == "global" {
+                            return addr.get("address").map(|v| v.as_str().unwrap().to_string());
+                        }
+                    }
+                    // Fallback: return any inet address that's not 127.x.x.x
+                    if let Some(ip) = addr.get("address").and_then(|v| v.as_str()) {
+                        if !ip.starts_with("127.") {
+                            return Some(ip.to_string());
+                        }
+                    }
+                }
             }
         }
         None

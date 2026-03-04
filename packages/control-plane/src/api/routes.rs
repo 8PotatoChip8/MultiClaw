@@ -529,10 +529,29 @@ async fn provision_agent_vm(
         match provider.provision(&vm_name, &resources, &cloud_init).await {
             Ok(details) => {
                 tracing::info!("VM '{}' provisioned for agent {}, ip={:?}", vm_name, agent_id, details.ip_address);
-                // Update agent record with vm_id
+                // Insert record into vms table
+                let vm_uuid = Uuid::new_v4();
+                let resources_json = serde_json::json!({
+                    "vcpus": resources.vcpus,
+                    "memory_mb": resources.memory_mb,
+                    "disk_gb": resources.disk_gb
+                });
+                let _ = sqlx::query(
+                    "INSERT INTO vms (id, provider, provider_ref, hostname, ip_address, resources, state) \
+                     VALUES ($1, 'incus', $2, $3, $4, $5, 'RUNNING')"
+                )
+                .bind(vm_uuid)
+                .bind(&vm_name)
+                .bind(&vm_name)
+                .bind(&details.ip_address)
+                .bind(&resources_json)
+                .execute(&db).await;
+
+                // Link agent to vm
                 let _ = sqlx::query("UPDATE agents SET vm_id = $1 WHERE id = $2")
-                    .bind(&vm_name).bind(agent_id)
+                    .bind(vm_uuid).bind(agent_id)
                     .execute(&db).await;
+
                 let _ = tx.send(json!({
                     "type": "vm_provisioned",
                     "agent_id": agent_id,
@@ -558,14 +577,15 @@ async fn provision_agent_vm(
 
 async fn vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    // Look up the agent's vm_id
-    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
-        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
-    match vm_id {
+    // Look up the VM's provider_ref (Incus name) via the vms table
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
         Some(ref name) => {
             if state.vm_provider.is_some() {
                 let _ = tokio::process::Command::new("incus").args(&["start", name]).output().await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_started","vm_id": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_started","vm_name": name})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
@@ -576,13 +596,14 @@ async fn vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl
 
 async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
-        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
-    match vm_id {
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
                 let _ = provider.stop(name).await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_stopped","vm_id": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_stopped","vm_name": name})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
@@ -593,16 +614,20 @@ async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl 
 
 async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
-        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
-    match vm_id {
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
                 let _ = provider.destroy(name).await;
-                // Re-provision will happen — for now just report destroyed
+                // Clean up: remove vms record and unlink from agent
+                let _ = sqlx::query(
+                    "DELETE FROM vms WHERE id = (SELECT vm_id FROM agents WHERE id = $1)"
+                ).bind(uid).execute(&state.db).await;
                 let _ = sqlx::query("UPDATE agents SET vm_id = NULL WHERE id = $1")
                     .bind(uid).execute(&state.db).await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_destroyed_for_rebuild","vm_id": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_destroyed_for_rebuild","vm_name": name})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
