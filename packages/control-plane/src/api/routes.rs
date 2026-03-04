@@ -153,8 +153,28 @@ async fn handle_init(
     .bind(format!("You are {}, the Main Agent managing this holding company.", agent_name))
     .bind(main_policy_id)
     .execute(&state.db).await;
-    // MainAgent runs in-process — no VM needed at init time.
-    // VMs are provisioned on-demand when agents need a workstation.
+
+    // Spawn OpenClaw instance for MainAgent in background
+    let openclaw = state.openclaw.clone();
+    let agent_name_clone = agent_name.clone();
+    let model_clone = model.clone();
+    let holding_name_clone = holding_name.clone();
+    tokio::spawn(async move {
+        let config = crate::openclaw::AgentConfig {
+            agent_id,
+            agent_name: agent_name_clone,
+            role: "MAIN".to_string(),
+            company_name: holding_name_clone.clone(),
+            holding_name: holding_name_clone,
+            specialty: Some("Holding Company Management".to_string()),
+            model: model_clone,
+            system_prompt: None,
+        };
+        match openclaw.spawn_instance(&config).await {
+            Ok(inst) => tracing::info!("OpenClaw instance spawned for MainAgent on port {}", inst.port),
+            Err(e) => tracing::error!("Failed to spawn OpenClaw instance for MainAgent: {}", e),
+        }
+    });
 
     tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
@@ -330,8 +350,25 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let _ = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
         .bind(company_id).bind(agent_id).execute(&state.db).await;
 
-    // Provision VM in background
-    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "ceo_policy").await;
+    // Spawn OpenClaw instance in background
+    let openclaw = state.openclaw.clone();
+    let name_clone = payload.name.clone();
+    let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Company".into());
+    let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
+    let model_clone = model.clone();
+    let specialty_clone = payload.specialty.clone();
+    tokio::spawn(async move {
+        let config = crate::openclaw::AgentConfig {
+            agent_id, agent_name: name_clone, role: "CEO".to_string(),
+            company_name, holding_name, specialty: specialty_clone,
+            model: model_clone, system_prompt: None,
+        };
+        if let Err(e) = openclaw.spawn_instance(&config).await {
+            tracing::error!("Failed to spawn OpenClaw for CEO {}: {}", config.agent_name, e);
+        }
+    });
 
     let _ = state.tx.send(json!({"type":"ceo_hired","agent_id": agent_id,"company_id": company_id}).to_string());
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
@@ -375,8 +412,25 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
-    // Provision VM in background
-    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "manager_policy").await;
+    // Spawn OpenClaw instance in background
+    let openclaw = state.openclaw.clone();
+    let name_clone = payload.name.clone();
+    let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Company".into());
+    let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
+    let model_clone = model.clone();
+    let specialty_clone = payload.specialty.clone();
+    tokio::spawn(async move {
+        let config = crate::openclaw::AgentConfig {
+            agent_id, agent_name: name_clone, role: "MANAGER".to_string(),
+            company_name, holding_name, specialty: specialty_clone,
+            model: model_clone, system_prompt: None,
+        };
+        if let Err(e) = openclaw.spawn_instance(&config).await {
+            tracing::error!("Failed to spawn OpenClaw for Manager {}: {}", config.agent_name, e);
+        }
+    });
 
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
@@ -419,8 +473,25 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
-    // Provision VM in background
-    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "worker_policy").await;
+    // Spawn OpenClaw instance in background
+    let openclaw = state.openclaw.clone();
+    let name_clone = payload.name.clone();
+    let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Company".into());
+    let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
+    let model_clone = model.clone();
+    let specialty_clone = payload.specialty.clone();
+    tokio::spawn(async move {
+        let config = crate::openclaw::AgentConfig {
+            agent_id, agent_name: name_clone, role: "WORKER".to_string(),
+            company_name, holding_name, specialty: specialty_clone,
+            model: model_clone, system_prompt: None,
+        };
+        if let Err(e) = openclaw.spawn_instance(&config).await {
+            tracing::error!("Failed to spawn OpenClaw for Worker {}: {}", config.agent_name, e);
+        }
+    });
 
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
@@ -772,22 +843,31 @@ async fn send_message(
                             }
                         };
 
-                        // Check if this is the MainAgent or a sub-agent
-                        let agent_role: Option<String> = sqlx::query_scalar(
-                            "SELECT role FROM agents WHERE id = $1"
-                        )
-                        .bind(responding_agent_id)
-                        .fetch_optional(&state_clone.db)
-                        .await
-                        .ok()
-                        .flatten();
+                        // Try OpenClaw first, fall back to built-in handlers
+                        let result = match state_clone.openclaw.send_message(responding_agent_id, &user_text).await {
+                            Ok(response) => {
+                                tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
+                                Ok(response)
+                            }
+                            Err(e) => {
+                                tracing::warn!("OpenClaw unavailable for agent {}, falling back: {}", responding_agent_id, e);
+                                // Check if this is the MainAgent or a sub-agent
+                                let agent_role: Option<String> = sqlx::query_scalar(
+                                    "SELECT role FROM agents WHERE id = $1"
+                                )
+                                .bind(responding_agent_id)
+                                .fetch_optional(&state_clone.db)
+                                .await
+                                .ok()
+                                .flatten();
 
-                        let is_main = agent_role.as_deref() == Some("MAIN");
-
-                        let result = if is_main {
-                            state_clone.main_agent.handle_message(&state_clone.db, &user_text).await
-                        } else {
-                            state_clone.sub_agent.handle_message(&state_clone.db, responding_agent_id, &user_text).await
+                                let is_main = agent_role.as_deref() == Some("MAIN");
+                                if is_main {
+                                    state_clone.main_agent.handle_message(&state_clone.db, &user_text).await
+                                } else {
+                                    state_clone.sub_agent.handle_message(&state_clone.db, responding_agent_id, &user_text).await
+                                }
+                            }
                         };
 
                         match result {

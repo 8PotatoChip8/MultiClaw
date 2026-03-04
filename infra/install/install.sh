@@ -109,6 +109,13 @@ PROXY_PORT=11436
 HOST_IP=${HOST_IP}
 EOF
 
+log "Pulling OpenClaw Docker image..."
+docker pull ghcr.io/openclaw/openclaw:latest || log "Warning: Could not pull OpenClaw image (will retry on first agent spawn)"
+
+log "Setting up OpenClaw data directories..."
+mkdir -p /opt/multiclaw/openclaw-data
+cp -r /opt/multiclaw/infra/openclaw/* /opt/multiclaw/openclaw-data/ 2>/dev/null || true
+
 log "Starting compose stack (if active repo)..."
 cd /opt/multiclaw
 docker compose -f infra/docker/docker-compose.yml up -d --build

@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use crate::config::Config;
 use crate::agents::main_agent::MainAgent;
 use crate::agents::sub_agent::SubAgent;
+use crate::openclaw::OpenClawManager;
 use crate::provisioning::incus::IncusProvider;
 
 #[derive(Clone)]
@@ -19,6 +20,7 @@ pub struct AppState {
     pub config: Config,
     pub main_agent: Arc<MainAgent>,
     pub sub_agent: Arc<SubAgent>,
+    pub openclaw: Arc<OpenClawManager>,
     pub vm_provider: Option<Arc<IncusProvider>>,
 }
 

@@ -5,6 +5,7 @@ mod crypto;
 mod db;
 mod api;
 pub mod agents;
+pub mod openclaw;
 
 pub mod auth;
 pub mod policy;
@@ -16,6 +17,7 @@ pub mod observability;
 
 use agents::main_agent::MainAgent;
 use agents::sub_agent::SubAgent;
+use openclaw::OpenClawManager;
 use provisioning::incus::IncusProvider;
 
 #[tokio::main]
@@ -66,15 +68,38 @@ async fn main() -> anyhow::Result<()> {
 
     let sub_agent = SubAgent::new(cfg.ollama_url.clone());
 
+    // Initialize OpenClaw manager
+    let data_dir = std::path::PathBuf::from(
+        std::env::var("MULTICLAW_OPENCLAW_DATA").unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into())
+    );
+    // Ollama URL from inside containers (host networking = same as host)
+    let ollama_url_for_containers = cfg.ollama_url.clone();
+    // MultiClaw API URL from inside containers (host networking = localhost:8080)
+    let multiclaw_api_url = format!("http://127.0.0.1:{}", cfg.port);
+    let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url);
+
     let (tx, _rx) = tokio::sync::broadcast::channel(256);
     let app_state = api::ws::AppState { 
-        db: pool,
+        db: pool.clone(),
         tx: std::sync::Arc::new(tx),
         config: cfg.clone(),
         main_agent: std::sync::Arc::new(main_agent),
         sub_agent: std::sync::Arc::new(sub_agent),
+        openclaw: std::sync::Arc::new(openclaw_mgr.clone()),
         vm_provider,
     };
+
+    // Recover OpenClaw instances from DB in background
+    let pool_clone = pool.clone();
+    let openclaw_clone = openclaw_mgr.clone();
+    tokio::spawn(async move {
+        tracing::info!("Recovering OpenClaw instances from DB...");
+        match openclaw_clone.recover_instances(&pool_clone).await {
+            Ok(()) => tracing::info!("OpenClaw instance recovery complete"),
+            Err(e) => tracing::error!("OpenClaw recovery failed: {}", e),
+        }
+    });
+
     let app = api::routes::app_router(app_state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cfg.port));

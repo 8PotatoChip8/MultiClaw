@@ -1,0 +1,65 @@
+// OpenClaw base config template for MultiClaw agents
+// Template variables: {{AGENT_NAME}}, {{AGENT_PORT}}, {{OLLAMA_URL}}, {{MODEL}}, {{GATEWAY_TOKEN}}
+{
+  gateway: {
+    bind: "0.0.0.0",
+    port: {{AGENT_PORT}},
+    auth: {
+      mode: "token",
+      token: "{{GATEWAY_TOKEN}}",
+    },
+  },
+
+  agents: {
+    defaults: {
+      model: {
+        primary: "ollama/{{MODEL}}",
+      },
+      models: {
+        "ollama/{{MODEL}}": { alias: "{{MODEL}}" },
+      },
+      workspace: "/workspace",
+      // Skip onboarding bootstrap since we provide workspace files
+      skipBootstrap: true,
+    },
+  },
+
+  models: {
+    mode: "replace",
+    providers: {
+      ollama: {
+        baseUrl: "{{OLLAMA_URL}}/v1",
+        apiKey: "ollama",
+        api: "openai-completions",
+        models: [
+          {
+            id: "{{MODEL}}",
+            name: "{{MODEL}}",
+            reasoning: false,
+            input: ["text"],
+            cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+            contextWindow: 8192,
+            maxTokens: 4096,
+          },
+        ],
+      },
+    },
+  },
+
+  tools: {
+    // Allow core tools that agents need
+    allow: [
+      "bash",
+      "read",
+      "write",
+      "edit",
+      "process",
+      "sessions_list",
+      "sessions_history",
+      "sessions_send",
+    ],
+  },
+
+  // No external messaging channels — MultiClaw is the channel
+  channels: {},
+}
