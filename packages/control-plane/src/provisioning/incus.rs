@@ -73,8 +73,8 @@ impl VmProvider for IncusProvider {
         let launch_out = Command::new("incus")
             .args(&[
                 "launch", "images:ubuntu/24.04/cloud", name, "--vm",
-                &format!("-c limits.cpu={}", resources.vcpus),
-                &format!("-c limits.memory={}MB", resources.memory_mb),
+                "-c", &format!("limits.cpu={}", resources.vcpus),
+                "-c", &format!("limits.memory={}MB", resources.memory_mb),
             ])
             .output()
             .await?;
