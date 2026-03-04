@@ -282,8 +282,18 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM company_ceos WHERE company_id = $1")
         .bind(company_id).fetch_one(&state.db).await.unwrap_or((0,));
 
-    if count.0 >= 1 {
-        return (StatusCode::CONFLICT, Json(json!({"error":"This company already has a CEO"})));
+    if count.0 >= 2 {
+        return (StatusCode::CONFLICT, Json(json!({"error":"Maximum 2 CEOs per company"})));
+    }
+
+    // If adding 2nd CEO, require explicit approval
+    if count.0 == 1 {
+        let req_id = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,'ADD_SECOND_CEO',$2,$3,'PENDING','USER')")
+            .bind(req_id).bind(company_id).bind(json!({"name": payload.name, "specialty": payload.specialty}))
+            .execute(&state.db).await;
+        let _ = state.tx.send(json!({"type":"approval_required","request_id": req_id, "request_type":"ADD_SECOND_CEO"}).to_string());
+        return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id})));
     }
 
     // Create CEO agent directly
