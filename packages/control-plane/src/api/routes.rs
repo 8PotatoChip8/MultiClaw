@@ -143,6 +143,9 @@ async fn handle_init(
     .bind(main_policy_id)
     .execute(&state.db).await;
 
+    // Provision VM for the Main Agent (runs OpenClaw runtime)
+    provision_agent_vm(state.clone(), agent_id, &agent_name, &model, "main_agent_policy").await;
+
     tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
 }

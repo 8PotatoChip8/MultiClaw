@@ -55,6 +55,12 @@ impl MainAgent {
     pub async fn handle_message(&self, db_pool: &PgPool, user_content: &str) -> Result<String> {
         let tools = self.get_tools();
 
+        // Fetch agent name dynamically from DB (may differ from self.name if set after startup)
+        let agent_name: String = sqlx::query_scalar(
+            "SELECT name FROM agents WHERE role = 'MAIN' LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten()
+         .unwrap_or_else(|| self.name.clone());
+
         // Fetch holding name for identity
         let holding_name: String = sqlx::query_scalar(
             "SELECT name FROM holdings LIMIT 1"
@@ -96,7 +102,7 @@ impl MainAgent {
                      When reporting results, be specific about what you did (include names, IDs). \
                      Use save_memory to remember important facts, tasks, and context. \
                      Use recall_memories to check what you remember about a topic.{memories}",
-                    name = self.name,
+                    name = agent_name,
                     holding = holding_name,
                     memories = memory_section
                 )
