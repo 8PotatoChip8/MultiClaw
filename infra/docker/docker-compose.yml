@@ -19,9 +19,11 @@ services:
       - DATABASE_URL=${DB_URL}
       - ADMIN_TOKEN=${ADMIN_TOKEN}
       - MASTER_KEY_PATH=${MASTER_KEY_PATH}
+      - HOST_IP=${HOST_IP}
     volumes:
       - /var/lib/multiclaw:/var/lib/multiclaw
-      - /var/run/incus:/var/run/incus # Needed for MV incus CLI access
+      - /opt/multiclaw/infra/vm:/opt/multiclaw/infra/vm:ro # VM scripts for agent provisioning
+      - /var/run/incus:/var/run/incus # Needed for incus CLI access
       - /var/run/docker.sock:/var/run/docker.sock # Needed for container status/logs
     pid: "host" # Needs host network access to run subprocess incus CLI simply
     network_mode: "host" # We bind to host so incus CLI works directly inside or we just mount sockets

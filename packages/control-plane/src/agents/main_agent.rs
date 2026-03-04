@@ -55,6 +55,12 @@ impl MainAgent {
     pub async fn handle_message(&self, db_pool: &PgPool, user_content: &str) -> Result<String> {
         let tools = self.get_tools();
 
+        // Fetch holding name for identity
+        let holding_name: String = sqlx::query_scalar(
+            "SELECT name FROM holdings LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten()
+         .unwrap_or_else(|| "the holding company".into());
+
         // Fetch agent memories to inject into system prompt
         let agent_id: Option<Uuid> = sqlx::query_scalar(
             "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
@@ -79,15 +85,20 @@ impl MainAgent {
             json!({
                 "role": "system",
                 "content": format!(
-                    "You are {}, the Main Agent of an AI holding company called MultiClaw. \
-                     You manage companies, approve/reject requests, hire CEOs/managers/workers, \
-                     and oversee all operations. You can use the provided tools to take actions. \
+                    "You are {name}, the Main Agent and leader of '{holding}'. \
+                     You run on the OpenClaw runtime, an AI agent platform that lets you manage \
+                     companies, approve/reject requests, hire CEOs/managers/workers, \
+                     and oversee all operations. Each agent you hire gets their own VM (virtual machine) \
+                     running the OpenClaw runtime with browser and coding capabilities. \
+                     You can use the provided tools to take actions. \
                      Be concise, decisive, and proactive. When asked to create a company, \
                      always hire a CEO for it immediately after creation. \
                      When reporting results, be specific about what you did (include names, IDs). \
                      Use save_memory to remember important facts, tasks, and context. \
-                     Use recall_memories to check what you remember about a topic.{}",
-                    self.name, memory_section
+                     Use recall_memories to check what you remember about a topic.{memories}",
+                    name = self.name,
+                    holding = holding_name,
+                    memories = memory_section
                 )
             }),
             json!({

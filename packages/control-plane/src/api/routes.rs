@@ -12,6 +12,8 @@ use tower_http::cors::{CorsLayer, Any};
 
 use super::ws::{events_handler, AppState};
 use crate::db::models::*;
+use crate::provisioning::vm_provider::{VmProvider, VmResources};
+use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 pub fn app_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
@@ -58,6 +60,8 @@ pub fn app_router(state: AppState) -> Router {
         // Agentd
         .route("/v1/agentd/register", post(agentd_register))
         .route("/v1/agentd/heartbeat", post(agentd_heartbeat))
+        // Scripts (served to VMs during cloud-init)
+        .route("/v1/scripts/install-openclaw.sh", get(serve_install_script))
         // System
         .route("/v1/system/update-check", get(system_update_check))
         .route("/v1/system/update", post(system_update))
@@ -313,6 +317,9 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let _ = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
         .bind(company_id).bind(agent_id).execute(&state.db).await;
 
+    // Provision VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "ceo_policy").await;
+
     let _ = state.tx.send(json!({"type":"ceo_hired","agent_id": agent_id,"company_id": company_id}).to_string());
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
@@ -355,6 +362,9 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
+    // Provision VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "manager_policy").await;
+
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -396,23 +406,206 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
+    // Provision VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "worker_policy").await;
+
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VM Provisioning Helper
+// ═══════════════════════════════════════════════════════════════
+
+/// Provisions an Incus VM for the given agent in a background task.
+/// Reads cloud-init templates, renders config, launches the VM,
+/// and updates the agent's vm_id in the database.
+async fn provision_agent_vm(
+    state: AppState,
+    agent_id: Uuid,
+    agent_name: &str,
+    model: &str,
+    policy_name: &str,
+) {
+    let provider = match state.vm_provider {
+        Some(ref p) => p.clone(),
+        None => {
+            tracing::warn!("VM provider not available, skipping VM provisioning for agent {}", agent_id);
+            return;
+        }
+    };
+
+    let host_ip = state.config.host_ip.clone();
+    let agent_name = agent_name.to_string();
+    let model = model.to_string();
+    let policy_name = policy_name.to_string();
+    let db = state.db.clone();
+    let tx = state.tx.clone();
+
+    tokio::spawn(async move {
+        tracing::info!("Provisioning VM for agent {} ({})", agent_name, agent_id);
+
+        // Load tool policy
+        let (tools_allow, tools_deny) = {
+            let policy: Option<(Value, Value)> = sqlx::query_as(
+                "SELECT allowlist, denylist FROM tool_policies WHERE name = $1 LIMIT 1"
+            ).bind(&policy_name).fetch_optional(&db).await.unwrap_or(None);
+            match policy {
+                Some((a, d)) => (a.to_string(), d.to_string()),
+                None => ("[\"*\"]".to_string(), "[]".to_string()),
+            }
+        };
+
+        // Generate tokens for this agent
+        let gateway_token = Uuid::new_v4().to_string();
+        let agent_token = Uuid::new_v4().to_string();
+        let ollama_token = Uuid::new_v4().to_string();
+
+        // Load templates (embedded as compile-time constants would be ideal,
+        // but for now read from /opt/multiclaw or the infra/vm directory)
+        let base_paths = ["/opt/multiclaw/infra/vm", "infra/vm"];
+        let mut base = "";
+        for p in &base_paths {
+            if std::path::Path::new(p).exists() {
+                base = p;
+                break;
+            }
+        }
+
+        if base.is_empty() {
+            tracing::error!("VM templates not found, skipping VM provisioning for agent {}", agent_id);
+            return;
+        }
+
+        let tmpl_user_data = match tokio::fs::read_to_string(format!("{}/cloud-init/agent-user-data.yaml.tmpl", base)).await {
+            Ok(t) => t,
+            Err(e) => { tracing::error!("Failed to read cloud-init template: {}", e); return; }
+        };
+        let tmpl_openclaw_json = match tokio::fs::read_to_string(format!("{}/openclaw/openclaw.json.tmpl", base)).await {
+            Ok(t) => t,
+            Err(e) => { tracing::error!("Failed to read openclaw.json template: {}", e); return; }
+        };
+        let tmpl_openclaw_svc = match tokio::fs::read_to_string(format!("{}/systemd/openclaw-gateway.service.tmpl", base)).await {
+            Ok(t) => t,
+            Err(e) => { tracing::error!("Failed to read openclaw service template: {}", e); return; }
+        };
+        let tmpl_agentd_svc = match tokio::fs::read_to_string(format!("{}/systemd/multiclaw-agentd.service.tmpl", base)).await {
+            Ok(t) => t,
+            Err(e) => { tracing::error!("Failed to read agentd service template: {}", e); return; }
+        };
+
+        let vm_name = format!("mc-{}", &agent_id.to_string()[..8]);
+
+        let args = CloudInitArgs {
+            hostname: vm_name.clone(),
+            host_ip: host_ip.clone(),
+            agent_id: agent_id.to_string(),
+            agent_name: agent_name.clone(),
+            effective_model: model.clone(),
+            agent_token,
+            openclaw_gateway_token: gateway_token,
+            ollama_token,
+            tools_allow,
+            tools_deny,
+            tmpl_user_data,
+            tmpl_openclaw_json,
+            tmpl_openclaw_svc,
+            tmpl_agentd_svc,
+        };
+
+        let cloud_init = match render_cloud_init(&args) {
+            Ok(ci) => ci,
+            Err(e) => { tracing::error!("Failed to render cloud-init: {}", e); return; }
+        };
+
+        let resources = VmResources {
+            vcpus: 2,
+            memory_mb: 2048,
+            disk_gb: 20,
+        };
+
+        match provider.provision(&vm_name, &resources, &cloud_init).await {
+            Ok(details) => {
+                tracing::info!("VM '{}' provisioned for agent {}, ip={:?}", vm_name, agent_id, details.ip_address);
+                // Update agent record with vm_id
+                let _ = sqlx::query("UPDATE agents SET vm_id = $1 WHERE id = $2")
+                    .bind(&vm_name).bind(agent_id)
+                    .execute(&db).await;
+                let _ = tx.send(json!({
+                    "type": "vm_provisioned",
+                    "agent_id": agent_id,
+                    "vm_id": vm_name,
+                    "ip": details.ip_address
+                }).to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to provision VM for agent {}: {}", agent_id, e);
+                let _ = tx.send(json!({
+                    "type": "vm_provision_failed",
+                    "agent_id": agent_id,
+                    "error": e.to_string()
+                }).to_string());
+            }
+        }
+    });
 }
 
 // ═══════════════════════════════════════════════════════════════
 // VM Actions
 // ═══════════════════════════════════════════════════════════════
 
-async fn vm_start(Path(id): Path<String>) -> impl IntoResponse {
-    (StatusCode::ACCEPTED, Json(json!({"status":"vm_start_initiated","agent_id": id})))
+async fn vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    // Look up the agent's vm_id
+    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_id {
+        Some(ref name) => {
+            if state.vm_provider.is_some() {
+                let _ = tokio::process::Command::new("incus").args(&["start", name]).output().await;
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_started","vm_id": name})))
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
 }
 
-async fn vm_stop(Path(id): Path<String>) -> impl IntoResponse {
-    (StatusCode::ACCEPTED, Json(json!({"status":"vm_stop_initiated","agent_id": id})))
+async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_id {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                let _ = provider.stop(name).await;
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_stopped","vm_id": name})))
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
 }
 
-async fn vm_rebuild(Path(id): Path<String>) -> impl IntoResponse {
-    (StatusCode::ACCEPTED, Json(json!({"status":"vm_rebuild_initiated","agent_id": id})))
+async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_id: Option<String> = sqlx::query_scalar("SELECT vm_id FROM agents WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_id {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                let _ = provider.destroy(name).await;
+                // Re-provision will happen — for now just report destroyed
+                let _ = sqlx::query("UPDATE agents SET vm_id = NULL WHERE id = $1")
+                    .bind(uid).execute(&state.db).await;
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_destroyed_for_rebuild","vm_id": name})))
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
 }
 
 async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
@@ -784,6 +977,24 @@ async fn get_thread_participants(State(state): State<AppState>, Path(id): Path<S
 // ═══════════════════════════════════════════════════════════════
 // System Update Check & Update
 // ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// Scripts (served to agent VMs during cloud-init)
+// ═══════════════════════════════════════════════════════════════
+
+async fn serve_install_script() -> impl IntoResponse {
+    let paths = ["/opt/multiclaw/infra/vm/scripts/install-openclaw.sh", "infra/vm/scripts/install-openclaw.sh"];
+    for p in &paths {
+        if let Ok(content) = tokio::fs::read_to_string(p).await {
+            return (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, "text/plain")],
+                content,
+            ).into_response();
+        }
+    }
+    (StatusCode::NOT_FOUND, "install script not found").into_response()
+}
 
 const CURRENT_VERSION: &str = "0.1.1";
 

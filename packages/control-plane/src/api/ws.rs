@@ -9,6 +9,7 @@ use tokio::sync::broadcast;
 
 use crate::config::Config;
 use crate::agents::main_agent::MainAgent;
+use crate::provisioning::incus::IncusProvider;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -16,6 +17,7 @@ pub struct AppState {
     pub tx: Arc<broadcast::Sender<String>>,
     pub config: Config,
     pub main_agent: Arc<MainAgent>,
+    pub vm_provider: Option<Arc<IncusProvider>>,
 }
 
 /// Handler for the centralized event stream (used by the Next.js UI)

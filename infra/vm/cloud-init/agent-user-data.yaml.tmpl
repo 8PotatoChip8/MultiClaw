@@ -11,6 +11,7 @@ packages:
   - curl
   - ca-certificates
   - jq
+  - git
 
 write_files:
   - path: /home/agent/.openclaw/openclaw.json
@@ -28,12 +29,13 @@ write_files:
       {{AGENTD_SERVICE}}
 
 runcmd:
-  # Install OpenClaw CLI
-  - su - agent -c "curl -fsSL https://openclaw.ai/install-cli.sh | bash"
-  
-  # Download multiclaw-agentd from the control plane
-  - curl -o /usr/local/bin/multiclaw-agentd http://{{HOST_IP}}:8080/v1/agentd/download/$(uname -m)
-  - chmod +x /usr/local/bin/multiclaw-agentd
+  # Download and run the custom OpenClaw install script from control-plane
+  - curl -fsSL http://{{HOST_IP}}:8080/v1/scripts/install-openclaw.sh -o /tmp/install-openclaw.sh
+  - HOST_IP={{HOST_IP}} AGENT_USER=agent bash /tmp/install-openclaw.sh
+
+  # Download multiclaw-agentd sidecar from the control plane
+  - curl -o /usr/local/bin/multiclaw-agentd http://{{HOST_IP}}:8080/v1/agentd/download/$(uname -m) || true
+  - chmod +x /usr/local/bin/multiclaw-agentd || true
 
   # Reload systemd and start services
   - systemctl daemon-reload
