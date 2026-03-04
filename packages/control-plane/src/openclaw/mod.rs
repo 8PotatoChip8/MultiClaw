@@ -170,7 +170,7 @@ impl OpenClawManager {
             port,
             gateway_token: gateway_token.clone(),
             model: config.model.clone(),
-            status: InstanceStatus::Running,
+            status: InstanceStatus::Starting,
         };
 
         // Store instance
@@ -184,27 +184,59 @@ impl OpenClawManager {
             container_name, config.agent_name, port
         );
 
+        // Wait for the gateway to be ready in the background
+        let self_clone = self.clone();
+        let agent_name_clone = config.agent_name.clone();
+        tokio::spawn(async move {
+            if self_clone.wait_for_ready(agent_id, 90).await {
+                tracing::info!("OpenClaw gateway ready for {}", agent_name_clone);
+                let mut instances = self_clone.instances.write().await;
+                if let Some(inst) = instances.get_mut(&agent_id) {
+                    inst.status = InstanceStatus::Running;
+                }
+            } else {
+                tracing::error!("OpenClaw gateway failed to start for {}", agent_name_clone);
+                let mut instances = self_clone.instances.write().await;
+                if let Some(inst) = instances.get_mut(&agent_id) {
+                    inst.status = InstanceStatus::Failed;
+                }
+            }
+        });
+
         Ok(instance)
     }
 
     /// Send a message to an agent's OpenClaw instance and get the response.
-    /// Uses the CLI in the Docker container to send a message.
+    /// Uses the HTTP /v1/responses endpoint.
     pub async fn send_message(&self, agent_id: Uuid, message: &str) -> Result<String> {
+        // Wait for instance to be ready if it's still starting
         let instance = {
-            let instances = self.instances.read().await;
-            instances
-                .get(&agent_id)
-                .cloned()
-                .ok_or_else(|| anyhow!("No OpenClaw instance for agent {}", agent_id))?
-        };
+            let mut retries = 0;
+            loop {
+                let instances = self.instances.read().await;
+                let inst = instances
+                    .get(&agent_id)
+                    .cloned()
+                    .ok_or_else(|| anyhow!("No OpenClaw instance for agent {}", agent_id))?;
 
-        if instance.status != InstanceStatus::Running {
-            return Err(anyhow!(
-                "OpenClaw instance for {} is not running (status: {:?})",
-                instance.agent_name,
-                instance.status
-            ));
-        }
+                match inst.status {
+                    InstanceStatus::Running => break inst,
+                    InstanceStatus::Starting if retries < 30 => {
+                        drop(instances);
+                        retries += 1;
+                        tracing::info!("Waiting for OpenClaw instance for {} to be ready (attempt {}/30)", inst.agent_name, retries);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                    _ => {
+                        return Err(anyhow!(
+                            "OpenClaw instance for {} is not running (status: {:?})",
+                            inst.agent_name,
+                            inst.status
+                        ));
+                    }
+                }
+            }
+        };
 
         tracing::info!(
             "Sending message to {} via OpenClaw (container: {})",
@@ -284,13 +316,6 @@ impl OpenClawManager {
             }
             Err(e) => {
                 tracing::error!("OpenClaw request failed for {}: {}", instance.agent_name, e);
-                // Mark instance as failed if connection refused
-                if e.is_connect() {
-                    let mut instances = self.instances.write().await;
-                    if let Some(inst) = instances.get_mut(&agent_id) {
-                        inst.status = InstanceStatus::Failed;
-                    }
-                }
                 Err(anyhow!("OpenClaw connection error: {}", e))
             }
         }
