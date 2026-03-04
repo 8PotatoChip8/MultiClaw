@@ -24,9 +24,10 @@ export default function OrgPage() {
 
     const getAgentsForCompany = (companyId: string) => agents.filter(a => a.company_id === companyId);
 
-    const AgentNode = ({ agent, depth = 0 }: { agent: Agent; depth?: number }) => {
+    const AgentNode = ({ agent, depth = 0, companyScope }: { agent: Agent; depth?: number; companyScope?: string }) => {
         const Icon = roleIcons[agent.role] || User;
-        const children = agents.filter(a => a.parent_agent_id === agent.id);
+        // Only show children that belong to the same company scope (prevents subsidiary agents from showing under holding)
+        const children = agents.filter(a => a.parent_agent_id === agent.id && (!companyScope || a.company_id === companyScope || !a.company_id));
         return (
             <div style={{ marginLeft: depth * 28 }}>
                 <Link href={`/agents/${agent.id}`} style={{ display: 'flex', alignItems: 'center', gap: '10px', padding: '8px 12px', borderRadius: '8px', transition: 'background 0.2s', color: 'var(--text)' }}>
@@ -35,7 +36,7 @@ export default function OrgPage() {
                     <span className={`badge ${agent.role === 'CEO' ? 'external' : agent.role === 'MANAGER' ? 'internal' : 'active'}`} style={{ fontSize: '10px' }}>{agent.role}</span>
                     <span style={{ fontSize: '11px', color: 'var(--text-muted)', marginLeft: 'auto' }}>{agent.effective_model}</span>
                 </Link>
-                {children.map(c => <AgentNode key={c.id} agent={c} depth={depth + 1} />)}
+                {children.map(c => <AgentNode key={c.id} agent={c} depth={depth + 1} companyScope={companyScope} />)}
             </div>
         );
     };
@@ -50,7 +51,7 @@ export default function OrgPage() {
                         <Shield size={20} style={{ color: 'var(--accent)' }} />
                         <span style={{ fontWeight: 700, fontSize: '16px' }}>Holding Company</span>
                     </div>
-                    <AgentNode agent={mainAgent} />
+                    <AgentNode agent={mainAgent} companyScope={mainAgent.company_id || '__holding__'} />
                 </div>
             )}
 
@@ -68,7 +69,7 @@ export default function OrgPage() {
                         {companyAgents.length === 0 ? (
                             <p style={{ color: 'var(--text-muted)', fontSize: '13px', paddingLeft: '28px' }}>No agents assigned</p>
                         ) : (
-                            ceos.map(ceo => <AgentNode key={ceo.id} agent={ceo} depth={1} />)
+                            ceos.map(ceo => <AgentNode key={ceo.id} agent={ceo} depth={1} companyScope={company.id} />)
                         )}
                     </div>
                 );

@@ -217,42 +217,6 @@ async fn create_company(State(state): State<AppState>, Json(payload): Json<Creat
     .fetch_one(&state.db).await {
         Ok(c) => {
             let _ = state.tx.send(json!({"type":"company_created","company": c}).to_string());
-
-            // Autonomous org bootstrapping: ask MainAgent to hire staff
-            let company_name = payload.name.clone();
-            let company_desc = payload.description.clone().unwrap_or_else(|| "general operations".into());
-            let company_id = id;
-            let state_clone = state.clone();
-
-            tokio::spawn(async move {
-                tracing::info!("Starting autonomous org bootstrap for company '{}' ({})", company_name, company_id);
-
-                let prompt = format!(
-                    "A new company called '{}' has been created with purpose: '{}'. \
-                     Its ID is {}. Please do the following:\n\
-                     1. Hire a CEO for this company with an appropriate name and specialty.\n\
-                     2. Hire 2 managers with different specialties relevant to the company's purpose.\n\
-                     3. Hire 1 worker under the company for initial operations.\n\
-                     Execute these hires now using your tools.",
-                    company_name, company_desc, company_id
-                );
-
-                match state_clone.main_agent.handle_message(&state_clone.db, &prompt).await {
-                    Ok(response) => {
-                        tracing::info!("Org bootstrap complete for '{}': {}", company_name, &response[..response.len().min(200)]);
-                        // Broadcast an event so the UI updates
-                        let _ = state_clone.tx.send(json!({
-                            "type": "org_bootstrap_complete",
-                            "company_id": company_id,
-                            "summary": response
-                        }).to_string());
-                    }
-                    Err(e) => {
-                        tracing::error!("Org bootstrap failed for '{}': {}", company_name, e);
-                    }
-                }
-            });
-
             (StatusCode::CREATED, Json(json!(c)))
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
@@ -318,18 +282,8 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM company_ceos WHERE company_id = $1")
         .bind(company_id).fetch_one(&state.db).await.unwrap_or((0,));
 
-    if count.0 >= 2 {
-        return (StatusCode::CONFLICT, Json(json!({"error":"Maximum 2 CEOs per company"})));
-    }
-
-    // If adding 2nd CEO, create approval request
-    if count.0 == 1 {
-        let req_id = Uuid::new_v4();
-        let _ = sqlx::query("INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,'ADD_SECOND_CEO',$2,$3,'PENDING','USER')")
-            .bind(req_id).bind(company_id).bind(json!({"name": payload.name, "specialty": payload.specialty}))
-            .execute(&state.db).await;
-        let _ = state.tx.send(json!({"type":"approval_required","request_id": req_id, "request_type":"ADD_SECOND_CEO"}).to_string());
-        return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id})));
+    if count.0 >= 1 {
+        return (StatusCode::CONFLICT, Json(json!({"error":"This company already has a CEO"})));
     }
 
     // Create CEO agent directly
