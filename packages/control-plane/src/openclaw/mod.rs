@@ -33,6 +33,7 @@ pub struct OpenClawInstance {
     pub container_name: String,
     pub port: u16,
     pub gateway_token: String,
+    pub model: String,
     pub status: InstanceStatus,
 }
 
@@ -168,6 +169,7 @@ impl OpenClawManager {
             container_name: container_name.clone(),
             port,
             gateway_token: gateway_token.clone(),
+            model: config.model.clone(),
             status: InstanceStatus::Running,
         };
 
@@ -214,7 +216,7 @@ impl OpenClawManager {
         let url = format!("http://127.0.0.1:{}/v1/responses", instance.port);
         let client = reqwest::Client::new();
         let body = serde_json::json!({
-            "model": "ollama/", // gateway ignores this, uses configured model
+            "model": format!("ollama/{}", instance.model),
             "input": message,
         });
 
@@ -574,7 +576,7 @@ impl OpenClawManager {
         "baseUrl": "{{OLLAMA_URL}}/v1",
         "apiKey": "ollama",
         "api": "openai-completions",
-        "models": [{ "id": "{{MODEL}}", "name": "{{MODEL}}", "reasoning": false, "input": ["text"], "contextWindow": 8192, "maxTokens": 4096 }]
+        "models": [{ "id": "{{MODEL}}", "name": "{{MODEL}}", "reasoning": false, "input": ["text"], "contextWindow": 198000, "maxTokens": 16384 }]
       }
     }
   },
