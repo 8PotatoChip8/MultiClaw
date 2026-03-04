@@ -210,43 +210,88 @@ impl OpenClawManager {
             instance.container_name
         );
 
-        // Use docker exec to run openclaw agent --message in the container
-        let output = tokio::process::Command::new("docker")
-            .args([
-                "exec", &instance.container_name,
-                "openclaw", "agent",
-                "--message", message,
-            ])
-            .output()
-            .await?;
+        // Use HTTP POST to OpenClaw's /v1/responses endpoint
+        let url = format!("http://127.0.0.1:{}/v1/responses", instance.port);
+        let client = reqwest::Client::new();
+        let body = serde_json::json!({
+            "model": "ollama/", // gateway ignores this, uses configured model
+            "input": message,
+        });
 
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::error!(
-                "OpenClaw message failed for {}: {}",
-                instance.agent_name,
-                stderr
-            );
+        let resp = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", instance.gateway_token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(120))
+            .send()
+            .await;
 
-            // If the container is dead, try to restart it
-            if stderr.contains("is not running") || stderr.contains("No such container") {
-                let mut instances = self.instances.write().await;
-                if let Some(inst) = instances.get_mut(&agent_id) {
-                    inst.status = InstanceStatus::Failed;
-                }
+        match resp {
+            Ok(r) if r.status().is_success() => {
+                let resp_body: serde_json::Value = r.json().await
+                    .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
+
+                // Extract text from the OpenResponses format
+                // Response has an "output" array with items; find "message" type with "text" content
+                let text = resp_body["output"]
+                    .as_array()
+                    .and_then(|outputs| {
+                        outputs.iter().find_map(|item| {
+                            if item["type"] == "message" {
+                                item["content"]
+                                    .as_array()
+                                    .and_then(|content| {
+                                        content.iter().find_map(|c| {
+                                            if c["type"] == "output_text" {
+                                                c["text"].as_str().map(|s| s.to_string())
+                                            } else {
+                                                None
+                                            }
+                                        })
+                                    })
+                            } else {
+                                None
+                            }
+                        })
+                    })
+                    .unwrap_or_else(|| {
+                        // Fallback: try to get any text from the response
+                        resp_body["output_text"]
+                            .as_str()
+                            .unwrap_or("[Agent produced no text output]")
+                            .to_string()
+                    });
+
+                tracing::info!(
+                    "{} responded: {}",
+                    instance.agent_name,
+                    &text[..text.len().min(200)]
+                );
+
+                Ok(text)
             }
-
-            return Err(anyhow!("OpenClaw agent error: {}", stderr));
+            Ok(r) => {
+                let status = r.status();
+                let err_body = r.text().await.unwrap_or_default();
+                tracing::error!(
+                    "OpenClaw HTTP error for {}: {} - {}",
+                    instance.agent_name, status, err_body
+                );
+                Err(anyhow!("OpenClaw HTTP {}: {}", status, err_body))
+            }
+            Err(e) => {
+                tracing::error!("OpenClaw request failed for {}: {}", instance.agent_name, e);
+                // Mark instance as failed if connection refused
+                if e.is_connect() {
+                    let mut instances = self.instances.write().await;
+                    if let Some(inst) = instances.get_mut(&agent_id) {
+                        inst.status = InstanceStatus::Failed;
+                    }
+                }
+                Err(anyhow!("OpenClaw connection error: {}", e))
+            }
         }
-
-        let response = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        tracing::info!(
-            "{} responded: {}",
-            instance.agent_name,
-            &response[..response.len().min(200)]
-        );
-
-        Ok(response)
     }
 
     /// Stop an agent's OpenClaw instance.
@@ -512,7 +557,8 @@ impl OpenClawManager {
     "mode": "local",
     "bind": "lan",
     "port": {{AGENT_PORT}},
-    "auth": { "mode": "token", "token": "{{GATEWAY_TOKEN}}" }
+    "auth": { "mode": "token", "token": "{{GATEWAY_TOKEN}}" },
+    "http": { "endpoints": { "responses": { "enabled": true } } }
   },
   "agents": {
     "defaults": {

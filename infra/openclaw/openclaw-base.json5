@@ -9,6 +9,11 @@
       mode: "token",
       token: "{{GATEWAY_TOKEN}}",
     },
+    http: {
+      endpoints: {
+        responses: { enabled: true },
+      },
+    },
   },
 
   agents: {
