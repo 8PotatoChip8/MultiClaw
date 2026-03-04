@@ -159,3 +159,24 @@ log "API URL:        http://${HOST_IP}:8080/v1"
 log "Admin Token:    /var/lib/multiclaw/admin.token"
 log "Default Model:  $DEFAULT_MODEL"
 log "=============================================="
+
+# ── Verify UI is reachable ──
+log "Verifying dashboard is reachable..."
+UI_OK=false
+for i in {1..15}; do
+  if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:3000/ | grep -q "200"; then
+    UI_OK=true
+    break
+  fi
+  sleep 2
+done
+
+if $UI_OK; then
+  log "Dashboard is UP and reachable at http://${HOST_IP}:3000"
+else
+  log "WARNING: Dashboard is NOT reachable on port 3000. Printing UI container logs:"
+  cd /opt/multiclaw && docker compose -f infra/docker/docker-compose.yml logs ui --tail 50
+  echo ""
+  log "Container status:"
+  docker compose -f infra/docker/docker-compose.yml ps ui
+fi
