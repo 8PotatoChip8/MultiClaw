@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
 import { api } from '../../lib/api';
-import { Server, RefreshCw, ChevronDown, ChevronUp, Clock, HardDrive, X } from 'lucide-react';
+import { Server, RefreshCw, ChevronDown, ChevronUp, Clock, HardDrive, X, Copy, Check } from 'lucide-react';
 
 interface DockerContainer {
     ID: string;
@@ -20,6 +20,17 @@ export default function InfrastructurePage() {
     const [expandedLogs, setExpandedLogs] = useState<Record<string, string | null>>({});
     const [logsLoading, setLogsLoading] = useState<Record<string, boolean>>({});
     const [autoRefresh, setAutoRefresh] = useState(true);
+    const [copiedId, setCopiedId] = useState<string | null>(null);
+
+    const copyLogs = (containerId: string) => {
+        const logs = expandedLogs[containerId];
+        if (logs) {
+            navigator.clipboard.writeText(logs).then(() => {
+                setCopiedId(containerId);
+                setTimeout(() => setCopiedId(null), 2000);
+            });
+        }
+    };
 
     const fetchContainers = useCallback(async () => {
         try {
@@ -185,10 +196,25 @@ export default function InfrastructurePage() {
                                         <span style={{ fontSize: '12px', color: 'var(--accent)', fontWeight: 600 }}>
                                             Container Logs (last 200 lines)
                                         </span>
-                                        <button onClick={() => toggleLogs(c.ID, c.Names)}
-                                            style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
-                                            <X size={14} />
-                                        </button>
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <button onClick={() => copyLogs(c.ID)}
+                                                style={{
+                                                    display: 'flex', alignItems: 'center', gap: '5px',
+                                                    background: copiedId === c.ID ? 'rgba(34,197,94,0.15)' : 'rgba(255,255,255,0.06)',
+                                                    border: `1px solid ${copiedId === c.ID ? 'rgba(34,197,94,0.4)' : 'var(--border)'}`,
+                                                    color: copiedId === c.ID ? '#22c55e' : 'var(--text-muted)',
+                                                    borderRadius: '5px', padding: '4px 10px',
+                                                    fontSize: '11px', cursor: 'pointer', fontWeight: 500,
+                                                    transition: 'all 0.2s',
+                                                }}>
+                                                {copiedId === c.ID ? <Check size={12} /> : <Copy size={12} />}
+                                                {copiedId === c.ID ? 'Copied!' : 'Copy Logs'}
+                                            </button>
+                                            <button onClick={() => toggleLogs(c.ID, c.Names)}
+                                                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer' }}>
+                                                <X size={14} />
+                                            </button>
+                                        </div>
                                     </div>
                                     {logsLoading[c.ID] ? (
                                         <p style={{ color: 'var(--text-muted)', fontSize: '12px' }}>Loading logs...</p>

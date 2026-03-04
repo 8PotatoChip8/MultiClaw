@@ -87,8 +87,18 @@ async fn health() -> impl IntoResponse {
 
 async fn handle_init(
     State(state): State<AppState>,
-    Json(payload): Json<InitRequest>,
+    body: axum::body::Bytes,
 ) -> impl IntoResponse {
+    tracing::info!("Received init request, body length={}", body.len());
+
+    let payload: InitRequest = match serde_json::from_slice(&body) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!("Failed to parse init request JSON: {}. Body: {:?}", e, String::from_utf8_lossy(&body));
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid JSON: {}", e)})));
+        }
+    };
+
     let holding_name = payload.holding_name.unwrap_or_else(|| "Main Holding".into());
     let agent_name = payload.main_agent_name.unwrap_or_else(|| "MainAgent".into());
     let model = payload.default_model.unwrap_or_else(|| "glm-5:cloud".into());
