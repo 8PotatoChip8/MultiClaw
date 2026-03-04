@@ -2,7 +2,7 @@
 // Template variables: {{AGENT_NAME}}, {{AGENT_PORT}}, {{OLLAMA_URL}}, {{MODEL}}, {{GATEWAY_TOKEN}}
 {
   gateway: {
-    bind: "0.0.0.0",
+    bind: "lan",
     port: {{AGENT_PORT}},
     auth: {
       mode: "token",
