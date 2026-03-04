@@ -63,6 +63,7 @@ pub struct Agent {
     pub system_prompt: Option<String>,
     pub tool_policy_id: Uuid,
     pub vm_id: Option<Uuid>,
+    pub handle: Option<String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
 }

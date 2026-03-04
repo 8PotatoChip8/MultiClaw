@@ -1,25 +1,103 @@
+'use client';
 import '../styles/globals.css';
 import Link from 'next/link';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield } from 'lucide-react';
-
-export const metadata = {
-    title: 'MultiClaw Dashboard',
-    description: 'Manage your Agent Holding Company',
-};
+import { useEffect, useState } from 'react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
     { href: '/org', icon: Users2, label: 'Org Tree' },
     { href: '/companies', icon: Building2, label: 'Companies' },
-    { href: '/chats', icon: MessageSquare, label: 'Chats' },
+    { href: '/chats', icon: MessageSquare, label: 'Messages' },
+    { href: '/messaging', icon: Radio, label: 'Agent Comms' },
     { href: '/approvals', icon: CheckSquare, label: 'Approvals' },
     { href: '/services', icon: Briefcase, label: 'Services' },
     { href: '/ledger', icon: Wallet, label: 'Ledger' },
 ];
 
+function UpdateBanner() {
+    const [updateInfo, setUpdateInfo] = useState<{ update_available: boolean; latest_version: string; current_version: string; release_url: string } | null>(null);
+    const [updating, setUpdating] = useState(false);
+    const [status, setStatus] = useState<string | null>(null);
+
+    useEffect(() => {
+        const checkUpdate = async () => {
+            try {
+                const apiUrl = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080/v1` : '';
+                const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';
+                const res = await fetch(`${apiUrl}/system/update-check`, {
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+                });
+                const data = await res.json();
+                setUpdateInfo(data);
+            } catch { }
+        };
+        checkUpdate();
+        const interval = setInterval(checkUpdate, 5 * 60 * 1000); // every 5 min
+        return () => clearInterval(interval);
+    }, []);
+
+    const handleUpdate = async () => {
+        if (updating) return;
+        setUpdating(true);
+        setStatus('Pulling latest code...');
+        try {
+            const apiUrl = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080/v1` : '';
+            const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';
+            await fetch(`${apiUrl}/system/update`, {
+                method: 'POST',
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+            });
+            setStatus('Update started — containers rebuilding. Page will reload shortly...');
+            setTimeout(() => window.location.reload(), 30000);
+        } catch {
+            setStatus('Update failed');
+            setUpdating(false);
+        }
+    };
+
+    if (!updateInfo?.update_available) return null;
+
+    return (
+        <div style={{
+            padding: '10px 12px', margin: '0 8px 8px', borderRadius: '8px',
+            background: 'linear-gradient(135deg, rgba(0,200,100,0.15), rgba(0,150,255,0.1))',
+            border: '1px solid rgba(0,200,100,0.3)',
+            fontSize: '12px',
+        }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', marginBottom: '6px', color: 'var(--success)', fontWeight: 600 }}>
+                <ArrowUpCircle size={14} />
+                Update Available
+            </div>
+            <div style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>
+                v{updateInfo.current_version} → v{updateInfo.latest_version}
+            </div>
+            {status ? (
+                <div style={{ fontSize: '11px', color: 'var(--accent)' }}>{status}</div>
+            ) : (
+                <button
+                    onClick={handleUpdate}
+                    disabled={updating}
+                    style={{
+                        background: 'var(--success)', color: '#fff', border: 'none',
+                        padding: '4px 12px', borderRadius: '6px', fontSize: '11px',
+                        fontWeight: 600, cursor: 'pointer', width: '100%',
+                    }}
+                >
+                    Update Now
+                </button>
+            )}
+        </div>
+    );
+}
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
     return (
         <html lang="en">
+            <head>
+                <title>MultiClaw Dashboard</title>
+                <meta name="description" content="Manage your Agent Holding Company" />
+            </head>
             <body style={{ display: 'flex', minHeight: '100vh' }}>
                 <aside style={{
                     width: '240px', minWidth: '240px',
@@ -50,8 +128,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                             </Link>
                         ))}
                     </nav>
-                    <div style={{ marginTop: 'auto', padding: '12px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--text-muted)' }}>
-                        MultiClaw v0.1.0
+                    <div style={{ marginTop: 'auto' }}>
+                        <UpdateBanner />
+                        <div style={{ padding: '12px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--text-muted)' }}>
+                            MultiClaw v0.1.1
+                        </div>
                     </div>
                 </aside>
                 <main style={{ flex: 1, padding: '32px 40px', overflowY: 'auto', maxHeight: '100vh' }}>

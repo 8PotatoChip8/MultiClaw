@@ -28,6 +28,14 @@ apt-get update
 apt-get install -y apt-transport-https ca-certificates curl software-properties-common jq git qemu-kvm 
 apt-get install -y incus
 
+# Initialize Incus non-interactively (creates default storage pool + network)
+log "Initializing Incus..."
+incus admin init --minimal 2>/dev/null || true
+# Add the invoking user to incus-admin group
+if [ -n "$SUDO_USER" ]; then
+  usermod -aG incus-admin "$SUDO_USER" 2>/dev/null || true
+fi
+
 log "Installing Docker..."
 # Skip if docker is already running
 if ! command -v docker &> /dev/null; then

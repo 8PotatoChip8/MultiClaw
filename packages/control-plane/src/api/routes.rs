@@ -25,7 +25,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/install/init", post(handle_init))
         // Companies
         .route("/v1/companies", get(list_companies).post(create_company))
-        .route("/v1/companies/:id", get(get_company))
+        .route("/v1/companies/:id", get(get_company).patch(update_company))
         .route("/v1/companies/:id/org-tree", get(get_org_tree))
         .route("/v1/companies/:id/hire-ceo", post(hire_ceo))
         .route("/v1/companies/:id/ledger", get(get_ledger))
@@ -38,10 +38,12 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/stop", post(vm_stop))
         .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
         .route("/v1/agents/:id/panic", post(agent_panic))
+        .route("/v1/agents/:id/thread", get(get_agent_thread))
         // Threads & Messages
         .route("/v1/threads", get(get_threads).post(create_thread))
         .route("/v1/threads/:id", get(get_thread))
         .route("/v1/threads/:id/messages", get(get_messages).post(send_message))
+        .route("/v1/threads/:id/participants", get(get_thread_participants))
         // Requests & Approvals
         .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/:id/approve", post(approve_request))
@@ -54,6 +56,9 @@ pub fn app_router(state: AppState) -> Router {
         // Agentd
         .route("/v1/agentd/register", post(agentd_register))
         .route("/v1/agentd/heartbeat", post(agentd_heartbeat))
+        // System
+        .route("/v1/system/update-check", get(system_update_check))
+        .route("/v1/system/update", post(system_update))
         // Events WS
         .route("/v1/events", get(events_handler))
         .layer(cors)
@@ -220,7 +225,7 @@ async fn create_company(State(state): State<AppState>, Json(payload): Json<Creat
 async fn get_org_tree(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
          FROM agents WHERE company_id = $1 ORDER BY role, name"
     ).bind(uid).fetch_all(&state.db).await {
         Ok(agents) => (StatusCode::OK, Json(json!({"company_id": uid, "tree": agents}))),
@@ -234,7 +239,7 @@ async fn get_org_tree(State(state): State<AppState>, Path(id): Path<String>) -> 
 
 async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
          FROM agents ORDER BY created_at"
     ).fetch_all(&state.db).await {
         Ok(a) => (StatusCode::OK, Json(json!(a))),
@@ -245,7 +250,7 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
 async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
          FROM agents WHERE id = $1"
     ).bind(uid).fetch_optional(&state.db).await {
         Ok(Some(a)) => (StatusCode::OK, Json(json!(a))),
@@ -311,7 +316,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
 async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let ceo_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let ceo: Option<Agent> = sqlx::query_as(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
     ).bind(ceo_id).fetch_optional(&state.db).await.unwrap_or(None);
     let ceo = match ceo { Some(c) => c, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"CEO not found"}))) };
     let company_id = match ceo.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"CEO has no company"}))) };
@@ -352,7 +357,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
 async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let mgr_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let mgr: Option<Agent> = sqlx::query_as(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
     ).bind(mgr_id).fetch_optional(&state.db).await.unwrap_or(None);
     let mgr = match mgr { Some(m) => m, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Manager not found"}))) };
     let company_id = match mgr.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Manager has no company"}))) };
@@ -478,17 +483,34 @@ async fn send_message(
                     let tid = thread_id;
                     tokio::spawn(async move {
                         tracing::info!("MainAgent processing message: '{}'", &user_text[..user_text.len().min(100)]);
-                        match state_clone.main_agent.handle_message(&state_clone.db, &user_text).await {
-                            Ok(response) => {
-                                // Get the MainAgent's agent ID
-                                let agent_id: Uuid = sqlx::query_scalar(
+
+                        // Find which agent is a member of this thread (for DMs)
+                        let thread_agent_id: Option<Uuid> = sqlx::query_scalar(
+                            "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT' LIMIT 1"
+                        )
+                        .fetch_optional(&state_clone.db)
+                        .await
+                        .ok()
+                        .flatten();
+
+                        // Fall back to MainAgent if no specific agent is on this thread
+                        let responding_agent_id: Uuid = match thread_agent_id {
+                            Some(id) => id,
+                            None => {
+                                sqlx::query_scalar(
                                     "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
                                 )
                                 .fetch_optional(&state_clone.db)
                                 .await
                                 .ok()
                                 .flatten()
-                                .unwrap_or(Uuid::new_v4());
+                                .unwrap_or(Uuid::new_v4())
+                            }
+                        };
+
+                        match state_clone.main_agent.handle_message(&state_clone.db, &user_text).await {
+                            Ok(response) => {
+                                let agent_id = responding_agent_id;
 
                                 // Insert agent response as a new message
                                 let resp_id = Uuid::new_v4();
@@ -660,4 +682,204 @@ async fn agentd_register() -> impl IntoResponse {
 
 async fn agentd_heartbeat() -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"status":"ok"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Update Company
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct UpdateCompanyRequest {
+    name: Option<String>,
+    r#type: Option<String>,
+    description: Option<String>,
+    status: Option<String>,
+}
+
+async fn update_company(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<UpdateCompanyRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let _ = sqlx::query(
+        "UPDATE companies SET name = COALESCE($1, name), type = COALESCE($2, type), description = COALESCE($3, description), status = COALESCE($4, status) WHERE id = $5"
+    )
+    .bind(&p.name).bind(&p.r#type).bind(&p.description).bind(&p.status).bind(uid)
+    .execute(&state.db).await;
+    
+    // Re-fetch and return
+    match sqlx::query_as::<_, Company>(
+        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await {
+        Ok(Some(c)) => {
+            let _ = state.tx.send(json!({"type":"company_updated","company": c}).to_string());
+            (StatusCode::OK, Json(json!(c)))
+        }
+        _ => (StatusCode::NOT_FOUND, Json(json!({"error":"Company not found"})))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent DM Thread (get or create)
+// ═══════════════════════════════════════════════════════════════
+
+async fn get_agent_thread(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Check if a DM thread already exists with this agent
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT tm.thread_id FROM thread_members tm JOIN threads t ON t.id = tm.thread_id \
+         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 AND t.type = 'DM' LIMIT 1"
+    ).bind(agent_id).fetch_optional(&state.db).await.unwrap_or(None);
+
+    if let Some((thread_id,)) = existing {
+        return (StatusCode::OK, Json(json!({"thread_id": thread_id, "created": false})));
+    }
+
+    // Get agent info for thread title
+    let agent_name: Option<String> = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+    let name = agent_name.unwrap_or_else(|| "Agent".into());
+
+    // Create new DM thread
+    let thread_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+        .bind(thread_id).bind(format!("DM with {}", name))
+        .execute(&state.db).await;
+
+    // Add agent as member
+    let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+        .bind(thread_id).bind(agent_id).execute(&state.db).await;
+
+    // Add USER as member (placeholder user ID)
+    let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'USER', $2)")
+        .bind(thread_id).bind(Uuid::from_u128(0)).execute(&state.db).await;
+
+    (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "created": true})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Thread Participants
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(sqlx::FromRow, serde::Serialize)]
+struct ThreadMember {
+    thread_id: Uuid,
+    member_type: String,
+    member_id: Uuid,
+}
+
+async fn get_thread_participants(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, ThreadMember>(
+        "SELECT thread_id, member_type, member_id FROM thread_members WHERE thread_id = $1"
+    ).bind(uid).fetch_all(&state.db).await {
+        Ok(members) => (StatusCode::OK, Json(json!(members))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// System Update Check & Update
+// ═══════════════════════════════════════════════════════════════
+
+const CURRENT_VERSION: &str = "0.1.1";
+
+async fn system_update_check(State(_state): State<AppState>) -> impl IntoResponse {
+    // Check GitHub for latest release
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let github_url = "https://api.github.com/repos/8PotatoChip8/MultiClaw/releases/latest";
+    
+    match client.get(github_url)
+        .header("User-Agent", "MultiClaw-Updater")
+        .send()
+        .await
+    {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                if let Ok(body) = resp.json::<Value>().await {
+                    let latest = body["tag_name"].as_str().unwrap_or("unknown").trim_start_matches('v');
+                    let update_available = latest != CURRENT_VERSION && latest != "unknown";
+                    return (StatusCode::OK, Json(json!({
+                        "current_version": CURRENT_VERSION,
+                        "latest_version": latest,
+                        "update_available": update_available,
+                        "release_url": body["html_url"].as_str().unwrap_or("")
+                    })));
+                }
+            }
+            // No releases yet — that's fine
+            (StatusCode::OK, Json(json!({
+                "current_version": CURRENT_VERSION,
+                "latest_version": CURRENT_VERSION,
+                "update_available": false,
+                "release_url": ""
+            })))
+        }
+        Err(_) => {
+            (StatusCode::OK, Json(json!({
+                "current_version": CURRENT_VERSION,
+                "latest_version": "unknown",
+                "update_available": false,
+                "error": "Could not reach GitHub"
+            })))
+        }
+    }
+}
+
+async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        tracing::info!("Starting system update...");
+        let _ = state_clone.tx.send(json!({"type":"system_update","status":"started"}).to_string());
+
+        // Pull latest code
+        let pull = tokio::process::Command::new("git")
+            .args(["-C", "/opt/multiclaw", "pull", "origin", "main"])
+            .output()
+            .await;
+
+        match pull {
+            Ok(output) => {
+                if !output.status.success() {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Git pull failed: {}", err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
+                }
+                tracing::info!("Git pull successful, rebuilding containers...");
+            }
+            Err(e) => {
+                tracing::error!("Git pull error: {}", e);
+                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                return;
+            }
+        }
+
+        // Rebuild and restart containers
+        let rebuild = tokio::process::Command::new("docker")
+            .args(["compose", "-f", "/opt/multiclaw/infra/docker/docker-compose.yml", "up", "-d", "--build"])
+            .output()
+            .await;
+
+        match rebuild {
+            Ok(output) => {
+                if output.status.success() {
+                    tracing::info!("System update complete!");
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"complete"}).to_string());
+                } else {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Docker rebuild failed: {}", err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                }
+            }
+            Err(e) => {
+                tracing::error!("Docker rebuild error: {}", e);
+                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({"status":"update_started"})))
 }

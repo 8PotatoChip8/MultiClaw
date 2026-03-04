@@ -239,6 +239,23 @@ impl MainAgent {
                     }
                 }
             }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "update_company",
+                    "description": "Modify an existing company's name, type, or description.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "company_id": { "type": "string", "description": "UUID of the company to update" },
+                            "name": { "type": "string", "description": "New company name (optional)" },
+                            "company_type": { "type": "string", "enum": ["INTERNAL", "EXTERNAL"], "description": "New type (optional)" },
+                            "description": { "type": "string", "description": "New description (optional)" }
+                        },
+                        "required": ["company_id"]
+                    }
+                }
+            }),
         ]
     }
 
@@ -262,6 +279,7 @@ impl MainAgent {
             "list_agents" => self.tool_list_agents(db_pool).await,
             "list_pending_requests" => self.tool_list_pending_requests(db_pool).await,
             "approve_request" => self.tool_approve_request(db_pool, args).await,
+            "update_company" => self.tool_update_company(db_pool, args).await,
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -374,10 +392,33 @@ impl MainAgent {
             name, role, company_desc.as_deref().unwrap_or("general operations")
         );
 
+        // Auto-generate a handle like @ceo-companyname
         let agent_id = Uuid::new_v4();
+        let company_name_for_handle: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM companies WHERE id = $1"
+        )
+        .bind(company_id)
+        .fetch_optional(db_pool)
+        .await
+        .ok()
+        .flatten();
+        let slug = company_name_for_handle.unwrap_or_else(|| "co".into())
+            .to_lowercase().replace(' ', "-").chars().filter(|c| c.is_alphanumeric() || *c == '-').collect::<String>();
+        let handle = format!("@{}-{}", role.to_lowercase(), slug);
+        // Ensure uniqueness by appending short ID suffix if needed
+        let handle_exists: Option<(i64,)> = sqlx::query_as(
+            "SELECT COUNT(*) FROM agents WHERE handle = $1"
+        ).bind(&handle).fetch_optional(db_pool).await.ok().flatten();
+        let final_handle = if handle_exists.map(|h| h.0).unwrap_or(0) > 0 {
+            format!("{}-{}", handle, &agent_id.to_string()[..4])
+        } else {
+            handle
+        };
+
+
         match sqlx::query(
-            "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, system_prompt, tool_policy_id, status) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'ACTIVE')"
+            "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, system_prompt, tool_policy_id, handle, status) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'ACTIVE')"
         )
         .bind(agent_id)
         .bind(holding_id)
@@ -389,6 +430,7 @@ impl MainAgent {
         .bind(model)
         .bind(&system_prompt)
         .bind(policy_id)
+        .bind(&final_handle)
         .execute(db_pool)
         .await
         {
@@ -399,7 +441,7 @@ impl MainAgent {
                         .bind(company_id).bind(agent_id)
                         .execute(db_pool).await;
                 }
-                format!("{} '{}' hired successfully for company {} with ID: {}", role, name, company_id, agent_id)
+                format!("{} '{}' (handle: {}) hired successfully for company {} with ID: {}", role, name, final_handle, company_id, agent_id)
             }
             Err(e) => format!("Failed to hire {}: {}", role, e),
         }
@@ -495,6 +537,39 @@ impl MainAgent {
         {
             Ok(_) => format!("Request {} approved successfully.", request_id),
             Err(e) => format!("Failed to approve request: {}", e),
+        }
+    }
+
+    async fn tool_update_company(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let company_id_str = args.get("company_id").and_then(|v| v.as_str()).unwrap_or("");
+        let company_id = match Uuid::parse_str(company_id_str) {
+            Ok(u) => u,
+            Err(_) => return format!("Invalid company_id: '{}'", company_id_str),
+        };
+        let name = args.get("name").and_then(|v| v.as_str());
+        let company_type = args.get("company_type").and_then(|v| v.as_str());
+        let description = args.get("description").and_then(|v| v.as_str());
+
+        match sqlx::query(
+            "UPDATE companies SET \
+             name = COALESCE($1, name), \
+             type = COALESCE($2, type), \
+             description = COALESCE($3, description) \
+             WHERE id = $4"
+        )
+        .bind(name)
+        .bind(company_type)
+        .bind(description)
+        .bind(company_id)
+        .execute(db_pool)
+        .await
+        {
+            Ok(_) => format!("Company {} updated successfully.", company_id),
+            Err(e) => format!("Failed to update company: {}", e),
         }
     }
 }

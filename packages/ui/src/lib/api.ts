@@ -80,4 +80,16 @@ export const api = {
         request('/engagements', { method: 'POST', body: JSON.stringify(data) }),
     activateEngagement: (id: string) => request(`/engagements/${id}/activate`, { method: 'POST' }),
     completeEngagement: (id: string) => request(`/engagements/${id}/complete`, { method: 'POST' }),
+
+    // Company Editing
+    updateCompany: (id: string, data: { name?: string; type?: string; description?: string; status?: string }) =>
+        request(`/companies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    // Agent Thread (get or create DM)
+    getAgentThread: (agentId: string) => request(`/agents/${agentId}/thread`),
+    getThreadParticipants: (threadId: string) => request(`/threads/${threadId}/participants`),
+
+    // System Updates
+    checkForUpdate: () => request('/system/update-check'),
+    performUpdate: () => request('/system/update', { method: 'POST' }),
 };

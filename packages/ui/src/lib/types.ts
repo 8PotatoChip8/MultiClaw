@@ -10,6 +10,7 @@ export interface Agent {
     effective_model: string;
     system_prompt: string | null;
     vm_id: string | null;
+    handle: string | null;
     status: string;
     created_at: string;
 }
