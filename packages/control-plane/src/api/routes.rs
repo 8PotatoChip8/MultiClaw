@@ -492,6 +492,7 @@ async fn send_message(
                         let thread_agent_id: Option<Uuid> = sqlx::query_scalar(
                             "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT' LIMIT 1"
                         )
+                        .bind(tid)
                         .fetch_optional(&state_clone.db)
                         .await
                         .ok()
