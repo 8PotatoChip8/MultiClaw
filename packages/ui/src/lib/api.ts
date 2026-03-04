@@ -92,4 +92,15 @@ export const api = {
     // System Updates
     checkForUpdate: () => request('/system/update-check'),
     performUpdate: () => request('/system/update', { method: 'POST' }),
+
+    // Container Status
+    getContainers: () => request('/system/containers'),
+    getContainerLogs: (id: string, tail?: number) => request(`/system/containers/${id}/logs?tail=${tail || 200}`),
+
+    // Agent Memories
+    getAgentMemories: (agentId: string) => request(`/agents/${agentId}/memories`),
+    createAgentMemory: (agentId: string, data: { category: string; key: string; content: string; importance?: number }) =>
+        request(`/agents/${agentId}/memories`, { method: 'POST', body: JSON.stringify(data) }),
+    deleteAgentMemory: (agentId: string, memoryId: string) =>
+        request(`/agents/${agentId}/memories/${memoryId}`, { method: 'DELETE' }),
 };

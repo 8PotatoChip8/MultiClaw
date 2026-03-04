@@ -22,6 +22,7 @@ services:
     volumes:
       - /var/lib/multiclaw:/var/lib/multiclaw
       - /var/run/incus:/var/run/incus # Needed for MV incus CLI access
+      - /var/run/docker.sock:/var/run/docker.sock # Needed for container status/logs
     pid: "host" # Needs host network access to run subprocess incus CLI simply
     network_mode: "host" # We bind to host so incus CLI works directly inside or we just mount sockets
     depends_on:

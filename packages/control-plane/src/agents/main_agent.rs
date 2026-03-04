@@ -54,6 +54,27 @@ impl MainAgent {
     /// Primary loop: handles a user message, calls Ollama, executes tools, returns response.
     pub async fn handle_message(&self, db_pool: &PgPool, user_content: &str) -> Result<String> {
         let tools = self.get_tools();
+
+        // Fetch agent memories to inject into system prompt
+        let agent_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten();
+
+        let mut memory_section = String::new();
+        if let Some(aid) = agent_id {
+            let memories: Vec<(String, String, String)> = sqlx::query_as(
+                "SELECT category, key, content FROM agent_memories \
+                 WHERE agent_id = $1 ORDER BY importance DESC, updated_at DESC LIMIT 20"
+            ).bind(aid).fetch_all(db_pool).await.unwrap_or_default();
+
+            if !memories.is_empty() {
+                memory_section.push_str("\n\nYour memories (use these to maintain context):\n");
+                for (cat, key, content) in &memories {
+                    memory_section.push_str(&format!("- [{}] {}: {}\n", cat, key, content));
+                }
+            }
+        }
+
         let mut messages = vec![
             json!({
                 "role": "system",
@@ -63,8 +84,10 @@ impl MainAgent {
                      and oversee all operations. You can use the provided tools to take actions. \
                      Be concise, decisive, and proactive. When asked to create a company, \
                      always hire a CEO for it immediately after creation. \
-                     When reporting results, be specific about what you did (include names, IDs).",
-                    self.name
+                     When reporting results, be specific about what you did (include names, IDs). \
+                     Use save_memory to remember important facts, tasks, and context. \
+                     Use recall_memories to check what you remember about a topic.{}",
+                    self.name, memory_section
                 )
             }),
             json!({
@@ -256,6 +279,51 @@ impl MainAgent {
                     }
                 }
             }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "save_memory",
+                    "description": "Save an important piece of information to your long-term memory. Use this to remember tasks, context, identity facts, and notes.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "category": { "type": "string", "enum": ["IDENTITY","TASK","CONTEXT","NOTE"], "description": "Memory category" },
+                            "key": { "type": "string", "description": "Short key/label for this memory" },
+                            "content": { "type": "string", "description": "The content to remember" },
+                            "importance": { "type": "integer", "description": "1-10 importance level (10=critical)" }
+                        },
+                        "required": ["category", "key", "content"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "recall_memories",
+                    "description": "Search your memories for information matching a keyword or topic.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": { "type": "string", "description": "Keyword or topic to search for" }
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "forget_memory",
+                    "description": "Remove a memory by its key.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "key": { "type": "string", "description": "Key of the memory to forget" }
+                        },
+                        "required": ["key"]
+                    }
+                }
+            }),
         ]
     }
 
@@ -280,6 +348,9 @@ impl MainAgent {
             "list_pending_requests" => self.tool_list_pending_requests(db_pool).await,
             "approve_request" => self.tool_approve_request(db_pool, args).await,
             "update_company" => self.tool_update_company(db_pool, args).await,
+            "save_memory" => self.tool_save_memory(db_pool, args).await,
+            "recall_memories" => self.tool_recall_memories(db_pool, args).await,
+            "forget_memory" => self.tool_forget_memory(db_pool, args).await,
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -570,6 +641,105 @@ impl MainAgent {
         {
             Ok(_) => format!("Company {} updated successfully.", company_id),
             Err(e) => format!("Failed to update company: {}", e),
+        }
+    }
+
+    async fn tool_save_memory(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let category = args.get("category").and_then(|v| v.as_str()).unwrap_or("NOTE");
+        let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let content = args.get("content").and_then(|v| v.as_str()).unwrap_or("");
+        let importance = args.get("importance").and_then(|v| v.as_i64()).unwrap_or(5) as i32;
+
+        if key.is_empty() || content.is_empty() {
+            return "Error: key and content are required".to_string();
+        }
+
+        // Get MainAgent's agent ID
+        let agent_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten();
+
+        let aid = match agent_id {
+            Some(id) => id,
+            None => return "Error: could not find main agent".to_string(),
+        };
+
+        let mem_id = Uuid::new_v4();
+        match sqlx::query(
+            "INSERT INTO agent_memories (id, agent_id, category, key, content, importance) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT (agent_id, category, key) DO UPDATE SET content = $5, importance = $6, updated_at = NOW()"
+        )
+        .bind(mem_id).bind(aid).bind(category).bind(key).bind(content).bind(importance)
+        .execute(db_pool).await {
+            Ok(_) => format!("Memory saved: [{}] {} (importance: {})", category, key, importance),
+            Err(e) => format!("Failed to save memory: {}", e),
+        }
+    }
+
+    async fn tool_recall_memories(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
+        let agent_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten();
+
+        let aid = match agent_id {
+            Some(id) => id,
+            None => return "No memories found".to_string(),
+        };
+
+        let pattern = format!("%{}%", query);
+        let memories: Vec<(String, String, String, i32)> = sqlx::query_as(
+            "SELECT category, key, content, importance FROM agent_memories \
+             WHERE agent_id = $1 AND (key ILIKE $2 OR content ILIKE $2) \
+             ORDER BY importance DESC, updated_at DESC LIMIT 10"
+        ).bind(aid).bind(&pattern).fetch_all(db_pool).await.unwrap_or_default();
+
+        if memories.is_empty() {
+            return format!("No memories found matching '{}'", query);
+        }
+
+        let mut result = format!("Found {} memories matching '{}':\n", memories.len(), query);
+        for (cat, key, content, imp) in &memories {
+            result.push_str(&format!("- [{}] {} (importance: {}): {}\n", cat, key, imp, content));
+        }
+        result
+    }
+
+    async fn tool_forget_memory(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let key = args.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let agent_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+        ).fetch_optional(db_pool).await.ok().flatten();
+
+        let aid = match agent_id {
+            Some(id) => id,
+            None => return "Error: could not find main agent".to_string(),
+        };
+
+        match sqlx::query("DELETE FROM agent_memories WHERE agent_id = $1 AND key = $2")
+            .bind(aid).bind(key).execute(db_pool).await
+        {
+            Ok(r) => {
+                if r.rows_affected() > 0 {
+                    format!("Memory '{}' forgotten.", key)
+                } else {
+                    format!("No memory found with key '{}'", key)
+                }
+            }
+            Err(e) => format!("Failed to forget memory: {}", e),
         }
     }
 }

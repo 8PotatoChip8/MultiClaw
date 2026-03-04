@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, patch},
+    routing::{get, post, patch, delete},
     Json, Router,
 };
 use serde::Deserialize;
@@ -39,6 +39,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
+        .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
+        .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
         // Threads & Messages
         .route("/v1/threads", get(get_threads).post(create_thread))
         .route("/v1/threads/:id", get(get_thread))
@@ -59,6 +61,8 @@ pub fn app_router(state: AppState) -> Router {
         // System
         .route("/v1/system/update-check", get(system_update_check))
         .route("/v1/system/update", post(system_update))
+        .route("/v1/system/containers", get(list_containers))
+        .route("/v1/system/containers/:id/logs", get(get_container_logs))
         // Events WS
         .route("/v1/events", get(events_handler))
         .layer(cors)
@@ -882,4 +886,120 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
     });
 
     (StatusCode::ACCEPTED, Json(json!({"status":"update_started"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Docker Container Status & Logs
+// ═══════════════════════════════════════════════════════════════
+
+async fn list_containers() -> impl IntoResponse {
+    let output = tokio::process::Command::new("docker")
+        .args(["ps", "-a", "--format", "{{json .}}"])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let containers: Vec<Value> = stdout
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .filter_map(|l| serde_json::from_str(l).ok())
+                .collect();
+            (StatusCode::OK, Json(json!(containers)))
+        }
+        Err(e) => {
+            tracing::error!("Failed to run docker ps: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Docker CLI error: {}", e)})))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct LogQuery {
+    tail: Option<u32>,
+}
+
+async fn get_container_logs(Path(id): Path<String>, Query(q): Query<LogQuery>) -> impl IntoResponse {
+    let tail = q.tail.unwrap_or(200).to_string();
+    let output = tokio::process::Command::new("docker")
+        .args(["logs", "--tail", &tail, "--timestamps", &id])
+        .output()
+        .await;
+
+    match output {
+        Ok(out) => {
+            let mut logs = String::from_utf8_lossy(&out.stdout).to_string();
+            // Docker logs stderr for some containers
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            if !stderr.is_empty() {
+                logs.push_str(&stderr);
+            }
+            (StatusCode::OK, Json(json!({"container_id": id, "logs": logs})))
+        }
+        Err(e) => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to get logs: {}", e)})))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent Memories
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(sqlx::FromRow, serde::Serialize)]
+struct AgentMemory {
+    id: Uuid,
+    agent_id: Uuid,
+    category: String,
+    key: String,
+    content: String,
+    importance: i32,
+    created_at: chrono::DateTime<chrono::Utc>,
+    updated_at: chrono::DateTime<chrono::Utc>,
+}
+
+async fn get_agent_memories(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, AgentMemory>(
+        "SELECT id, agent_id, category, key, content, importance, created_at, updated_at \
+         FROM agent_memories WHERE agent_id = $1 ORDER BY importance DESC, updated_at DESC"
+    ).bind(uid).fetch_all(&state.db).await {
+        Ok(m) => (StatusCode::OK, Json(json!(m))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
+}
+
+#[derive(Deserialize)]
+struct CreateMemoryRequest {
+    category: String,
+    key: String,
+    content: String,
+    importance: Option<i32>,
+}
+
+async fn create_agent_memory(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateMemoryRequest>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let mem_id = Uuid::new_v4();
+    let importance = p.importance.unwrap_or(5);
+
+    // Upsert: if same agent+category+key exists, update it
+    match sqlx::query(
+        "INSERT INTO agent_memories (id, agent_id, category, key, content, importance) \
+         VALUES ($1, $2, $3, $4, $5, $6) \
+         ON CONFLICT (agent_id, category, key) DO UPDATE SET content = $5, importance = $6, updated_at = NOW()"
+    )
+    .bind(mem_id).bind(agent_id).bind(&p.category).bind(&p.key).bind(&p.content).bind(importance)
+    .execute(&state.db).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!({"id": mem_id, "status": "saved"}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+async fn delete_agent_memory(State(state): State<AppState>, Path((id, mid)): Path<(String, String)>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))) };
+    let mem_id = match Uuid::parse_str(&mid) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid memory ID"}))) };
+    let _ = sqlx::query("DELETE FROM agent_memories WHERE id = $1 AND agent_id = $2")
+        .bind(mem_id).bind(agent_id).execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"deleted"})))
 }
