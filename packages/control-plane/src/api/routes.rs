@@ -844,7 +844,7 @@ async fn send_message(
                         };
 
                         // OpenClaw is the agent's brain — no fallback to raw LLM
-                        let result = match state_clone.openclaw.send_message(responding_agent_id, &user_text).await {
+                        let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(responding_agent_id, &user_text).await {
                             Ok(response) => {
                                 tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
                                 Ok(response)
