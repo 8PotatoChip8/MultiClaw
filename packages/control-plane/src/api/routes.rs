@@ -171,6 +171,42 @@ async fn create_company(State(state): State<AppState>, Json(payload): Json<Creat
     .fetch_one(&state.db).await {
         Ok(c) => {
             let _ = state.tx.send(json!({"type":"company_created","company": c}).to_string());
+
+            // Autonomous org bootstrapping: ask MainAgent to hire staff
+            let company_name = payload.name.clone();
+            let company_desc = payload.description.clone().unwrap_or_else(|| "general operations".into());
+            let company_id = id;
+            let state_clone = state.clone();
+
+            tokio::spawn(async move {
+                tracing::info!("Starting autonomous org bootstrap for company '{}' ({})", company_name, company_id);
+
+                let prompt = format!(
+                    "A new company called '{}' has been created with purpose: '{}'. \
+                     Its ID is {}. Please do the following:\n\
+                     1. Hire a CEO for this company with an appropriate name and specialty.\n\
+                     2. Hire 2 managers with different specialties relevant to the company's purpose.\n\
+                     3. Hire 1 worker under the company for initial operations.\n\
+                     Execute these hires now using your tools.",
+                    company_name, company_desc, company_id
+                );
+
+                match state_clone.main_agent.handle_message(&state_clone.db, &prompt).await {
+                    Ok(response) => {
+                        tracing::info!("Org bootstrap complete for '{}': {}", company_name, &response[..response.len().min(200)]);
+                        // Broadcast an event so the UI updates
+                        let _ = state_clone.tx.send(json!({
+                            "type": "org_bootstrap_complete",
+                            "company_id": company_id,
+                            "summary": response
+                        }).to_string());
+                    }
+                    Err(e) => {
+                        tracing::error!("Org bootstrap failed for '{}': {}", company_name, e);
+                    }
+                }
+            });
+
             (StatusCode::CREATED, Json(json!(c)))
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
@@ -429,6 +465,70 @@ async fn send_message(
     .fetch_one(&state.db).await {
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
+
+            // If the sender is a USER, trigger MainAgent to respond
+            if sender_type == "USER" {
+                let user_text = p.content.get("text")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                if !user_text.is_empty() {
+                    let state_clone = state.clone();
+                    let tid = thread_id;
+                    tokio::spawn(async move {
+                        tracing::info!("MainAgent processing message: '{}'", &user_text[..user_text.len().min(100)]);
+                        match state_clone.main_agent.handle_message(&state_clone.db, &user_text).await {
+                            Ok(response) => {
+                                // Get the MainAgent's agent ID
+                                let agent_id: Uuid = sqlx::query_scalar(
+                                    "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                                )
+                                .fetch_optional(&state_clone.db)
+                                .await
+                                .ok()
+                                .flatten()
+                                .unwrap_or(Uuid::new_v4());
+
+                                // Insert agent response as a new message
+                                let resp_id = Uuid::new_v4();
+                                let content = json!({"text": response});
+                                if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4) \
+                                     RETURNING id, thread_id, sender_type, sender_id, content, created_at"
+                                )
+                                .bind(resp_id)
+                                .bind(tid)
+                                .bind(agent_id)
+                                .bind(&content)
+                                .fetch_one(&state_clone.db)
+                                .await {
+                                    let _ = state_clone.tx.send(
+                                        json!({"type":"new_message","message": agent_msg}).to_string()
+                                    );
+                                    tracing::info!("MainAgent responded on thread {}", tid);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("MainAgent error: {}", e);
+                                // Insert error message so user sees something
+                                let resp_id = Uuid::new_v4();
+                                let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
+                                let _ = sqlx::query(
+                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4)"
+                                )
+                                .bind(resp_id)
+                                .bind(tid)
+                                .bind(Uuid::new_v4())
+                                .bind(&content)
+                                .execute(&state_clone.db)
+                                .await;
+                            }
+                        }
+                    });
+                }
+            }
+
             (StatusCode::CREATED, Json(json!(msg)))
         },
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))

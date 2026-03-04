@@ -8,12 +8,14 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::config::Config;
+use crate::agents::main_agent::MainAgent;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: PgPool,
     pub tx: Arc<broadcast::Sender<String>>,
     pub config: Config,
+    pub main_agent: Arc<MainAgent>,
 }
 
 /// Handler for the centralized event stream (used by the Next.js UI)
