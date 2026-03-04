@@ -503,6 +503,7 @@ impl OpenClawManager {
     fn default_config_template(&self) -> String {
         r#"{
   "gateway": {
+    "mode": "local",
     "bind": "lan",
     "port": {{AGENT_PORT}},
     "auth": { "mode": "token", "token": "{{GATEWAY_TOKEN}}" }

@@ -843,30 +843,30 @@ async fn send_message(
                             }
                         };
 
-                        // Try OpenClaw first, fall back to built-in handlers
+                        // OpenClaw is the agent's brain — no fallback to raw LLM
                         let result = match state_clone.openclaw.send_message(responding_agent_id, &user_text).await {
                             Ok(response) => {
                                 tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
                                 Ok(response)
                             }
                             Err(e) => {
-                                tracing::warn!("OpenClaw unavailable for agent {}, falling back: {}", responding_agent_id, e);
-                                // Check if this is the MainAgent or a sub-agent
-                                let agent_role: Option<String> = sqlx::query_scalar(
-                                    "SELECT role FROM agents WHERE id = $1"
+                                tracing::warn!("OpenClaw unavailable for agent {}: {}", responding_agent_id, e);
+                                // Agent's brain is offline — let the user know
+                                let agent_name: String = sqlx::query_scalar(
+                                    "SELECT name FROM agents WHERE id = $1"
                                 )
                                 .bind(responding_agent_id)
                                 .fetch_optional(&state_clone.db)
                                 .await
                                 .ok()
-                                .flatten();
+                                .flatten()
+                                .unwrap_or_else(|| "Agent".to_string());
 
-                                let is_main = agent_role.as_deref() == Some("MAIN");
-                                if is_main {
-                                    state_clone.main_agent.handle_message(&state_clone.db, &user_text).await
-                                } else {
-                                    state_clone.sub_agent.handle_message(&state_clone.db, responding_agent_id, &user_text).await
-                                }
+                                Ok(format!(
+                                    "⚠️ {} is currently unavailable — their OpenClaw runtime is not running. \
+                                     Please wait for their instance to come online before sending messages.",
+                                    agent_name
+                                ))
                             }
                         };
 
