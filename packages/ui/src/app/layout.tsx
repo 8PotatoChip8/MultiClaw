@@ -18,25 +18,36 @@ const navItems = [
 ];
 
 function UpdateBanner() {
-    const [updateInfo, setUpdateInfo] = useState<{ update_available: boolean; latest_version: string; current_version: string; release_url: string } | null>(null);
+    const [updateInfo, setUpdateInfo] = useState<{ update_available: boolean; latest_version: string; current_version: string; channel?: string; release_url: string } | null>(null);
     const [updating, setUpdating] = useState(false);
     const [status, setStatus] = useState<string | null>(null);
 
+    const checkUpdate = async () => {
+        try {
+            const apiUrl = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080/v1` : '';
+            const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';
+            const res = await fetch(`${apiUrl}/system/update-check`, {
+                headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
+            });
+            const data = await res.json();
+            setUpdateInfo(data);
+        } catch { }
+    };
+
     useEffect(() => {
-        const checkUpdate = async () => {
-            try {
-                const apiUrl = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080/v1` : '';
-                const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';
-                const res = await fetch(`${apiUrl}/system/update-check`, {
-                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
-                });
-                const data = await res.json();
-                setUpdateInfo(data);
-            } catch { }
-        };
         checkUpdate();
-        const interval = setInterval(checkUpdate, 5 * 60 * 1000); // every 5 min
-        return () => clearInterval(interval);
+        const interval = setInterval(checkUpdate, 5 * 60 * 1000);
+        // Poll localStorage for update info written by settings page (same-tab reactivity)
+        const pollLocal = setInterval(() => {
+            const stored = localStorage.getItem('_update_info');
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    setUpdateInfo(parsed);
+                } catch {}
+            }
+        }, 2000);
+        return () => { clearInterval(interval); clearInterval(pollLocal); };
     }, []);
 
     const handleUpdate = async () => {
@@ -60,6 +71,12 @@ function UpdateBanner() {
 
     if (!updateInfo?.update_available) return null;
 
+    // For dev/beta channels, versions already include channel prefix (e.g. "dev-18961e2")
+    // so don't add "v" prefix. For stable, add "v".
+    const isCommitBased = updateInfo.channel === 'dev' || updateInfo.channel === 'beta';
+    const currentDisplay = isCommitBased ? updateInfo.current_version : `v${updateInfo.current_version}`;
+    const latestDisplay = isCommitBased ? updateInfo.latest_version : `v${updateInfo.latest_version}`;
+
     return (
         <div style={{
             padding: '10px 12px', margin: '0 8px 8px', borderRadius: '8px',
@@ -72,7 +89,7 @@ function UpdateBanner() {
                 Update Available
             </div>
             <div style={{ color: 'var(--text-muted)', marginBottom: '8px' }}>
-                v{updateInfo.current_version} → v{updateInfo.latest_version}
+                {currentDisplay} → {latestDisplay}
             </div>
             {status ? (
                 <div style={{ fontSize: '11px', color: 'var(--accent)' }}>{status}</div>

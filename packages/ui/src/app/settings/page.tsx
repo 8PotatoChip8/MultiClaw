@@ -39,6 +39,8 @@ export default function SettingsPage() {
         setChecking(true);
         const info = await api.checkForUpdate();
         setUpdateInfo(info);
+        // Notify sidebar banner via localStorage
+        if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
     };
 
@@ -46,6 +48,8 @@ export default function SettingsPage() {
         setChecking(true);
         const info = await api.checkForUpdate();
         setUpdateInfo(info);
+        // Notify sidebar banner via localStorage
+        if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
     };
 
@@ -134,20 +138,31 @@ export default function SettingsPage() {
 
                 {updateInfo ? (
                     <div style={{ fontSize: '13px' }}>
-                        <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '8px', marginBottom: '12px' }}>
-                            <span style={{ color: 'var(--text-muted)' }}>Current version:</span>
-                            <span style={{ fontFamily: 'monospace' }}>v{updateInfo.current_version}</span>
-                            <span style={{ color: 'var(--text-muted)' }}>Channel:</span>
-                            <span style={{ fontWeight: 600, color: channelInfo[updateInfo.channel as Channel]?.color || 'var(--text)' }}>
-                                {channelInfo[updateInfo.channel as Channel]?.label || updateInfo.channel}
-                            </span>
-                            <span style={{ color: 'var(--text-muted)' }}>Latest available:</span>
-                            <span style={{ fontFamily: 'monospace' }}>{updateInfo.latest_version}</span>
-                            {updateInfo.commit_message && (<>
-                                <span style={{ color: 'var(--text-muted)' }}>Latest commit:</span>
-                                <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{updateInfo.commit_message}</span>
-                            </>)}
-                        </div>
+                        {(() => {
+                            const isCommitBased = updateInfo.channel === 'dev' || updateInfo.channel === 'beta';
+                            const currentDisplay = isCommitBased ? updateInfo.current_version : `v${updateInfo.current_version}`;
+                            const latestDisplay = isCommitBased ? updateInfo.latest_version : `v${updateInfo.latest_version}`;
+                            return (
+                                <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '8px', marginBottom: '12px' }}>
+                                    <span style={{ color: 'var(--text-muted)' }}>Current version:</span>
+                                    <span style={{ fontFamily: 'monospace' }}>{currentDisplay}</span>
+                                    <span style={{ color: 'var(--text-muted)' }}>Channel:</span>
+                                    <span style={{ fontWeight: 600, color: channelInfo[updateInfo.channel as Channel]?.color || 'var(--text)' }}>
+                                        {channelInfo[updateInfo.channel as Channel]?.label || updateInfo.channel}
+                                    </span>
+                                    <span style={{ color: 'var(--text-muted)' }}>Latest available:</span>
+                                    <span style={{ fontFamily: 'monospace' }}>{latestDisplay}</span>
+                                    {updateInfo.semver && isCommitBased && (<>
+                                        <span style={{ color: 'var(--text-muted)' }}>Release version:</span>
+                                        <span style={{ fontFamily: 'monospace' }}>v{updateInfo.semver}</span>
+                                    </>)}
+                                    {updateInfo.commit_message && (<>
+                                        <span style={{ color: 'var(--text-muted)' }}>Latest commit:</span>
+                                        <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>{updateInfo.commit_message}</span>
+                                    </>)}
+                                </div>
+                            );
+                        })()}
                         {updateInfo.update_available ? (
                             <div style={{
                                 padding: '10px 14px', borderRadius: '8px',

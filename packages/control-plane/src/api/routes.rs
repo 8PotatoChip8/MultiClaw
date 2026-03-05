@@ -1423,11 +1423,18 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                         let deployed_short = &deployed_commit[..7.min(deployed_commit.len())];
                         let commit_msg = body["commit"]["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
                         let update_available = deployed_commit == "unknown" || latest_sha != deployed_commit;
+                        // For dev/beta: current_version uses commit SHA so comparison is consistent
+                        let current_display = if deployed_commit == "unknown" {
+                            CURRENT_VERSION.to_string()
+                        } else {
+                            format!("{}-{}", channel, deployed_short)
+                        };
                         return (StatusCode::OK, Json(json!({
-                            "current_version": CURRENT_VERSION,
+                            "current_version": current_display,
                             "latest_version": format!("{}-{}", channel, short_sha),
                             "update_available": update_available,
                             "channel": channel,
+                            "semver": CURRENT_VERSION,
                             "deployed_commit": deployed_short,
                             "latest_commit": short_sha,
                             "commit_message": commit_msg,
@@ -1442,6 +1449,7 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                 "latest_version": "unknown",
                 "update_available": false,
                 "channel": channel,
+                "semver": CURRENT_VERSION,
                 "error": format!("Could not reach GitHub (branch: {})", branch)
             })))
         },
@@ -1458,6 +1466,7 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                             "latest_version": latest,
                             "update_available": update_available,
                             "channel": "stable",
+                            "semver": CURRENT_VERSION,
                             "release_url": body["html_url"].as_str().unwrap_or("")
                         })));
                     }
@@ -1469,6 +1478,7 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                 "latest_version": CURRENT_VERSION,
                 "update_available": false,
                 "channel": "stable",
+                "semver": CURRENT_VERSION,
                 "release_url": ""
             })))
         }
