@@ -1423,12 +1423,8 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                         let deployed_short = &deployed_commit[..7.min(deployed_commit.len())];
                         let commit_msg = body["commit"]["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
                         let update_available = deployed_commit == "unknown" || latest_sha != deployed_commit;
-                        // For dev/beta: current_version uses commit SHA so comparison is consistent
-                        let current_display = if deployed_commit == "unknown" {
-                            CURRENT_VERSION.to_string()
-                        } else {
-                            format!("{}-{}", channel, deployed_short)
-                        };
+                        // For dev/beta: always use commit-based format so comparison is consistent
+                        let current_display = format!("{}-{}", channel, deployed_short);
                         return (StatusCode::OK, Json(json!({
                             "current_version": current_display,
                             "latest_version": format!("{}-{}", channel, short_sha),
