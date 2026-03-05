@@ -40,6 +40,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/stop", post(vm_stop))
         .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
         .route("/v1/agents/:id/vm/provision", post(vm_provision))
+        .route("/v1/agents/:id/vm/sandbox/provision", post(vm_sandbox_provision))
         .route("/v1/agents/:id/vm/exec", post(vm_exec))
         .route("/v1/agents/:id/vm/info", get(vm_info))
         .route("/v1/agents/:id/vm/file/push", post(vm_file_push))
@@ -250,7 +251,7 @@ async fn create_company(State(state): State<AppState>, Json(payload): Json<Creat
 async fn get_org_tree(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
          FROM agents WHERE company_id = $1 ORDER BY role, name"
     ).bind(uid).fetch_all(&state.db).await {
         Ok(agents) => (StatusCode::OK, Json(json!({"company_id": uid, "tree": agents}))),
@@ -264,7 +265,7 @@ async fn get_org_tree(State(state): State<AppState>, Path(id): Path<String>) -> 
 
 async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
          FROM agents ORDER BY created_at"
     ).fetch_all(&state.db).await {
         Ok(a) => (StatusCode::OK, Json(json!(a))),
@@ -275,7 +276,7 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
 async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     match sqlx::query_as::<_, Agent>(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at \
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
          FROM agents WHERE id = $1"
     ).bind(uid).fetch_optional(&state.db).await {
         Ok(Some(a)) => (StatusCode::OK, Json(json!(a))),
@@ -362,7 +363,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
 async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let ceo_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let ceo: Option<Agent> = sqlx::query_as(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
     ).bind(ceo_id).fetch_optional(&state.db).await.unwrap_or(None);
     let ceo = match ceo { Some(c) => c, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"CEO not found"}))) };
     let company_id = match ceo.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"CEO has no company"}))) };
@@ -424,7 +425,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
 async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let mgr_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let mgr: Option<Agent> = sqlx::query_as(
-        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
     ).bind(mgr_id).fetch_optional(&state.db).await.unwrap_or(None);
     let mgr = match mgr { Some(m) => m, None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Manager not found"}))) };
     let company_id = match mgr.company_id { Some(c) => c, None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Manager has no company"}))) };
@@ -640,20 +641,39 @@ async fn provision_agent_vm(
 }
 
 // ═══════════════════════════════════════════════════════════════
+// VM Target Resolution
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct VmTargetQuery {
+    target: Option<String>, // "desktop" (default) or "sandbox"
+}
+
+async fn resolve_vm_ref(db: &sqlx::PgPool, agent_id: Uuid, target: &str) -> Option<String> {
+    if target == "sandbox" {
+        sqlx::query_scalar(
+            "SELECT v.provider_ref FROM vms v JOIN agents a ON a.sandbox_vm_id = v.id WHERE a.id = $1"
+        ).bind(agent_id).fetch_optional(db).await.ok().flatten()
+    } else {
+        sqlx::query_scalar(
+            "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+        ).bind(agent_id).fetch_optional(db).await.ok().flatten()
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // VM Actions
 // ═══════════════════════════════════════════════════════════════
 
-async fn vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn vm_start(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    // Look up the VM's provider_ref (Incus name) via the vms table
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if state.vm_provider.is_some() {
                 let _ = tokio::process::Command::new("incus").args(&["start", name]).output().await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_started","vm_name": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_started","vm_name": name, "target": target})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
@@ -662,16 +682,15 @@ async fn vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl
     }
 }
 
-async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
                 let _ = provider.stop(name).await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_stopped","vm_name": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"vm_stopped","vm_name": name, "target": target})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
@@ -680,27 +699,32 @@ async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl 
     }
 }
 
-async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+
+    // Cannot wipe/rebuild the persistent desktop VM
+    if target == "desktop" {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Cannot wipe the persistent desktop VM. Only sandbox VMs can be rebuilt."})));
+    }
+
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
                 let _ = provider.destroy(name).await;
-                // Clean up: remove vms record and unlink from agent
+                // Clean up: remove vms record and unlink sandbox from agent
                 let _ = sqlx::query(
-                    "DELETE FROM vms WHERE id = (SELECT vm_id FROM agents WHERE id = $1)"
+                    "DELETE FROM vms WHERE id = (SELECT sandbox_vm_id FROM agents WHERE id = $1)"
                 ).bind(uid).execute(&state.db).await;
-                let _ = sqlx::query("UPDATE agents SET vm_id = NULL WHERE id = $1")
+                let _ = sqlx::query("UPDATE agents SET sandbox_vm_id = NULL WHERE id = $1")
                     .bind(uid).execute(&state.db).await;
-                (StatusCode::ACCEPTED, Json(json!({"status":"vm_destroyed_for_rebuild","vm_name": name})))
+                (StatusCode::ACCEPTED, Json(json!({"status":"sandbox_destroyed_for_rebuild","vm_name": name})))
             } else {
                 (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
             }
         }
-        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No sandbox VM assigned to this agent"})))
     }
 }
 
@@ -732,6 +756,74 @@ async fn vm_provision(State(state): State<AppState>, Path(id): Path<String>) -> 
     }
 }
 
+/// Provision a sandbox VM for an agent (lightweight temp environment)
+async fn vm_sandbox_provision(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Check if agent already has a sandbox VM
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT sandbox_vm_id FROM agents WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    if existing.is_some() {
+        return (StatusCode::CONFLICT, Json(json!({"error": "Agent already has a sandbox VM assigned"})));
+    }
+
+    let provider = match state.vm_provider {
+        Some(ref p) => p.clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"}))),
+    };
+
+    let db = state.db.clone();
+    let tx = state.tx.clone();
+
+    tokio::spawn(async move {
+        let vm_name = format!("mc-{}-sb", &uid.to_string()[..8]);
+        tracing::info!("Provisioning sandbox VM '{}' for agent {}", vm_name, uid);
+
+        // Minimal cloud-init: just create agent user
+        let cloud_init = format!(
+            "#cloud-config\nhostname: {}\nusers:\n  - name: agent\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\npackage_update: true\npackages:\n  - curl\n  - git\n  - build-essential\n",
+            vm_name
+        );
+
+        let resources = VmResources { vcpus: 1, memory_mb: 1024, disk_gb: 10 };
+
+        match provider.provision(&vm_name, &resources, &cloud_init).await {
+            Ok(details) => {
+                tracing::info!("Sandbox VM '{}' provisioned for agent {}, ip={:?}", vm_name, uid, details.ip_address);
+                let vm_uuid = Uuid::new_v4();
+                let resources_json = serde_json::json!({
+                    "vcpus": resources.vcpus, "memory_mb": resources.memory_mb, "disk_gb": resources.disk_gb
+                });
+                let _ = sqlx::query(
+                    "INSERT INTO vms (id, provider, provider_ref, hostname, ip_address, resources, state, vm_type) \
+                     VALUES ($1, 'incus', $2, $3, $4, $5, 'RUNNING', 'sandbox')"
+                )
+                .bind(vm_uuid).bind(&vm_name).bind(&vm_name)
+                .bind(&details.ip_address).bind(&resources_json)
+                .execute(&db).await;
+
+                let _ = sqlx::query("UPDATE agents SET sandbox_vm_id = $1 WHERE id = $2")
+                    .bind(vm_uuid).bind(uid).execute(&db).await;
+
+                let _ = tx.send(json!({
+                    "type": "sandbox_provisioned", "agent_id": uid,
+                    "vm_id": vm_name, "ip": details.ip_address
+                }).to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to provision sandbox VM for agent {}: {}", uid, e);
+                let _ = tx.send(json!({
+                    "type": "sandbox_provision_failed", "agent_id": uid, "error": e.to_string()
+                }).to_string());
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({"status": "provisioning_sandbox", "agent_id": uid})))
+}
+
 async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let _ = sqlx::query("UPDATE agents SET status = 'QUARANTINED' WHERE id = $1").bind(uid).execute(&state.db).await;
@@ -751,11 +843,10 @@ struct VmExecRequest {
     timeout_secs: Option<u64>,
 }
 
-async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmExecRequest>) -> impl IntoResponse {
+async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmExecRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
@@ -777,11 +868,10 @@ async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Json(bod
     }
 }
 
-async fn vm_info(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn vm_info(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
@@ -804,11 +894,10 @@ struct VmFilePushRequest {
     encoding: Option<String>, // "base64" or "text" (default)
 }
 
-async fn vm_file_push(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmFilePushRequest>) -> impl IntoResponse {
+async fn vm_file_push(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmFilePushRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {
@@ -838,11 +927,10 @@ struct VmFilePullRequest {
     path: String,
 }
 
-async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmFilePullRequest>) -> impl IntoResponse {
+async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmFilePullRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let vm_ref: Option<String> = sqlx::query_scalar(
-        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
-    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let target = q.target.as_deref().unwrap_or("desktop");
+    let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {
             if let Some(ref provider) = state.vm_provider {

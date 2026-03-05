@@ -63,6 +63,7 @@ pub struct Agent {
     pub system_prompt: Option<String>,
     pub tool_policy_id: Uuid,
     pub vm_id: Option<Uuid>,
+    pub sandbox_vm_id: Option<Uuid>,
     pub handle: Option<String>,
     pub status: String,
     pub created_at: DateTime<Utc>,
@@ -101,6 +102,7 @@ pub struct Vm {
     pub ip_address: Option<String>,
     pub resources: JsonValue,
     pub state: String,
+    pub vm_type: String,
     pub last_heartbeat_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
 }

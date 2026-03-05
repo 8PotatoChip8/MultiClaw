@@ -49,16 +49,18 @@ export const api = {
         request(`/agents/${ceoId}/hire-manager`, { method: 'POST', body: JSON.stringify(data) }),
     hireWorker: (mgrId: string, data: { name: string; specialty?: string; preferred_model?: string }) =>
         request(`/agents/${mgrId}/hire-worker`, { method: 'POST', body: JSON.stringify(data) }),
-    vmStart: (id: string) => request(`/agents/${id}/vm/start`, { method: 'POST' }),
-    vmStop: (id: string) => request(`/agents/${id}/vm/stop`, { method: 'POST' }),
-    vmRebuild: (id: string) => request(`/agents/${id}/vm/rebuild`, { method: 'POST' }),
-    vmExec: (id: string, data: { command: string; user?: string; working_dir?: string; timeout_secs?: number }) =>
-        request(`/agents/${id}/vm/exec`, { method: 'POST', body: JSON.stringify(data) }),
-    vmInfo: (id: string) => request(`/agents/${id}/vm/info`),
-    vmFilePush: (id: string, data: { path: string; content: string; encoding?: string }) =>
-        request(`/agents/${id}/vm/file/push`, { method: 'POST', body: JSON.stringify(data) }),
-    vmFilePull: (id: string, data: { path: string }) =>
-        request(`/agents/${id}/vm/file/pull`, { method: 'POST', body: JSON.stringify(data) }),
+    vmStart: (id: string, target?: string) => request(`/agents/${id}/vm/start${target ? `?target=${target}` : ''}`, { method: 'POST' }),
+    vmStop: (id: string, target?: string) => request(`/agents/${id}/vm/stop${target ? `?target=${target}` : ''}`, { method: 'POST' }),
+    vmRebuild: (id: string, target?: string) => request(`/agents/${id}/vm/rebuild${target ? `?target=${target}` : ''}`, { method: 'POST' }),
+    vmExec: (id: string, data: { command: string; user?: string; working_dir?: string; timeout_secs?: number }, target?: string) =>
+        request(`/agents/${id}/vm/exec${target ? `?target=${target}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
+    vmInfo: (id: string, target?: string) => request(`/agents/${id}/vm/info${target ? `?target=${target}` : ''}`),
+    vmFilePush: (id: string, data: { path: string; content: string; encoding?: string }, target?: string) =>
+        request(`/agents/${id}/vm/file/push${target ? `?target=${target}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
+    vmFilePull: (id: string, data: { path: string }, target?: string) =>
+        request(`/agents/${id}/vm/file/pull${target ? `?target=${target}` : ''}`, { method: 'POST', body: JSON.stringify(data) }),
+    vmProvision: (id: string) => request(`/agents/${id}/vm/provision`, { method: 'POST' }),
+    vmSandboxProvision: (id: string) => request(`/agents/${id}/vm/sandbox/provision`, { method: 'POST' }),
     panic: (id: string) => request(`/agents/${id}/panic`, { method: 'POST' }),
 
     // Threads & Messages
