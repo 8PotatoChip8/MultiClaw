@@ -36,6 +36,24 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_db(&cfg.database_url).await?;
 
+    // Seed deployed_commit from current git HEAD so the auto-updater can compare
+    let head_sha = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .await
+        .ok()
+        .and_then(|o| if o.status.success() {
+            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+        } else { None })
+        .unwrap_or_else(|| "unknown".to_string());
+
+    sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
+        .bind(&head_sha)
+        .execute(&pool)
+        .await
+        .ok();
+    tracing::info!("Recorded deployed_commit={}", &head_sha[..7.min(head_sha.len())]);
+
     // Try to load MainAgent config from DB (name + model)
     let (agent_name, agent_model) = {
         let row: Option<(String, String)> = sqlx::query_as(

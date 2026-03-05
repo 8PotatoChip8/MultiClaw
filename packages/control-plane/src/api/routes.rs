@@ -1267,9 +1267,18 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
         tracing::info!("Starting system update...");
         let _ = state_clone.tx.send(json!({"type":"system_update","status":"started"}).to_string());
 
-        // Pull latest code
+        // Determine which branch to pull based on update channel
+        let channel: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'update_channel'")
+            .fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "stable".to_string());
+        let branch = match channel.as_str() {
+            "beta" => "beta",
+            "dev" => "main",
+            _ => "main",
+        };
+
+        // Pull latest code from the correct branch
         let pull = tokio::process::Command::new("git")
-            .args(["-C", "/opt/multiclaw", "pull", "origin", "main"])
+            .args(["-C", "/opt/multiclaw", "pull", "origin", branch])
             .output()
             .await;
 
@@ -1281,7 +1290,7 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
                     let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
                     return;
                 }
-                tracing::info!("Git pull successful, rebuilding containers...");
+                tracing::info!("Git pull successful (branch: {}), rebuilding containers...", branch);
             }
             Err(e) => {
                 tracing::error!("Git pull error: {}", e);
@@ -1289,6 +1298,24 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
                 return;
             }
         }
+
+        // Record the new deployed commit SHA
+        let new_sha = tokio::process::Command::new("git")
+            .args(["-C", "/opt/multiclaw", "rev-parse", "HEAD"])
+            .output()
+            .await
+            .ok()
+            .and_then(|o| if o.status.success() {
+                String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+            } else { None })
+            .unwrap_or_else(|| "unknown".to_string());
+
+        sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
+            .bind(&new_sha)
+            .execute(&state_clone.db)
+            .await
+            .ok();
+        tracing::info!("Updated deployed_commit to {}", &new_sha[..7.min(new_sha.len())]);
 
         // Rebuild and restart containers
         let rebuild = tokio::process::Command::new("docker")
