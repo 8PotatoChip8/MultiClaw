@@ -214,6 +214,18 @@ async fn create_company(State(state): State<AppState>, Json(payload): Json<Creat
         .fetch_optional(&state.db).await.unwrap_or(None);
     let holding_id = holding.map(|h| h.id).unwrap_or(Uuid::from_u128(0));
 
+    // Check for duplicate company name
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM companies WHERE holding_id = $1 AND LOWER(name) = LOWER($2)"
+    ).bind(holding_id).bind(&payload.name).fetch_optional(&state.db).await.unwrap_or(None);
+
+    if let Some((existing_id,)) = existing {
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": format!("A company named '{}' already exists", payload.name),
+            "existing_id": existing_id
+        })));
+    }
+
     match sqlx::query_as::<_, Company>(
         "INSERT INTO companies (id, holding_id, name, type, description, status) VALUES ($1,$2,$3,$4,$5,'ACTIVE') \
          RETURNING id, holding_id, name, type, description, tags, status, created_at"
