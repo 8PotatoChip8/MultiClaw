@@ -2,18 +2,19 @@
 import '../styles/globals.css';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server } from 'lucide-react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Settings } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
     { href: '/org', icon: Users2, label: 'Org Tree' },
     { href: '/companies', icon: Building2, label: 'Companies' },
-    { href: '/chats', icon: MessageSquare, label: 'Messages' },
+    { href: '/chats', icon: MessageSquare, label: 'My Chats' },
     { href: '/messaging', icon: Radio, label: 'Agent Comms' },
     { href: '/infrastructure', icon: Server, label: 'Infrastructure' },
     { href: '/approvals', icon: CheckSquare, label: 'Approvals' },
     { href: '/services', icon: Briefcase, label: 'Services' },
     { href: '/ledger', icon: Wallet, label: 'Ledger' },
+    { href: '/settings', icon: Settings, label: 'Settings' },
 ];
 
 function UpdateBanner() {

@@ -213,7 +213,7 @@ export default function ChatsPage() {
             {/* Right Panel — Chat */}
             <div style={{ flex: 1 }}>
                 {selectedThread ? (
-                    <Chat threadId={selectedThread} initialMessages={[]} />
+                    <Chat threadId={selectedThread} threadType={threads.find(t => t.id === selectedThread)?.type} initialMessages={[]} />
                 ) : (
                     <div className="panel" style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '0 12px 12px 0' }}>
                         <div style={{ textAlign: 'center' }}>

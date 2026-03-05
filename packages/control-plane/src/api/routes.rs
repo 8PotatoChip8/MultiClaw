@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, patch, delete},
+    routing::{get, post, patch, put, delete},
     Json, Router,
 };
 use serde::Deserialize;
@@ -66,6 +66,8 @@ pub fn app_router(state: AppState) -> Router {
         // Scripts (served to VMs during cloud-init)
         .route("/v1/scripts/install-openclaw.sh", get(serve_install_script))
         // System
+        .route("/v1/system/settings", get(get_system_settings))
+        .route("/v1/system/settings", put(update_system_settings))
         .route("/v1/system/update-check", get(system_update_check))
         .route("/v1/system/update", post(system_update))
         .route("/v1/system/containers", get(list_containers))
@@ -1165,47 +1167,83 @@ async fn serve_install_script() -> impl IntoResponse {
 
 const CURRENT_VERSION: &str = "0.1.1";
 
-async fn system_update_check(State(_state): State<AppState>) -> impl IntoResponse {
-    // Check GitHub for latest release
+async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse {
+    // Read update channel from system_meta (default: stable)
+    let channel: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'update_channel'")
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "stable".to_string());
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    let github_url = "https://api.github.com/repos/8PotatoChip8/MultiClaw/releases/latest";
-    
-    match client.get(github_url)
-        .header("User-Agent", "MultiClaw-Updater")
-        .send()
-        .await
-    {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                if let Ok(body) = resp.json::<Value>().await {
-                    let latest = body["tag_name"].as_str().unwrap_or("unknown").trim_start_matches('v');
-                    let update_available = latest != CURRENT_VERSION && latest != "unknown";
-                    return (StatusCode::OK, Json(json!({
-                        "current_version": CURRENT_VERSION,
-                        "latest_version": latest,
-                        "update_available": update_available,
-                        "release_url": body["html_url"].as_str().unwrap_or("")
-                    })));
-                }
+    let repo = "8PotatoChip8/MultiClaw";
+
+    match channel.as_str() {
+        "beta" | "dev" => {
+            // Compare latest commit SHA on the target branch vs deployed commit
+            let branch = if channel == "beta" { "beta" } else { "main" };
+            let url = format!("https://api.github.com/repos/{}/commits/{}", repo, branch);
+
+            // Get deployed commit from system_meta
+            let deployed_commit: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'deployed_commit'")
+                .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "unknown".to_string());
+
+            match client.get(&url).header("User-Agent", "MultiClaw-Updater").send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        let latest_sha = body["sha"].as_str().unwrap_or("unknown");
+                        let short_sha = &latest_sha[..7.min(latest_sha.len())];
+                        let deployed_short = &deployed_commit[..7.min(deployed_commit.len())];
+                        let commit_msg = body["commit"]["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
+                        let update_available = latest_sha != deployed_commit && deployed_commit != "unknown";
+                        return (StatusCode::OK, Json(json!({
+                            "current_version": CURRENT_VERSION,
+                            "latest_version": format!("{}-{}", channel, short_sha),
+                            "update_available": update_available,
+                            "channel": channel,
+                            "deployed_commit": deployed_short,
+                            "latest_commit": short_sha,
+                            "commit_message": commit_msg,
+                            "release_url": format!("https://github.com/{}/commit/{}", repo, latest_sha)
+                        })));
+                    }
+                },
+                _ => {}
             }
-            // No releases yet — that's fine
-            (StatusCode::OK, Json(json!({
-                "current_version": CURRENT_VERSION,
-                "latest_version": CURRENT_VERSION,
-                "update_available": false,
-                "release_url": ""
-            })))
-        }
-        Err(_) => {
             (StatusCode::OK, Json(json!({
                 "current_version": CURRENT_VERSION,
                 "latest_version": "unknown",
                 "update_available": false,
-                "error": "Could not reach GitHub"
+                "channel": channel,
+                "error": format!("Could not reach GitHub (branch: {})", branch)
+            })))
+        },
+        _ => {
+            // Stable channel: check releases/latest
+            let url = format!("https://api.github.com/repos/{}/releases/latest", repo);
+            match client.get(&url).header("User-Agent", "MultiClaw-Updater").send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.json::<Value>().await {
+                        let latest = body["tag_name"].as_str().unwrap_or("unknown").trim_start_matches('v');
+                        let update_available = latest != CURRENT_VERSION && latest != "unknown";
+                        return (StatusCode::OK, Json(json!({
+                            "current_version": CURRENT_VERSION,
+                            "latest_version": latest,
+                            "update_available": update_available,
+                            "channel": "stable",
+                            "release_url": body["html_url"].as_str().unwrap_or("")
+                        })));
+                    }
+                },
+                _ => {}
+            }
+            (StatusCode::OK, Json(json!({
+                "current_version": CURRENT_VERSION,
+                "latest_version": CURRENT_VERSION,
+                "update_available": false,
+                "channel": "stable",
+                "release_url": ""
             })))
         }
     }
@@ -1510,4 +1548,28 @@ async fn remove_thread_participant(State(state): State<AppState>, Path((id, memb
         .bind(thread_id).bind(mid).execute(&state.db).await;
     let _ = state.tx.send(json!({"type":"participant_removed","thread_id": thread_id, "member_id": mid}).to_string());
     (StatusCode::OK, Json(json!({"status":"removed"})))
+}
+
+/// Get all system settings from system_meta.
+async fn get_system_settings(State(state): State<AppState>) -> impl IntoResponse {
+    let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM system_meta")
+        .fetch_all(&state.db).await.unwrap_or_default();
+    let mut settings = serde_json::Map::new();
+    for (k, v) in rows {
+        settings.insert(k, json!(v));
+    }
+    (StatusCode::OK, Json(json!(settings)))
+}
+
+/// Update system settings (upsert key-value pairs in system_meta).
+async fn update_system_settings(State(state): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
+    if let Some(obj) = body.as_object() {
+        for (key, val) in obj {
+            let v = val.as_str().unwrap_or(&val.to_string()).to_string();
+            let _ = sqlx::query(
+                "INSERT INTO system_meta (key, value, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()"
+            ).bind(key).bind(&v).execute(&state.db).await;
+        }
+    }
+    (StatusCode::OK, Json(json!({"status":"updated"})))
 }

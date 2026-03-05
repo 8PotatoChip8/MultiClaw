@@ -112,4 +112,9 @@ export const api = {
         request(`/threads/${threadId}/participants`, { method: 'POST', body: JSON.stringify(data) }),
     removeParticipant: (threadId: string, memberId: string) =>
         request(`/threads/${threadId}/participants/${memberId}`, { method: 'DELETE' }),
+
+    // System Settings
+    getSettings: () => request('/system/settings'),
+    updateSettings: (data: Record<string, string>) =>
+        request('/system/settings', { method: 'PUT', body: JSON.stringify(data) }),
 };
