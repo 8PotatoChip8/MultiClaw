@@ -1334,7 +1334,7 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                         let short_sha = &latest_sha[..7.min(latest_sha.len())];
                         let deployed_short = &deployed_commit[..7.min(deployed_commit.len())];
                         let commit_msg = body["commit"]["message"].as_str().unwrap_or("").lines().next().unwrap_or("");
-                        let update_available = latest_sha != deployed_commit && deployed_commit != "unknown";
+                        let update_available = deployed_commit == "unknown" || latest_sha != deployed_commit;
                         return (StatusCode::OK, Json(json!({
                             "current_version": CURRENT_VERSION,
                             "latest_version": format!("{}-{}", channel, short_sha),
