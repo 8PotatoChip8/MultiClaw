@@ -249,7 +249,7 @@ export default function AgentDetailPage() {
                                         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                                             <span style={{
                                                 fontSize: '10px', padding: '2px 8px', borderRadius: '10px',
-                                                background: f.type === 'session' ? 'var(--accent)' : f.type === 'state' ? 'var(--success)' : 'var(--primary)',
+                                                background: f.type === 'brain' ? '#a855f7' : f.type === 'session' ? 'var(--accent)' : f.type === 'state' ? 'var(--success)' : 'var(--primary)',
                                                 color: '#fff', fontWeight: 600, textTransform: 'uppercase',
                                             }}>{f.type}</span>
                                             <span style={{ fontSize: '13px', fontWeight: 500, fontFamily: 'monospace' }}>{f.name}</span>

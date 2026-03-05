@@ -307,10 +307,11 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let policy_id = ceo_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let model = payload.preferred_model.unwrap_or_else(|| "glm-5:cloud".into());
     let agent_id = Uuid::new_v4();
+    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
 
     let _ = sqlx::query(
-        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'CEO',$4,$5,$6,$7,'ACTIVE')"
-    ).bind(agent_id).bind(holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(&model).bind(policy_id)
+        "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'CEO',$4,$5,$6,$7,$8,'ACTIVE')"
+    ).bind(agent_id).bind(holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
     let _ = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
@@ -372,10 +373,11 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     let policy_id = mgr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let model = payload.preferred_model.unwrap_or_else(|| ceo.effective_model.clone());
     let agent_id = Uuid::new_v4();
+    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
 
     let _ = sqlx::query(
-        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'MANAGER',$4,$5,$6,$7,$8,'ACTIVE')"
-    ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
+        "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'MANAGER',$4,$5,$6,$7,$8,$9,'ACTIVE')"
+    ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
     // Spawn OpenClaw instance in background
@@ -433,10 +435,11 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     let policy_id = wkr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let model = payload.preferred_model.unwrap_or_else(|| mgr.effective_model.clone());
     let agent_id = Uuid::new_v4();
+    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
 
     let _ = sqlx::query(
-        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'WORKER',$4,$5,$6,$7,$8,'ACTIVE')"
-    ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
+        "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'WORKER',$4,$5,$6,$7,$8,$9,'ACTIVE')"
+    ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
     .execute(&state.db).await;
 
     // Spawn OpenClaw instance in background
@@ -1441,6 +1444,36 @@ async fn get_openclaw_files(State(state): State<AppState>, Path(id): Path<String
             "name": "openclaw.json",
             "path": "openclaw.json",
             "type": "config",
+            "size": size,
+            "content": content,
+        }));
+    }
+
+    // Read workspace brain files (SOUL.md, AGENTS.md, TOOLS.md, etc.)
+    let workspace_dir = agent_dir.join("workspace");
+    for filename in &["SOUL.md", "AGENTS.md", "TOOLS.md", "BOOTSTRAP.md", "IDENTITY.md", "USER.md"] {
+        let fpath = workspace_dir.join(filename);
+        if fpath.exists() {
+            let content = tokio::fs::read_to_string(&fpath).await.ok();
+            let size = tokio::fs::metadata(&fpath).await.ok().map(|m| m.len()).unwrap_or(0);
+            files.push(json!({
+                "name": filename,
+                "path": format!("workspace/{}", filename),
+                "type": "brain",
+                "size": size,
+                "content": content,
+            }));
+        }
+    }
+    // Read SKILL.md if present
+    let skill_path = workspace_dir.join("skills").join("multiclaw").join("SKILL.md");
+    if skill_path.exists() {
+        let content = tokio::fs::read_to_string(&skill_path).await.ok();
+        let size = tokio::fs::metadata(&skill_path).await.ok().map(|m| m.len()).unwrap_or(0);
+        files.push(json!({
+            "name": "SKILL.md",
+            "path": "workspace/skills/multiclaw/SKILL.md",
+            "type": "brain",
             "size": size,
             "content": content,
         }));
