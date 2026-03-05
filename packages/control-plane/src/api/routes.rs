@@ -40,6 +40,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/stop", post(vm_stop))
         .route("/v1/agents/:id/vm/rebuild", post(vm_rebuild))
         .route("/v1/agents/:id/vm/provision", post(vm_provision))
+        .route("/v1/agents/:id/vm/exec", post(vm_exec))
+        .route("/v1/agents/:id/vm/info", get(vm_info))
+        .route("/v1/agents/:id/vm/file/push", post(vm_file_push))
+        .route("/v1/agents/:id/vm/file/pull", post(vm_file_pull))
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
@@ -733,6 +737,128 @@ async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> i
     let _ = sqlx::query("UPDATE agents SET status = 'QUARANTINED' WHERE id = $1").bind(uid).execute(&state.db).await;
     let _ = state.tx.send(json!({"type":"agent_quarantined","agent_id": uid}).to_string());
     (StatusCode::OK, Json(json!({"status":"quarantined","agent_id": uid})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// VM Interaction: Exec, Info, File Push/Pull
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct VmExecRequest {
+    command: String,
+    user: Option<String>,
+    working_dir: Option<String>,
+    timeout_secs: Option<u64>,
+}
+
+async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmExecRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                match provider.exec_command(
+                    name,
+                    &body.command,
+                    body.user.as_deref().or(Some("agent")),
+                    body.working_dir.as_deref().or(Some("/home/agent")),
+                    body.timeout_secs,
+                ).await {
+                    Ok(result) => (StatusCode::OK, Json(json!(result))),
+                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
+}
+
+async fn vm_info(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                match provider.get_info(name).await {
+                    Ok(info) => (StatusCode::OK, Json(json!(info))),
+                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VmFilePushRequest {
+    path: String,
+    content: String,
+    encoding: Option<String>, // "base64" or "text" (default)
+}
+
+async fn vm_file_push(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmFilePushRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                let bytes = if body.encoding.as_deref() == Some("base64") {
+                    use base64::Engine;
+                    match base64::engine::general_purpose::STANDARD.decode(&body.content) {
+                        Ok(b) => b,
+                        Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid base64: {}", e)}))),
+                    }
+                } else {
+                    body.content.into_bytes()
+                };
+                match provider.file_push(name, &bytes, &body.path).await {
+                    Ok(()) => (StatusCode::OK, Json(json!({"status":"ok","path": body.path}))),
+                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct VmFilePullRequest {
+    path: String,
+}
+
+async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmFilePullRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let vm_ref: Option<String> = sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN agents a ON a.vm_id = v.id WHERE a.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match vm_ref {
+        Some(ref name) => {
+            if let Some(ref provider) = state.vm_provider {
+                match provider.file_pull(name, &body.path).await {
+                    Ok(content) => {
+                        let text = String::from_utf8_lossy(&content).to_string();
+                        (StatusCode::OK, Json(json!({"path": body.path, "content": text, "size": content.len()})))
+                    }
+                    Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+                }
+            } else {
+                (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"})))
+            }
+        }
+        None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════

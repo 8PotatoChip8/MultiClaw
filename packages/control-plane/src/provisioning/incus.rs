@@ -1,10 +1,29 @@
 use super::vm_provider::{VmDetails, VmProvider, VmResources};
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::process::Command as StdCommand; // Renamed to avoid conflict with tokio::process::Command
 use tokio::process::Command;
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, timeout, Duration};
+
+const MAX_OUTPUT_BYTES: usize = 1_048_576; // 1 MB
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExecResult {
+    pub exit_code: i32,
+    pub stdout: String,
+    pub stderr: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VmInfo {
+    pub status: String,
+    pub ip_address: Option<String>,
+    pub cpu_usage_ns: Option<i64>,
+    pub memory_usage_bytes: Option<i64>,
+    pub memory_total_bytes: Option<i64>,
+}
 
 pub struct IncusProvider;
 
@@ -65,6 +84,156 @@ impl IncusProvider {
             }
         }
         None
+    }
+
+    /// Execute a command inside the VM via `incus exec`
+    pub async fn exec_command(
+        &self,
+        vm_name: &str,
+        command: &str,
+        user: Option<&str>,
+        working_dir: Option<&str>,
+        timeout_secs: Option<u64>,
+    ) -> Result<ExecResult> {
+        let mut args: Vec<&str> = vec!["exec", vm_name];
+
+        let uid_str;
+        if let Some(u) = user {
+            // incus exec --user expects a numeric UID; map "root" → 0, "agent" → 1000
+            let uid = match u {
+                "root" => 0u32,
+                _ => 1000,
+            };
+            uid_str = uid.to_string();
+            args.extend(&["--user", &uid_str]);
+        }
+
+        if let Some(wd) = working_dir {
+            args.extend(&["--cwd", wd]);
+        }
+
+        args.extend(&["--", "sh", "-c", command]);
+
+        let secs = timeout_secs.unwrap_or(30).min(120);
+        let output = timeout(
+            Duration::from_secs(secs),
+            Command::new("incus").args(&args).output(),
+        )
+        .await
+        .map_err(|_| anyhow!("Command timed out after {} seconds", secs))??;
+
+        let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+        let mut stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        stdout.truncate(MAX_OUTPUT_BYTES);
+        stderr.truncate(MAX_OUTPUT_BYTES);
+
+        Ok(ExecResult {
+            exit_code: output.status.code().unwrap_or(-1),
+            stdout,
+            stderr,
+        })
+    }
+
+    /// Get VM status info (running state, IP, resource usage)
+    pub async fn get_info(&self, vm_name: &str) -> Result<VmInfo> {
+        let output = Command::new("incus")
+            .args(&["list", vm_name, "--format", "json"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(anyhow!("Failed to query VM info"));
+        }
+
+        let instances: Vec<Value> = serde_json::from_slice(&output.stdout)?;
+        let instance = instances.first().ok_or_else(|| anyhow!("VM not found"))?;
+
+        let status = instance
+            .get("status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let ip = self.get_ip(vm_name).await;
+
+        let state = instance.get("state");
+        let cpu_usage_ns = state
+            .and_then(|s| s.get("cpu"))
+            .and_then(|c| c.get("usage"))
+            .and_then(|u| u.as_i64());
+        let memory_usage_bytes = state
+            .and_then(|s| s.get("memory"))
+            .and_then(|m| m.get("usage"))
+            .and_then(|u| u.as_i64());
+        let memory_total_bytes = state
+            .and_then(|s| s.get("memory"))
+            .and_then(|m| m.get("total"))
+            .and_then(|t| t.as_i64());
+
+        Ok(VmInfo {
+            status,
+            ip_address: ip,
+            cpu_usage_ns,
+            memory_usage_bytes,
+            memory_total_bytes,
+        })
+    }
+
+    /// Push file content into the VM
+    pub async fn file_push(
+        &self,
+        vm_name: &str,
+        content: &[u8],
+        remote_path: &str,
+    ) -> Result<()> {
+        let tmp = format!("/tmp/multiclaw-push-{}", uuid::Uuid::new_v4());
+        tokio::fs::write(&tmp, content).await?;
+
+        let output = Command::new("incus")
+            .args(&[
+                "file",
+                "push",
+                &tmp,
+                &format!("{}/{}", vm_name, remote_path.trim_start_matches('/')),
+            ])
+            .output()
+            .await?;
+
+        let _ = tokio::fs::remove_file(&tmp).await;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "file push failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        Ok(())
+    }
+
+    /// Pull a file from the VM
+    pub async fn file_pull(&self, vm_name: &str, remote_path: &str) -> Result<Vec<u8>> {
+        let tmp = format!("/tmp/multiclaw-pull-{}", uuid::Uuid::new_v4());
+
+        let output = Command::new("incus")
+            .args(&[
+                "file",
+                "pull",
+                &format!("{}/{}", vm_name, remote_path.trim_start_matches('/')),
+                &tmp,
+            ])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Err(anyhow!(
+                "file pull failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+
+        let content = tokio::fs::read(&tmp).await?;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        Ok(content)
     }
 }
 

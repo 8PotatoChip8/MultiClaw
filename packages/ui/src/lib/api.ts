@@ -52,6 +52,13 @@ export const api = {
     vmStart: (id: string) => request(`/agents/${id}/vm/start`, { method: 'POST' }),
     vmStop: (id: string) => request(`/agents/${id}/vm/stop`, { method: 'POST' }),
     vmRebuild: (id: string) => request(`/agents/${id}/vm/rebuild`, { method: 'POST' }),
+    vmExec: (id: string, data: { command: string; user?: string; working_dir?: string; timeout_secs?: number }) =>
+        request(`/agents/${id}/vm/exec`, { method: 'POST', body: JSON.stringify(data) }),
+    vmInfo: (id: string) => request(`/agents/${id}/vm/info`),
+    vmFilePush: (id: string, data: { path: string; content: string; encoding?: string }) =>
+        request(`/agents/${id}/vm/file/push`, { method: 'POST', body: JSON.stringify(data) }),
+    vmFilePull: (id: string, data: { path: string }) =>
+        request(`/agents/${id}/vm/file/pull`, { method: 'POST', body: JSON.stringify(data) }),
     panic: (id: string) => request(`/agents/${id}/panic`, { method: 'POST' }),
 
     // Threads & Messages

@@ -4,7 +4,7 @@ import { api } from '../../../lib/api';
 import { Agent } from '../../../lib/types';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-import { Shield, Play, Square, RefreshCw, AlertTriangle, Plus, Brain, Trash2, X } from 'lucide-react';
+import { Shield, Play, Square, RefreshCw, AlertTriangle, Plus, Brain, Trash2, X, Terminal, Loader2 } from 'lucide-react';
 
 interface Memory {
     id: string;
@@ -25,7 +25,22 @@ interface OpenClawFile {
     content: string | null;
 }
 
-type TabType = 'details' | 'memory';
+type TabType = 'details' | 'memory' | 'terminal';
+
+interface CmdEntry {
+    command: string;
+    exitCode: number;
+    stdout: string;
+    stderr: string;
+    timestamp: Date;
+}
+
+interface VmInfoData {
+    status: string;
+    ip_address?: string;
+    memory_usage_bytes?: number;
+    memory_total_bytes?: number;
+}
 
 export default function AgentDetailPage() {
     const params = useParams();
@@ -40,6 +55,13 @@ export default function AgentDetailPage() {
     const [expandedFile, setExpandedFile] = useState<string | null>(null);
     const [showAddMemory, setShowAddMemory] = useState(false);
     const [newMem, setNewMem] = useState({ category: 'NOTE', key: '', content: '', importance: 5 });
+    // Terminal state
+    const [cmdHistory, setCmdHistory] = useState<CmdEntry[]>([]);
+    const [currentCmd, setCurrentCmd] = useState('');
+    const [workingDir, setWorkingDir] = useState('/home/agent');
+    const [isRunning, setIsRunning] = useState(false);
+    const [vmInfoData, setVmInfoData] = useState<VmInfoData | null>(null);
+    const terminalEndRef = { current: null as HTMLDivElement | null };
 
     const load = () => { api.getAgent(id).then(d => { if (d && !d.error) setAgent(d); }); };
     useEffect(() => { if (id) load(); }, [id]);
@@ -49,6 +71,44 @@ export default function AgentDetailPage() {
         api.getOpenClawFiles(id).then(d => setOcFiles(Array.isArray(d) ? d : []));
     };
     useEffect(() => { if (id && tab === 'memory') loadMemories(); }, [id, tab]);
+
+    // Load VM info when terminal tab is active
+    const loadVmInfo = () => { if (agent?.vm_id) api.vmInfo(id).then(d => { if (d && !d.error) setVmInfoData(d); }); };
+    useEffect(() => {
+        if (id && tab === 'terminal' && agent?.vm_id) {
+            loadVmInfo();
+            const interval = setInterval(loadVmInfo, 30000);
+            return () => clearInterval(interval);
+        }
+    }, [id, tab, agent?.vm_id]);
+
+    const executeCommand = async () => {
+        if (!currentCmd.trim() || isRunning) return;
+        setIsRunning(true);
+        const result = await api.vmExec(id, {
+            command: currentCmd,
+            working_dir: workingDir,
+            timeout_secs: 60,
+        });
+        setCmdHistory(prev => [...prev, {
+            command: currentCmd,
+            exitCode: result.exit_code ?? -1,
+            stdout: result.stdout || '',
+            stderr: result.stderr || result.error || '',
+            timestamp: new Date(),
+        }]);
+        // Track cd commands to update working dir
+        const trimmed = currentCmd.trim();
+        if (trimmed.startsWith('cd ') && (result.exit_code === 0)) {
+            const target = trimmed.slice(3).trim().replace(/^['"]|['"]$/g, '');
+            if (target.startsWith('/')) setWorkingDir(target);
+            else if (target === '~') setWorkingDir('/home/agent');
+            else setWorkingDir(`${workingDir.replace(/\/$/, '')}/${target}`);
+        }
+        setCurrentCmd('');
+        setIsRunning(false);
+        setTimeout(() => terminalEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 50);
+    };
 
     const handleHire = async () => {
         if (!hireName) return;
@@ -104,7 +164,7 @@ export default function AgentDetailPage() {
 
             {/* Tabs */}
             <div style={{ display: 'flex', gap: '0', marginBottom: '24px', borderBottom: '1px solid var(--border)' }}>
-                {(['details', 'memory'] as TabType[]).map(t => (
+                {((['details', 'memory', ...(agent.vm_id ? ['terminal'] : [])] as TabType[])).map(t => (
                     <button key={t} onClick={() => setTab(t)} style={{
                         padding: '10px 20px', border: 'none', cursor: 'pointer',
                         background: tab === t ? 'var(--primary-glow)' : 'transparent',
@@ -115,6 +175,7 @@ export default function AgentDetailPage() {
                         display: 'flex', alignItems: 'center', gap: '6px',
                     }}>
                         {t === 'memory' && <Brain size={14} />}
+                        {t === 'terminal' && <Terminal size={14} />}
                         {t}
                     </button>
                 ))}
@@ -166,6 +227,116 @@ export default function AgentDetailPage() {
                         </div>
                     )}
                 </>
+            ) : tab === 'terminal' ? (
+                /* Terminal Tab */
+                <div>
+                    {/* VM Status Bar */}
+                    <div className="panel" style={{ marginBottom: '12px', padding: '10px 16px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                <div style={{
+                                    width: '8px', height: '8px', borderRadius: '50%',
+                                    background: vmInfoData?.status === 'Running' ? '#22c55e' : '#ef4444',
+                                }} />
+                                <span style={{ fontSize: '12px', fontWeight: 600 }}>{vmInfoData?.status || 'Unknown'}</span>
+                            </div>
+                            {vmInfoData?.ip_address && (
+                                <span style={{ fontSize: '12px', color: 'var(--text-muted)', fontFamily: 'monospace' }}>
+                                    {vmInfoData.ip_address}
+                                </span>
+                            )}
+                            {vmInfoData?.memory_usage_bytes != null && vmInfoData?.memory_total_bytes != null && (
+                                <span style={{ fontSize: '12px', color: 'var(--text-muted)' }}>
+                                    RAM: {(vmInfoData.memory_usage_bytes / 1024 / 1024).toFixed(0)}MB / {(vmInfoData.memory_total_bytes / 1024 / 1024).toFixed(0)}MB
+                                </span>
+                            )}
+                        </div>
+                        <div style={{ display: 'flex', gap: '6px' }}>
+                            <button className="button small secondary" onClick={() => api.vmStart(id)} style={{ fontSize: '11px', padding: '4px 8px' }}>
+                                <Play size={12} />
+                            </button>
+                            <button className="button small secondary" onClick={() => api.vmStop(id)} style={{ fontSize: '11px', padding: '4px 8px' }}>
+                                <Square size={12} />
+                            </button>
+                        </div>
+                    </div>
+
+                    {/* Terminal Output */}
+                    <div style={{
+                        background: '#0a0a0a', borderRadius: '10px', border: '1px solid var(--border)',
+                        fontFamily: 'monospace', fontSize: '13px', lineHeight: '1.6',
+                        minHeight: '400px', maxHeight: '600px', overflowY: 'auto',
+                        display: 'flex', flexDirection: 'column',
+                    }}>
+                        <div style={{ flex: 1, padding: '12px 16px' }}>
+                            {cmdHistory.length === 0 && (
+                                <div style={{ color: '#555', padding: '20px 0' }}>
+                                    Connected to {agent.name}&apos;s workstation. Type a command below.
+                                </div>
+                            )}
+                            {cmdHistory.map((entry, i) => (
+                                <div key={i} style={{ marginBottom: '12px' }}>
+                                    <div style={{ color: '#22c55e', display: 'flex', gap: '8px' }}>
+                                        <span style={{ color: '#3b82f6' }}>agent@vm</span>
+                                        <span style={{ color: '#6b7280' }}>:</span>
+                                        <span style={{ color: '#8b5cf6' }}>{workingDir}</span>
+                                        <span style={{ color: '#6b7280' }}>$</span>
+                                        <span style={{ color: '#e5e7eb' }}>{entry.command}</span>
+                                    </div>
+                                    {entry.stdout && (
+                                        <pre style={{ margin: '2px 0 0 0', color: '#d1d5db', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                            {entry.stdout}
+                                        </pre>
+                                    )}
+                                    {entry.stderr && (
+                                        <pre style={{ margin: '2px 0 0 0', color: '#ef4444', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>
+                                            {entry.stderr}
+                                        </pre>
+                                    )}
+                                    {entry.exitCode !== 0 && (
+                                        <div style={{ color: '#ef4444', fontSize: '11px', marginTop: '2px' }}>
+                                            exit code: {entry.exitCode}
+                                        </div>
+                                    )}
+                                </div>
+                            ))}
+                            <div ref={el => { terminalEndRef.current = el; }} />
+                        </div>
+
+                        {/* Command Input */}
+                        <div style={{
+                            borderTop: '1px solid #1f2937', padding: '8px 16px',
+                            display: 'flex', alignItems: 'center', gap: '8px',
+                        }}>
+                            <span style={{ color: '#3b82f6', fontSize: '12px', whiteSpace: 'nowrap' }}>
+                                {workingDir} $
+                            </span>
+                            <input
+                                value={currentCmd}
+                                onChange={e => setCurrentCmd(e.target.value)}
+                                onKeyDown={e => { if (e.key === 'Enter') executeCommand(); }}
+                                placeholder="Type a command..."
+                                disabled={isRunning}
+                                style={{
+                                    flex: 1, background: 'transparent', border: 'none', outline: 'none',
+                                    color: '#e5e7eb', fontFamily: 'monospace', fontSize: '13px',
+                                }}
+                            />
+                            {isRunning ? (
+                                <Loader2 size={14} style={{ color: '#3b82f6', animation: 'spin 1s linear infinite' }} />
+                            ) : (
+                                <button onClick={executeCommand} disabled={!currentCmd.trim()}
+                                    style={{
+                                        background: 'none', border: 'none', color: '#3b82f6',
+                                        cursor: currentCmd.trim() ? 'pointer' : 'default', padding: '2px',
+                                        opacity: currentCmd.trim() ? 1 : 0.3,
+                                    }}>
+                                    <Play size={14} />
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
             ) : (
                 /* Memory Tab */
                 <div>
