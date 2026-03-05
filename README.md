@@ -19,6 +19,19 @@ curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/i
 
 See `docs/architecture.md` for more details.
 
+## Update Channels (Auto-Updater)
+MultiClaw supports a 3-channel auto-updater customizable in the Settings page:
+- **Stable**: Fully tested production releases checking GitHub `releases/latest`.
+- **Beta**: Experimental features checking the `beta` branch.
+- **Dev**: Bleeding-edge features checking the `main` branch.
+
+## Agent Roles & Hierarchies
+Each agent runs with role-specific "brain files" (SOUL.md, AGENTS.md, SKILL.md) to define their permissions:
+1. **MAIN (MainAgent)**: Top-level holding agent. Can create companies and hire CEOs.
+2. **CEO**: Runs a company. Can hire managers and workers. Cannot create companies.
+3. **MANAGER**: Manages a department. Can hire workers only.
+4. **WORKER**: Executes tasks. Has no hiring or management authority.
+
 ## Adding Models
 To add models, use the `multiclaw` CLI or the Dashboard.
 Under the hood, this pulls the model to the host Ollama context and adjusts the agent's allowlist.

@@ -13,7 +13,16 @@ All non-init endpoints require a Bearer token generated at install and sent as `
 - **POST /v1/companies/:id/hire-ceo** - Starts the CEO hiring workflow.
 - **POST /v1/agents/:id/hire-manager** - Starts the manager hiring workflow.
 - **POST /v1/agents/:id/hire-worker** - Starts the worker hiring workflow.
+
+### Threads & Communication
 - **POST /v1/threads/:id/messages** - Create a message and dispatch it to an agent.
+- **POST /v1/threads/:id/participants** - Add a member to a group thread.
+- **DELETE /v1/threads/:id/participants/:member_id** - Remove a member from a group thread.
+
+### System Settings & Updates
+- **GET /v1/system/settings** - Get system-wide settings (e.g., update channel).
+- **PUT /v1/system/settings** - Update system settings.
+- **GET /v1/system/update-check** - Check for platform updates based on the selected channel.
 - **POST /v1/requests/:id/approve** - Manually approve a pending request.
 - **POST /v1/requests/:id/reject** - Manually reject a pending request.
 - **WS /v1/events** - WebSocket endpoint for streaming real-time event updates to UI.
