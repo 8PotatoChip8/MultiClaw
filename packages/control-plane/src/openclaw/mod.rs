@@ -499,34 +499,50 @@ impl OpenClawManager {
     async fn render_workspace(&self, config: &AgentConfig, workspace_dir: &Path) -> Result<()> {
         let template_dir = self.find_template_dir()?;
 
+        // Determine role-specific subdirectory (MAIN, CEO, MANAGER, WORKER)
+        let role_upper = config.role.to_uppercase();
+        let role_dir = template_dir.join(&role_upper);
+
+        // Helper: try role-specific file first, then generic, then default
+        async fn read_template(role_dir: &Path, template_dir: &Path, filename: &str, default: String) -> String {
+            // Try role-specific: e.g., workspace-template/CEO/SOUL.md
+            if let Ok(content) = tokio::fs::read_to_string(role_dir.join(filename)).await {
+                return content;
+            }
+            // Fall back to generic: e.g., workspace-template/SOUL.md
+            if let Ok(content) = tokio::fs::read_to_string(template_dir.join(filename)).await {
+                return content;
+            }
+            default
+        }
+
         // Render SOUL.md
-        let soul_template = tokio::fs::read_to_string(template_dir.join("SOUL.md"))
-            .await
-            .unwrap_or_else(|_| self.default_soul_template());
+        let soul_template = read_template(&role_dir, &template_dir, "SOUL.md", self.default_soul_template()).await;
         let soul = self.replace_vars(&soul_template, config);
         tokio::fs::write(workspace_dir.join("SOUL.md"), &soul).await?;
 
         // Render AGENTS.md
-        let agents_template = tokio::fs::read_to_string(template_dir.join("AGENTS.md"))
-            .await
-            .unwrap_or_else(|_| self.default_agents_template());
+        let agents_template = read_template(&role_dir, &template_dir, "AGENTS.md", self.default_agents_template()).await;
         let agents = self.replace_vars(&agents_template, config);
         tokio::fs::write(workspace_dir.join("AGENTS.md"), &agents).await?;
 
         // Render TOOLS.md
-        let tools_template = tokio::fs::read_to_string(template_dir.join("TOOLS.md"))
-            .await
-            .unwrap_or_else(|_| "# Tools\nUse bash and curl to interact with the MultiClaw API.".into());
+        let tools_template = read_template(&role_dir, &template_dir, "TOOLS.md",
+            "# Tools\nUse bash and curl to interact with the MultiClaw API.".into()).await;
         tokio::fs::write(workspace_dir.join("TOOLS.md"), &tools_template).await?;
 
         // Render skill
         let skill_dir = workspace_dir.join("skills").join("multiclaw");
         tokio::fs::create_dir_all(&skill_dir).await?;
-        let skill_template = tokio::fs::read_to_string(
-            template_dir.join("skills").join("multiclaw").join("SKILL.md"),
-        )
-        .await
-        .unwrap_or_else(|_| self.default_skill_template());
+        let role_skill_path = role_dir.join("skills").join("multiclaw").join("SKILL.md");
+        let generic_skill_path = template_dir.join("skills").join("multiclaw").join("SKILL.md");
+        let skill_template = if role_skill_path.exists() {
+            tokio::fs::read_to_string(&role_skill_path).await.unwrap_or_else(|_| self.default_skill_template())
+        } else if generic_skill_path.exists() {
+            tokio::fs::read_to_string(&generic_skill_path).await.unwrap_or_else(|_| self.default_skill_template())
+        } else {
+            self.default_skill_template()
+        };
         let skill = self.replace_vars(&skill_template, config);
         tokio::fs::write(skill_dir.join("SKILL.md"), &skill).await?;
 
