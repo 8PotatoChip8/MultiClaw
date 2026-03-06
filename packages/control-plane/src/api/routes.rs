@@ -89,8 +89,13 @@ pub fn app_router(state: AppState) -> Router {
 // Health
 // ═══════════════════════════════════════════════════════════════
 
-async fn health() -> impl IntoResponse {
-    Json(json!({"status": "ok"}))
+async fn health(State(state): State<AppState>) -> impl IntoResponse {
+    let db_ok = sqlx::query("SELECT 1").fetch_one(&state.db).await.is_ok();
+    if db_ok {
+        (StatusCode::OK, Json(json!({"status": "ok", "db": "ok"})))
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "degraded", "db": "unreachable"})))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════

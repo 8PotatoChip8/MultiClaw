@@ -5,7 +5,8 @@ mod models_allowlist;
 mod access_log;
 
 use axum::{
-    routing::any,
+    routing::{any, get},
+    Json,
     Router,
 };
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -30,10 +31,16 @@ async fn main() -> anyhow::Result<()> {
         client: reqwest::Client::new(),
     };
 
-    let app = Router::new()
+    // Authed routes behind the auth middleware
+    let authed_routes = Router::new()
         .route("/*path", any(forward::proxy_handler))
         .layer(axum::middleware::from_fn(auth::auth_middleware))
         .with_state(state);
+
+    // Health endpoint outside auth so Docker HEALTHCHECK can reach it
+    let app = Router::new()
+        .route("/health", get(|| async { Json(serde_json::json!({"status": "ok"})) }))
+        .merge(authed_routes);
 
     // Bind to 0.0.0.0:11436. In production this should be locked down to the Incus bridge subnet
     // via iptables/firewall rules or specific interface binding.

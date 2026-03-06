@@ -4,10 +4,14 @@ Requires=docker.service
 After=docker.service network.target
 
 [Service]
+Type=simple
 Restart=always
+RestartSec=10
+StartLimitIntervalSec=300
+StartLimitBurst=5
 WorkingDirectory=/opt/multiclaw
-ExecStart=/usr/bin/docker compose up
-ExecStop=/usr/bin/docker compose down
+ExecStart=/usr/bin/docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml up
+ExecStop=/usr/bin/docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml down
 
 [Install]
 WantedBy=multi-user.target

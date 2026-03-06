@@ -25,11 +25,15 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     libssl3 \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the binary from the builder stage
 COPY --from=builder /usr/src/app/packages/target/release/ollama-proxy /app/ollama-proxy
 
 EXPOSE 11436
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
+  CMD curl -sf http://localhost:11436/health || exit 1
 
 CMD ["./ollama-proxy"]

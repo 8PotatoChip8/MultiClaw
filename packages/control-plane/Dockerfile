@@ -43,4 +43,7 @@ COPY --from=builder /usr/src/app/packages/target/release/control-plane /app/cont
 
 EXPOSE 8080
 
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+  CMD curl -sf http://localhost:8080/v1/health || exit 1
+
 CMD ["./control-plane"]

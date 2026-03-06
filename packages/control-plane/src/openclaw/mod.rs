@@ -478,6 +478,58 @@ impl OpenClawManager {
         Ok(())
     }
 
+    /// Periodic reconciliation — check that all ACTIVE agents have running containers.
+    /// Lighter than recover_instances: only respawns containers that are missing or stopped.
+    pub async fn reconcile_instances(&self, db_pool: &PgPool) -> Result<()> {
+        // Get all ACTIVE agent IDs from DB
+        let agent_ids: Vec<(Uuid,)> = sqlx::query_as(
+            "SELECT id FROM agents WHERE status = 'ACTIVE'"
+        ).fetch_all(db_pool).await?;
+
+        if agent_ids.is_empty() {
+            return Ok(());
+        }
+
+        let instances = self.instances.read().await;
+
+        for (agent_id,) in &agent_ids {
+            if let Some(inst) = instances.get(agent_id) {
+                // Check if Docker container is still running
+                let inspect = tokio::process::Command::new("docker")
+                    .args(["inspect", "--format", "{{.State.Running}}", &inst.container_name])
+                    .output()
+                    .await;
+
+                let running = match inspect {
+                    Ok(output) if output.status.success() => {
+                        String::from_utf8_lossy(&output.stdout).trim() == "true"
+                    }
+                    _ => false,
+                };
+
+                if !running {
+                    tracing::warn!(
+                        "Watchdog: container {} for agent {} is not running, will respawn",
+                        inst.container_name, inst.agent_name
+                    );
+                    // Drop read lock before respawning
+                    drop(instances);
+                    // Trigger a full recovery for this cycle and return
+                    return self.recover_instances(db_pool).await;
+                }
+            } else {
+                tracing::warn!(
+                    "Watchdog: no tracked instance for active agent {}, will recover",
+                    agent_id
+                );
+                drop(instances);
+                return self.recover_instances(db_pool).await;
+            }
+        }
+
+        Ok(())
+    }
+
     // ─── Private helpers ───────────────────────────────────────────────
 
     fn render_config(&self, config: &AgentConfig, port: u16, token: &str) -> Result<String> {

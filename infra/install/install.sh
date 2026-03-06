@@ -116,6 +116,11 @@ log "Setting up OpenClaw data directories..."
 mkdir -p /opt/multiclaw/openclaw-data
 cp -r /opt/multiclaw/infra/openclaw/* /opt/multiclaw/openclaw-data/ 2>/dev/null || true
 
+log "Installing systemd service for auto-start on boot..."
+cp /opt/multiclaw/infra/systemd/multiclaw-stack.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable multiclaw-stack.service
+
 log "Starting compose stack (if active repo)..."
 cd /opt/multiclaw
 docker compose -f infra/docker/docker-compose.yml up -d --build

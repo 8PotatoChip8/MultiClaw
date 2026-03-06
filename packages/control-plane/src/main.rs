@@ -122,6 +122,22 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Watchdog: periodically reconcile OpenClaw instances (every 60s)
+    let pool_wd = pool.clone();
+    let openclaw_wd = openclaw_mgr.clone();
+    tokio::spawn(async move {
+        // Wait for initial recovery to finish before starting watchdog
+        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        tracing::info!("Watchdog reconciliation loop started");
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            if let Err(e) = openclaw_wd.reconcile_instances(&pool_wd).await {
+                tracing::error!("Watchdog reconciliation error: {}", e);
+            }
+        }
+    });
+
     let app = api::routes::app_router(app_state);
 
     let addr = std::net::SocketAddr::from(([0, 0, 0, 0], cfg.port));
