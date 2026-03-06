@@ -45,7 +45,7 @@ function UpdateBanner() {
     const handleUpdate = async () => {
         if (updating) return;
         setUpdating(true);
-        setStatus('Pulling latest code...');
+        setStatus('Starting update...');
         try {
             const apiUrl = typeof window !== 'undefined' ? `${window.location.protocol}//${window.location.hostname}:8080/v1` : '';
             const token = typeof window !== 'undefined' ? localStorage.getItem('admin_token') : '';
@@ -53,10 +53,25 @@ function UpdateBanner() {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
             });
-            setStatus('Update started — containers rebuilding. Page will reload shortly...');
-            setTimeout(() => window.location.reload(), 30000);
+            setStatus('Containers rebuilding — will reload when ready...');
+            // Poll /v1/health until the new server is up (instead of blind 30s timeout)
+            setTimeout(async () => {
+                for (let i = 0; i < 120; i++) {
+                    await new Promise(r => setTimeout(r, 2000));
+                    try {
+                        const resp = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
+                        if (resp.ok) {
+                            setStatus('Update complete! Reloading...');
+                            setTimeout(() => window.location.reload(), 1500);
+                            return;
+                        }
+                    } catch { /* server not up yet */ }
+                }
+                setStatus('Server not responding after 4 minutes — update may have failed.');
+                setUpdating(false);
+            }, 5000);
         } catch {
-            setStatus('Update failed');
+            setStatus('Failed to start update');
             setUpdating(false);
         }
     };
@@ -103,6 +118,27 @@ function UpdateBanner() {
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
+    const [versionLabel, setVersionLabel] = useState('v0.1.1');
+
+    useEffect(() => {
+        const readVersion = () => {
+            try {
+                const cached = localStorage.getItem('_update_info');
+                if (cached) {
+                    const info = JSON.parse(cached);
+                    if (info.current_version) setVersionLabel(info.current_version);
+                }
+            } catch {}
+        };
+        readVersion();
+        // Re-read when UpdateBanner writes new data
+        const onStorage = () => readVersion();
+        window.addEventListener('storage', onStorage);
+        // Also poll occasionally since storage event doesn't fire for same-tab writes
+        const interval = setInterval(readVersion, 30000);
+        return () => { window.removeEventListener('storage', onStorage); clearInterval(interval); };
+    }, []);
+
     return (
         <html lang="en">
             <head>
@@ -142,7 +178,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                     <div style={{ marginTop: 'auto' }}>
                         <UpdateBanner />
                         <div style={{ padding: '12px', borderTop: '1px solid var(--border)', fontSize: '11px', color: 'var(--text-muted)' }}>
-                            MultiClaw v0.1.1
+                            MultiClaw {versionLabel}
                         </div>
                     </div>
                 </aside>

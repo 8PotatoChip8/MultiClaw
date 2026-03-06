@@ -1,0 +1,5 @@
+openclaw-data/
+.claude/
+target/
+node_modules/
+.next/
