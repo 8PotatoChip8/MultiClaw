@@ -93,8 +93,14 @@ fi
 log "Cloning missing structure for local compose..."
 if [ ! -d /opt/multiclaw/.git ]; then
    # We clone into /opt/multiclaw
+   # MULTICLAW_VERSION can be set by install-stable.sh to a release tag (e.g., v0.1.0)
    rm -rf /opt/multiclaw
-   git clone https://github.com/8PotatoChip8/MultiClaw.git /opt/multiclaw || echo "Clone failed. Proceeding anyway..."
+   if [ -n "${MULTICLAW_VERSION:-}" ]; then
+     log "Installing version: $MULTICLAW_VERSION"
+     git clone --branch "$MULTICLAW_VERSION" --depth 1 https://github.com/8PotatoChip8/MultiClaw.git /opt/multiclaw || echo "Clone failed. Proceeding anyway..."
+   else
+     git clone https://github.com/8PotatoChip8/MultiClaw.git /opt/multiclaw || echo "Clone failed. Proceeding anyway..."
+   fi
 fi
 
 log "Creating env file..."
@@ -164,6 +170,14 @@ if curl -f -X POST http://127.0.0.1:8080/v1/install/init \
   -H "Content-Type: application/json" \
   -d "{\"holding_name\":\"$HOLDING_NAME\", \"main_agent_name\":\"$MAIN_AGENT_NAME\", \"default_model\":\"$DEFAULT_MODEL\", \"strict_mode\":$STRICT_MODE, \"vm_provider\":\"incus\"}"; then
   log "Init call successful."
+  # If installed from a release tag, set the update channel to stable
+  if [[ "${MULTICLAW_VERSION:-}" == v* ]]; then
+    curl -sf -X PUT http://127.0.0.1:8080/v1/system/settings \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"update_channel":"stable"}' || true
+    log "Update channel set to: stable"
+  fi
 else
   log "Init call failed! Printing backend logs for diagnosis:"
   cd /opt/multiclaw && docker compose -f infra/docker/docker-compose.yml logs multiclawd --tail 200

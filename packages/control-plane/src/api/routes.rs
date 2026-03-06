@@ -1684,61 +1684,136 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
         tracing::info!("Starting system update...");
         let _ = state_clone.tx.send(json!({"type":"system_update","status":"started"}).to_string());
 
-        // Determine which branch to pull based on update channel
+        // Determine which branch/tag to pull based on update channel
         let channel: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'update_channel'")
             .fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "stable".to_string());
-        let branch = match channel.as_str() {
-            "beta" => "beta",
-            "dev" => "main",
-            _ => "main",
-        };
 
-        // Fetch latest code, then hard-reset to it.
-        // Using fetch+reset instead of pull avoids merge conflicts if tracked
-        // files were locally modified. reset --hard only affects tracked files;
-        // untracked dirs like openclaw-data/ are untouched.
-        let fetch = tokio::process::Command::new("git")
-            .args(["-C", "/opt/multiclaw", "fetch", "origin", branch])
-            .output()
-            .await;
+        let is_stable = !matches!(channel.as_str(), "beta" | "dev");
 
-        match fetch {
-            Ok(output) if output.status.success() => {
-                tracing::info!("Git fetch successful (branch: {})", branch);
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                tracing::error!("Git fetch failed: {}", err);
-                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
-                return;
-            }
-            Err(e) => {
-                tracing::error!("Git fetch error: {}", e);
-                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
-                return;
-            }
-        }
+        if is_stable {
+            // Stable channel: fetch the latest release tag from GitHub and checkout that tag
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
 
-        let reset_target = format!("origin/{}", branch);
-        let reset = tokio::process::Command::new("git")
-            .args(["-C", "/opt/multiclaw", "reset", "--hard", &reset_target])
-            .output()
-            .await;
+            let tag = match client.get("https://api.github.com/repos/8PotatoChip8/MultiClaw/releases/latest")
+                .header("User-Agent", "MultiClaw-Updater")
+                .send().await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    resp.json::<Value>().await.ok()
+                        .and_then(|body| body["tag_name"].as_str().map(String::from))
+                },
+                _ => None,
+            };
 
-        match reset {
-            Ok(output) if output.status.success() => {
-                tracing::info!("Git reset to {} successful, rebuilding containers...", reset_target);
+            let tag = match tag {
+                Some(t) => t,
+                None => {
+                    tracing::error!("Failed to fetch latest release tag from GitHub");
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error":"Could not fetch latest release tag"}).to_string());
+                    return;
+                }
+            };
+
+            tracing::info!("Stable update: checking out release tag {}", tag);
+
+            // Fetch all tags
+            let fetch = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "fetch", "origin", "--tags", "--force"])
+                .output()
+                .await;
+
+            match fetch {
+                Ok(output) if output.status.success() => {
+                    tracing::info!("Git fetch tags successful");
+                }
+                Ok(output) => {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Git fetch tags failed: {}", err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Git fetch tags error: {}", e);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                    return;
+                }
             }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                tracing::error!("Git reset failed: {}", err);
-                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
-                return;
+
+            // Checkout the release tag
+            let checkout = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "checkout", &tag])
+                .output()
+                .await;
+
+            match checkout {
+                Ok(output) if output.status.success() => {
+                    tracing::info!("Git checkout {} successful, rebuilding containers...", tag);
+                }
+                Ok(output) => {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Git checkout {} failed: {}", tag, err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Git checkout error: {}", e);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                    return;
+                }
             }
-            Err(e) => {
-                tracing::error!("Git reset error: {}", e);
-                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
-                return;
+        } else {
+            // Dev/beta channels: fetch branch and hard-reset to it.
+            // Using fetch+reset instead of pull avoids merge conflicts if tracked
+            // files were locally modified. reset --hard only affects tracked files;
+            // untracked dirs like openclaw-data/ are untouched.
+            let branch = if channel == "beta" { "beta" } else { "main" };
+
+            let fetch = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "fetch", "origin", branch])
+                .output()
+                .await;
+
+            match fetch {
+                Ok(output) if output.status.success() => {
+                    tracing::info!("Git fetch successful (branch: {})", branch);
+                }
+                Ok(output) => {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Git fetch failed: {}", err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Git fetch error: {}", e);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                    return;
+                }
+            }
+
+            let reset_target = format!("origin/{}", branch);
+            let reset = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "reset", "--hard", &reset_target])
+                .output()
+                .await;
+
+            match reset {
+                Ok(output) if output.status.success() => {
+                    tracing::info!("Git reset to {} successful, rebuilding containers...", reset_target);
+                }
+                Ok(output) => {
+                    let err = String::from_utf8_lossy(&output.stderr);
+                    tracing::error!("Git reset failed: {}", err);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
+                }
+                Err(e) => {
+                    tracing::error!("Git reset error: {}", e);
+                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                    return;
+                }
             }
         }
 
