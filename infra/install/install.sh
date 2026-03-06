@@ -177,6 +177,8 @@ if ! command -v cargo &> /dev/null; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   source "$HOME/.cargo/env"
 fi
+# Ensure C toolchain is available for native crate compilation
+apt-get install -y build-essential pkg-config libssl-dev > /dev/null 2>&1
 cd /opt/multiclaw/packages && cargo build --release -p multiclaw-cli
 ln -sf /opt/multiclaw/packages/target/release/multiclaw-cli /usr/local/bin/multiclaw
 log "CLI installed: multiclaw command is now available"
