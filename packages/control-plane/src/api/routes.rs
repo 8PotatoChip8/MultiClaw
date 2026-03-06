@@ -983,8 +983,16 @@ async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery
             Err(_) => (StatusCode::OK, Json(json!([])))
         }
     } else {
-        match sqlx::query_as::<_, Thread>("SELECT id, type, title, created_by_user_id, created_at FROM threads ORDER BY created_at DESC")
-            .fetch_all(&state.db).await {
+        // Return only threads where the user is a member (excludes agent-only threads)
+        match sqlx::query_as::<_, Thread>(
+            "SELECT DISTINCT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
+             FROM threads t \
+             WHERE EXISTS ( \
+                 SELECT 1 FROM thread_members tm \
+                 WHERE tm.thread_id = t.id AND tm.member_type = 'USER' \
+             ) \
+             ORDER BY t.created_at DESC"
+        ).fetch_all(&state.db).await {
             Ok(t) => (StatusCode::OK, Json(json!(t))),
             Err(_) => (StatusCode::OK, Json(json!([])))
         }

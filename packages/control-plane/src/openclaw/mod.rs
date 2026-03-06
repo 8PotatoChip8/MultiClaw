@@ -88,10 +88,10 @@ impl OpenClawManager {
             }
         }
 
-        // Assign a port
+        // Assign a port — reserve 3 ports per agent (gateway, internal, browser control)
         let port = {
             let instances = self.instances.read().await;
-            self.base_port + instances.len() as u16
+            self.base_port + (instances.len() as u16 * 3)
         };
 
         // Generate gateway token
