@@ -10,3 +10,4 @@ serde_json.workspace = true
 anyhow.workspace = true
 reqwest.workspace = true
 clap = { version = "4.4", features = ["derive"] }
+colored = "2"

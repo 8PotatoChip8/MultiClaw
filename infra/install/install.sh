@@ -165,6 +165,17 @@ else
   sleep 1
 fi
 
+# ── Build CLI ──
+log "Building multiclaw CLI..."
+if ! command -v cargo &> /dev/null; then
+  log "Installing Rust toolchain..."
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "$HOME/.cargo/env"
+fi
+cd /opt/multiclaw/packages && cargo build --release -p multiclaw-cli
+ln -sf /opt/multiclaw/packages/target/release/multiclaw-cli /usr/local/bin/multiclaw
+log "CLI installed: multiclaw command is now available"
+
 echo ""
 log "=============================================="
 log "  MultiClaw Install Complete!"
