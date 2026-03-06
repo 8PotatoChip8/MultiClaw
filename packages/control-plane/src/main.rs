@@ -36,23 +36,38 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_db(&cfg.database_url).await?;
 
-    // Seed deployed_commit from current git HEAD so the auto-updater can compare
+    // Seed deployed_commit from current git HEAD so the auto-updater can compare.
+    // Try /opt/multiclaw first (Docker), then current dir (local dev).
+    // Only write if we actually resolve a SHA — don't overwrite a good value with "unknown".
     let head_sha = tokio::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
+        .args(["-C", "/opt/multiclaw", "rev-parse", "HEAD"])
         .output()
         .await
         .ok()
         .and_then(|o| if o.status.success() {
             String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
         } else { None })
-        .unwrap_or_else(|| "unknown".to_string());
+        .or_else(|| {
+            // Fallback: try without -C for local dev
+            std::process::Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .ok()
+                .and_then(|o| if o.status.success() {
+                    String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+                } else { None })
+        });
 
-    sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
-        .bind(&head_sha)
-        .execute(&pool)
-        .await
-        .ok();
-    tracing::info!("Recorded deployed_commit={}", &head_sha[..7.min(head_sha.len())]);
+    if let Some(sha) = &head_sha {
+        sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
+            .bind(sha)
+            .execute(&pool)
+            .await
+            .ok();
+        tracing::info!("Recorded deployed_commit={}", &sha[..7.min(sha.len())]);
+    } else {
+        tracing::info!("Could not resolve git HEAD, keeping existing deployed_commit");
+    }
 
     // Try to load MainAgent config from DB (name + model)
     let (agent_name, agent_model) = {
