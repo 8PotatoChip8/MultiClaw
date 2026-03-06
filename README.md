@@ -6,8 +6,15 @@ A local-first "agent holding company" platform for Ubuntu Desktop 24.x.
 MultiClaw orchestrates full-fledged autonomous agents inside isolated Incus VMs using OpenClaw, communicating with a host-local Ollama and a Rust-based control plane. A Next.js UI serves as the unified dashboard for the holding company.
 
 ## Quick Start
+
+### Stable Release (recommended)
 ```bash
-curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install-stable.sh | sudo bash
+```
+
+### Development Build
+```bash
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash
 ```
 
 ## Architecture

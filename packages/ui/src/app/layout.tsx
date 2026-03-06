@@ -39,7 +39,10 @@ function UpdateBanner() {
     useEffect(() => {
         checkUpdate();
         const interval = setInterval(checkUpdate, 5 * 60 * 1000);
-        return () => { clearInterval(interval); };
+        // Re-check immediately when settings page changes the channel
+        const onChannelChange = () => checkUpdate();
+        window.addEventListener('multiclaw-update-check', onChannelChange);
+        return () => { clearInterval(interval); window.removeEventListener('multiclaw-update-check', onChannelChange); };
     }, []);
 
     const handleUpdate = async () => {

@@ -1596,7 +1596,16 @@ async fn serve_install_script() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "install script not found").into_response()
 }
 
-const CURRENT_VERSION: &str = "0.1.1";
+const CURRENT_VERSION: &str = "0.1.0";
+
+/// Simple semver greater-than comparison (a > b).
+fn semver_gt(a: &str, b: &str) -> bool {
+    let parse = |s: &str| -> (u32, u32, u32) {
+        let mut parts = s.split('.').filter_map(|p| p.parse().ok());
+        (parts.next().unwrap_or(0), parts.next().unwrap_or(0), parts.next().unwrap_or(0))
+    };
+    parse(a) > parse(b)
+}
 
 async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse {
     // Read update channel from system_meta (default: stable)
@@ -1661,7 +1670,7 @@ async fn system_update_check(State(state): State<AppState>) -> impl IntoResponse
                 Ok(resp) if resp.status().is_success() => {
                     if let Ok(body) = resp.json::<Value>().await {
                         let latest = body["tag_name"].as_str().unwrap_or("unknown").trim_start_matches('v');
-                        let update_available = latest != CURRENT_VERSION && latest != "unknown";
+                        let update_available = latest != "unknown" && semver_gt(latest, CURRENT_VERSION);
                         return (StatusCode::OK, Json(json!({
                             "current_version": CURRENT_VERSION,
                             "latest_version": latest,

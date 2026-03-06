@@ -170,13 +170,19 @@ if curl -f -X POST http://127.0.0.1:8080/v1/install/init \
   -H "Content-Type: application/json" \
   -d "{\"holding_name\":\"$HOLDING_NAME\", \"main_agent_name\":\"$MAIN_AGENT_NAME\", \"default_model\":\"$DEFAULT_MODEL\", \"strict_mode\":$STRICT_MODE, \"vm_provider\":\"incus\"}"; then
   log "Init call successful."
-  # If installed from a release tag, set the update channel to stable
+  # Set update channel based on install method
   if [[ "${MULTICLAW_VERSION:-}" == v* ]]; then
     curl -sf -X PUT http://127.0.0.1:8080/v1/system/settings \
       -H "Authorization: Bearer $ADMIN_TOKEN" \
       -H "Content-Type: application/json" \
       -d '{"update_channel":"stable"}' || true
     log "Update channel set to: stable"
+  else
+    curl -sf -X PUT http://127.0.0.1:8080/v1/system/settings \
+      -H "Authorization: Bearer $ADMIN_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d '{"update_channel":"dev"}' || true
+    log "Update channel set to: dev"
   fi
 else
   log "Init call failed! Printing backend logs for diagnosis:"

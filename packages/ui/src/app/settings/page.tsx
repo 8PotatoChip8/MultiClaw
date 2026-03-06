@@ -41,6 +41,8 @@ export default function SettingsPage() {
         setUpdateInfo(info);
         if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
+        // Notify the sidebar UpdateBanner to re-check immediately
+        window.dispatchEvent(new Event('multiclaw-update-check'));
     };
 
     const handleCheckUpdate = async () => {
