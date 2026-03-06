@@ -1770,19 +1770,50 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
         match rebuild {
             Ok(output) => {
                 if output.status.success() {
-                    tracing::info!("System update complete!");
-                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"complete"}).to_string());
+                    tracing::info!("Docker rebuild complete, rebuilding CLI...");
                 } else {
                     let err = String::from_utf8_lossy(&output.stderr);
                     tracing::error!("Docker rebuild failed: {}", err);
                     let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                    return;
                 }
             }
             Err(e) => {
                 tracing::error!("Docker rebuild error: {}", e);
                 let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
+                return;
             }
         }
+
+        // Rebuild CLI binary via a temporary Rust container.
+        // The compiled binary lands at /opt/multiclaw/packages/target/release/multiclaw-cli,
+        // which is where the symlink at /usr/local/bin/multiclaw already points.
+        let cli_build = tokio::process::Command::new("docker")
+            .args([
+                "run", "--rm",
+                "-v", "/opt/multiclaw/packages:/usr/src/app/packages",
+                "rust:1-slim-bookworm",
+                "bash", "-c",
+                "apt-get update && apt-get install -y pkg-config libssl-dev > /dev/null 2>&1 && cd /usr/src/app/packages && cargo build --release -p multiclaw-cli"
+            ])
+            .output()
+            .await;
+
+        match cli_build {
+            Ok(output) if output.status.success() => {
+                tracing::info!("CLI rebuild successful");
+            }
+            Ok(output) => {
+                let err = String::from_utf8_lossy(&output.stderr);
+                tracing::warn!("CLI rebuild failed (non-critical): {}", err);
+            }
+            Err(e) => {
+                tracing::warn!("CLI rebuild error (non-critical): {}", e);
+            }
+        }
+
+        tracing::info!("System update complete!");
+        let _ = state_clone.tx.send(json!({"type":"system_update","status":"complete"}).to_string());
     });
 
     (StatusCode::ACCEPTED, Json(json!({"status":"update_started"})))
