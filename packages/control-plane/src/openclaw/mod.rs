@@ -81,8 +81,8 @@ impl OpenClawManager {
         {
             let instances = self.instances.read().await;
             if let Some(inst) = instances.get(&agent_id) {
-                if inst.status == InstanceStatus::Running {
-                    tracing::info!("OpenClaw instance already running for {}", config.agent_name);
+                if inst.status == InstanceStatus::Running || inst.status == InstanceStatus::Starting {
+                    tracing::info!("OpenClaw instance already running/starting for {}", config.agent_name);
                     return Ok(inst.clone());
                 }
             }
@@ -494,6 +494,11 @@ impl OpenClawManager {
 
         for (agent_id,) in &agent_ids {
             if let Some(inst) = instances.get(agent_id) {
+                // Skip instances still starting up — avoid racing the spawn
+                if inst.status == InstanceStatus::Starting {
+                    continue;
+                }
+
                 // Check if Docker container is still running
                 let inspect = tokio::process::Command::new("docker")
                     .args(["inspect", "--format", "{{.State.Running}}", &inst.container_name])
