@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     curl \
     gnupg \
+    git \
     && mkdir -p /etc/apt/keyrings/ \
     && curl -fsSL https://pkgs.zabbly.com/key.asc -o /etc/apt/keyrings/zabbly.asc \
     && echo "deb [signed-by=/etc/apt/keyrings/zabbly.asc] https://pkgs.zabbly.com/incus/stable bookworm main" > /etc/apt/sources.list.d/zabbly-incus-stable.list \

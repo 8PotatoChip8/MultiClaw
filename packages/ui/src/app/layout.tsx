@@ -31,23 +31,15 @@ function UpdateBanner() {
             });
             const data = await res.json();
             setUpdateInfo(data);
+            // Write to localStorage so settings page can read it
+            localStorage.setItem('_update_info', JSON.stringify(data));
         } catch { }
     };
 
     useEffect(() => {
         checkUpdate();
         const interval = setInterval(checkUpdate, 5 * 60 * 1000);
-        // Poll localStorage for update info written by settings page (same-tab reactivity)
-        const pollLocal = setInterval(() => {
-            const stored = localStorage.getItem('_update_info');
-            if (stored) {
-                try {
-                    const parsed = JSON.parse(stored);
-                    setUpdateInfo(parsed);
-                } catch {}
-            }
-        }, 2000);
-        return () => { clearInterval(interval); clearInterval(pollLocal); };
+        return () => { clearInterval(interval); };
     }, []);
 
     const handleUpdate = async () => {

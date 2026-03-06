@@ -37,8 +37,7 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::init_db(&cfg.database_url).await?;
 
     // Seed deployed_commit from current git HEAD so the auto-updater can compare.
-    // Try /opt/multiclaw first (Docker), then current dir (local dev).
-    // Only write if we actually resolve a SHA — don't overwrite a good value with "unknown".
+    // The /opt/multiclaw repo is volume-mounted into the container.
     let head_sha = tokio::process::Command::new("git")
         .args(["-C", "/opt/multiclaw", "rev-parse", "HEAD"])
         .output()
@@ -46,17 +45,7 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|o| if o.status.success() {
             String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else { None })
-        .or_else(|| {
-            // Fallback: try without -C for local dev
-            std::process::Command::new("git")
-                .args(["rev-parse", "HEAD"])
-                .output()
-                .ok()
-                .and_then(|o| if o.status.success() {
-                    String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-                } else { None })
-        });
+        } else { None });
 
     if let Some(sha) = &head_sha {
         sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
@@ -66,7 +55,7 @@ async fn main() -> anyhow::Result<()> {
             .ok();
         tracing::info!("Recorded deployed_commit={}", &sha[..7.min(sha.len())]);
     } else {
-        tracing::info!("Could not resolve git HEAD, keeping existing deployed_commit");
+        tracing::warn!("Could not resolve git HEAD at /opt/multiclaw, deployed_commit not seeded");
     }
 
     // Try to load MainAgent config from DB (name + model)

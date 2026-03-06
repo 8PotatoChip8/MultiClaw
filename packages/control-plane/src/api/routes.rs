@@ -1519,10 +1519,8 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
             }
         }
 
-        // Record the new deployed commit SHA.
-        // Try git rev-parse first; if that fails (e.g. no .git in container),
-        // fetch the latest commit SHA from GitHub API — after a successful pull,
-        // HEAD matches the remote's latest commit.
+        // Record the new deployed commit SHA after successful pull.
+        // /opt/multiclaw is volume-mounted with .git available.
         let new_sha = tokio::process::Command::new("git")
             .args(["-C", "/opt/multiclaw", "rev-parse", "HEAD"])
             .output()
@@ -1530,32 +1528,8 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
             .ok()
             .and_then(|o| if o.status.success() {
                 String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-            } else { None });
-
-        let new_sha = match new_sha {
-            Some(sha) => sha,
-            None => {
-                // Fallback: fetch latest commit SHA from GitHub (matches what we just pulled)
-                tracing::info!("git rev-parse failed, fetching deployed commit from GitHub API");
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(10))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new());
-                let url = format!("https://api.github.com/repos/8PotatoChip8/MultiClaw/commits/{}", branch);
-                let mut fetched_sha = "unknown".to_string();
-                if let Ok(resp) = client.get(&url)
-                    .header("User-Agent", "MultiClaw-Updater")
-                    .send().await
-                {
-                    if let Ok(body) = resp.json::<Value>().await {
-                        if let Some(sha) = body["sha"].as_str() {
-                            fetched_sha = sha.to_string();
-                        }
-                    }
-                }
-                fetched_sha
-            }
-        };
+            } else { None })
+            .unwrap_or_else(|| "unknown".to_string());
 
         sqlx::query("INSERT INTO system_meta (key, value) VALUES ('deployed_commit', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
             .bind(&new_sha)

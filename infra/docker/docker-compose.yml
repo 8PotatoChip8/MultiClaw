@@ -22,10 +22,9 @@ services:
       - HOST_IP=${HOST_IP}
       - MULTICLAW_OPENCLAW_DATA=/opt/multiclaw/openclaw-data
     volumes:
+      - /opt/multiclaw:/opt/multiclaw # Full repo access for git operations (auto-updater)
       - /var/lib/multiclaw:/var/lib/multiclaw
-      - /opt/multiclaw/infra/vm:/opt/multiclaw/infra/vm:ro # VM scripts for agent provisioning
       - /opt/multiclaw/infra/openclaw:/app/infra/openclaw:ro # OpenClaw config templates
-      - /opt/multiclaw/openclaw-data:/opt/multiclaw/openclaw-data # Agent OpenClaw data (config + workspace)
       - /var/lib/incus/unix.socket:/var/lib/incus/unix.socket # Incus daemon socket (Ubuntu pkg path)
       - /var/run/docker.sock:/var/run/docker.sock # Docker socket for managing OpenClaw containers
     pid: "host" # Needs host network access to run subprocess incus CLI simply

@@ -39,7 +39,6 @@ export default function SettingsPage() {
         setChecking(true);
         const info = await api.checkForUpdate();
         setUpdateInfo(info);
-        // Notify sidebar banner via localStorage
         if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
     };
@@ -48,7 +47,6 @@ export default function SettingsPage() {
         setChecking(true);
         const info = await api.checkForUpdate();
         setUpdateInfo(info);
-        // Notify sidebar banner via localStorage
         if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
     };
