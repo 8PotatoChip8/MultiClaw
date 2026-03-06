@@ -47,6 +47,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/file/pull", post(vm_file_pull))
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
+        .route("/v1/agents/:id/dm", post(agent_dm))
+        .route("/v1/agents/:id/threads", get(get_agent_threads))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
         .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
@@ -953,11 +955,34 @@ async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Que
 // Threads & Messages
 // ═══════════════════════════════════════════════════════════════
 
-async fn get_threads(State(state): State<AppState>) -> impl IntoResponse {
-    match sqlx::query_as::<_, Thread>("SELECT id, type, title, created_by_user_id, created_at FROM threads ORDER BY created_at DESC")
-        .fetch_all(&state.db).await {
-        Ok(t) => (StatusCode::OK, Json(json!(t))),
-        Err(_) => (StatusCode::OK, Json(json!([])))
+#[derive(Debug, Deserialize)]
+struct ThreadsQuery {
+    agent_only: Option<bool>,
+}
+
+async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery>) -> impl IntoResponse {
+    if q.agent_only.unwrap_or(false) {
+        // Return only threads with agent members and NO user members (agent-to-agent only)
+        match sqlx::query_as::<_, Thread>(
+            "SELECT DISTINCT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
+             FROM threads t \
+             JOIN thread_members tm ON t.id = tm.thread_id \
+             WHERE tm.member_type = 'AGENT' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM thread_members tm2 \
+                   WHERE tm2.thread_id = t.id AND tm2.member_type = 'USER' \
+               ) \
+             ORDER BY t.created_at DESC"
+        ).fetch_all(&state.db).await {
+            Ok(t) => (StatusCode::OK, Json(json!(t))),
+            Err(_) => (StatusCode::OK, Json(json!([])))
+        }
+    } else {
+        match sqlx::query_as::<_, Thread>("SELECT id, type, title, created_by_user_id, created_at FROM threads ORDER BY created_at DESC")
+            .fetch_all(&state.db).await {
+            Ok(t) => (StatusCode::OK, Json(json!(t))),
+            Err(_) => (StatusCode::OK, Json(json!([])))
+        }
     }
 }
 
@@ -974,12 +999,21 @@ async fn create_thread(State(state): State<AppState>, Json(p): Json<CreateThread
     let id = Uuid::new_v4();
     let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, $2, $3)")
         .bind(id).bind(&p.r#type).bind(&p.title).execute(&state.db).await;
+    // Auto-add members if provided
+    if let Some(member_ids) = &p.member_ids {
+        for mid in member_ids {
+            let _ = sqlx::query(
+                "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) \
+                 ON CONFLICT DO NOTHING"
+            ).bind(id).bind(mid).execute(&state.db).await;
+        }
+    }
     (StatusCode::CREATED, Json(json!({"id": id, "type": p.r#type, "title": p.title})))
 }
 
 async fn get_messages(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    match sqlx::query_as::<_, Message>("SELECT id, thread_id, sender_type, sender_id, content, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC")
+    match sqlx::query_as::<_, Message>("SELECT id, thread_id, sender_type, sender_id, content, reply_depth, created_at FROM messages WHERE thread_id = $1 ORDER BY created_at ASC")
         .bind(uid).fetch_all(&state.db).await {
         Ok(m) => (StatusCode::OK, Json(json!(m))),
         Err(_) => (StatusCode::OK, Json(json!([])))
@@ -993,17 +1027,18 @@ async fn send_message(
     let msg_id = Uuid::new_v4();
     let sender_type = p.sender_type.unwrap_or_else(|| "USER".into());
     let sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
+    let reply_depth = p.reply_depth.unwrap_or(0);
 
     match sqlx::query_as::<_, Message>(
-        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,$3,$4,$5) \
-         RETURNING id, thread_id, sender_type, sender_id, content, created_at"
-    ).bind(msg_id).bind(thread_id).bind(&sender_type).bind(sender_id).bind(&p.content)
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,$3,$4,$5,$6) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(&sender_type).bind(sender_id).bind(&p.content).bind(reply_depth)
     .fetch_one(&state.db).await {
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
-            // If the sender is a USER, trigger MainAgent to respond
-            if sender_type == "USER" {
+            // Trigger agent responses for USER or AGENT senders (with depth-based loop prevention)
+            if (sender_type == "USER" || sender_type == "AGENT") && reply_depth < 1 {
                 let user_text = p.content.get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -1012,8 +1047,10 @@ async fn send_message(
                 if !user_text.is_empty() {
                     let state_clone = state.clone();
                     let tid = thread_id;
+                    let is_agent_sender = sender_type == "AGENT";
+                    let next_depth = reply_depth + 1;
                     tokio::spawn(async move {
-                        tracing::info!("MainAgent processing message: '{}'", &user_text[..user_text.len().min(100)]);
+                        tracing::info!("Processing message (depth {}): '{}'", reply_depth, &user_text[..user_text.len().min(100)]);
 
                         // Check thread type
                         let thread_type: String = sqlx::query_scalar(
@@ -1036,7 +1073,7 @@ async fn send_message(
                         .unwrap_or_default();
 
                         // Determine which agents should respond
-                        let responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
+                        let mut responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
                             // Check for @-mentions in the message (format: @agent-name or @handle)
                             let mut mentioned: Vec<Uuid> = Vec::new();
                             for aid in &agent_ids {
@@ -1077,6 +1114,11 @@ async fn send_message(
                             }
                         };
 
+                        // If sender is an agent, exclude them from responders
+                        if is_agent_sender {
+                            responding_agents.retain(|id| *id != sender_id);
+                        }
+
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(*responding_agent_id, &user_text).await {
@@ -1109,13 +1151,14 @@ async fn send_message(
                                     let resp_id = Uuid::new_v4();
                                     let content = json!({"text": response});
                                     if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4) \
-                                         RETURNING id, thread_id, sender_type, sender_id, content, created_at"
+                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
+                                         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
                                     )
                                     .bind(resp_id)
                                     .bind(tid)
                                     .bind(responding_agent_id)
                                     .bind(&content)
+                                    .bind(next_depth)
                                     .fetch_one(&state_clone.db)
                                     .await {
                                         let _ = state_clone.tx.send(
@@ -1129,12 +1172,13 @@ async fn send_message(
                                     let resp_id = Uuid::new_v4();
                                     let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
                                     let _ = sqlx::query(
-                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content) VALUES ($1,$2,'AGENT',$3,$4)"
+                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5)"
                                     )
                                     .bind(resp_id)
                                     .bind(tid)
                                     .bind(responding_agent_id)
                                     .bind(&content)
+                                    .bind(next_depth)
                                     .execute(&state_clone.db)
                                     .await;
                                 }
@@ -1346,6 +1390,154 @@ async fn get_agent_thread(State(state): State<AppState>, Path(id): Path<String>)
         .bind(thread_id).bind(Uuid::from_u128(0)).execute(&state.db).await;
 
     (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "created": true})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent-to-Agent DM
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct AgentDmRequest {
+    target: String,   // agent UUID or handle (e.g. "@ceo-acme")
+    message: String,
+}
+
+async fn agent_dm(
+    State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentDmRequest>
+) -> impl IntoResponse {
+    let sender_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid sender ID"}))),
+    };
+
+    // Resolve target: UUID or @handle
+    let target_id: Uuid = if p.target.starts_with('@') {
+        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE handle = $1")
+            .bind(&p.target).fetch_optional(&state.db).await {
+            Ok(Some(id)) => id,
+            _ => return (StatusCode::NOT_FOUND, Json(json!({"error": format!("Agent with handle '{}' not found", p.target)}))),
+        }
+    } else {
+        match Uuid::parse_str(&p.target) {
+            Ok(u) => u,
+            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid target — use a UUID or @handle"}))),
+        }
+    };
+
+    if sender_id == target_id {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Cannot DM yourself"})));
+    }
+
+    // Rate limit: max 10 agent messages per minute per sender
+    let recent_count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT' AND created_at > NOW() - INTERVAL '1 minute'"
+    ).bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+    if recent_count.unwrap_or(0) >= 10 {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 10 agent messages per minute"})));
+    }
+
+    // Find existing agent-to-agent DM (no USER members)
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT t.id FROM threads t \
+         JOIN thread_members tm1 ON t.id = tm1.thread_id \
+         JOIN thread_members tm2 ON t.id = tm2.thread_id \
+         WHERE t.type = 'DM' \
+           AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+           AND tm2.member_type = 'AGENT' AND tm2.member_id = $2 \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM thread_members tm3 \
+               WHERE tm3.thread_id = t.id AND tm3.member_type = 'USER' \
+           ) \
+         LIMIT 1"
+    ).bind(sender_id).bind(target_id).fetch_optional(&state.db).await.unwrap_or(None);
+
+    let thread_id = if let Some((tid,)) = existing {
+        tid
+    } else {
+        // Create new agent-to-agent DM thread
+        let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(sender_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+        let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(target_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+        let tid = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+            .bind(tid).bind(format!("{} <-> {}", sender_name, target_name))
+            .execute(&state.db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+            .bind(tid).bind(sender_id).execute(&state.db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+            .bind(tid).bind(target_id).execute(&state.db).await;
+        tid
+    };
+
+    // Insert message
+    let msg_id = Uuid::new_v4();
+    let content = json!({"text": p.message});
+    match sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(sender_id).bind(&content)
+    .fetch_one(&state.db).await {
+        Ok(msg) => {
+            let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
+
+            // Trigger target agent to respond (depth 0 → response at depth 1)
+            let state_clone = state.clone();
+            let text = p.message.clone();
+            tokio::spawn(async move {
+                let result = state_clone.openclaw.send_message(target_id, &text).await;
+                match result {
+                    Ok(response) => {
+                        let resp_id = Uuid::new_v4();
+                        let resp_content = json!({"text": response});
+                        if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,1) \
+                             RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+                        ).bind(resp_id).bind(thread_id).bind(target_id).bind(&resp_content)
+                        .fetch_one(&state_clone.db).await {
+                            let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("OpenClaw unavailable for agent {}: {}", target_id, e);
+                        let resp_id = Uuid::new_v4();
+                        let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                            .bind(target_id).fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+                        let resp_content = json!({"text": format!("⚠️ {} is currently unavailable.", target_name)});
+                        let _ = sqlx::query(
+                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'SYSTEM',$3,$4,1)"
+                        ).bind(resp_id).bind(thread_id).bind(target_id).bind(&resp_content)
+                        .execute(&state_clone.db).await;
+                    }
+                }
+            });
+
+            (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent's Own Threads
+// ═══════════════════════════════════════════════════════════════
+
+async fn get_agent_threads(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))),
+    };
+    match sqlx::query_as::<_, Thread>(
+        "SELECT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
+         FROM threads t \
+         JOIN thread_members tm ON t.id = tm.thread_id \
+         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+         ORDER BY t.created_at DESC \
+         LIMIT 50"
+    ).bind(agent_id).fetch_all(&state.db).await {
+        Ok(t) => (StatusCode::OK, Json(json!(t))),
+        Err(_) => (StatusCode::OK, Json(json!([])))
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════

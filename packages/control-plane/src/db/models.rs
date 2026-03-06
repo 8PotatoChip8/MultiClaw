@@ -134,6 +134,7 @@ pub struct Message {
     pub sender_type: String,
     pub sender_id: Uuid,
     pub content: JsonValue,
+    pub reply_depth: i32,
     pub created_at: DateTime<Utc>,
 }
 
@@ -142,6 +143,7 @@ pub struct CreateMessageRequest {
     pub sender_type: Option<String>,
     pub sender_id: Option<Uuid>,
     pub content: JsonValue,
+    pub reply_depth: Option<i32>,
     pub targets: Option<Vec<Uuid>>,
     pub mode: Option<String>,
 }

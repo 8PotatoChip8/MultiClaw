@@ -2,7 +2,8 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../../lib/api';
 import { Thread, Message, Agent } from '../../lib/types';
-import { Radio, Eye, Users } from 'lucide-react';
+import { Radio, Eye, Users, MessageSquare } from 'lucide-react';
+import { useMultiClawEvents } from '../../lib/ws';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
 
@@ -15,23 +16,41 @@ export default function AgentCommsPage() {
     const [loading, setLoading] = useState(true);
     const feedRef = useRef<HTMLDivElement>(null);
     const agentMap = new Map(agents.map(a => [a.id, a]));
+    const lastEvent = useMultiClawEvents();
 
-    useEffect(() => {
-        Promise.all([api.getThreads(), api.getAgents()]).then(([t, a]) => {
-            const allThreads = Array.isArray(t) ? t : [];
+    const loadThreads = () => {
+        Promise.all([api.getAgentOnlyThreads(), api.getAgents()]).then(([t, a]) => {
             setAgents(Array.isArray(a) ? a : []);
-            // Only show agent-to-agent threads: GROUP and ENGAGEMENT, not user DMs
-            const agentThreads = allThreads.filter(th => th.type !== 'DM');
-            setThreads(agentThreads);
+            setThreads(Array.isArray(t) ? t : []);
             setLoading(false);
         }).catch(() => setLoading(false));
-    }, []);
+    };
+
+    useEffect(() => { loadThreads(); }, []);
+
+    // Real-time updates via WebSocket
+    useEffect(() => {
+        if (!lastEvent || lastEvent.type !== 'new_message') return;
+        const msg = lastEvent.message;
+        if (!msg) return;
+
+        // Append to current thread if it matches
+        if (msg.thread_id === selectedThread) {
+            setMessages(prev => {
+                if (prev.some(m => m.id === msg.id)) return prev;
+                return [...prev, msg];
+            });
+        }
+
+        // Refresh thread list to pick up new threads
+        loadThreads();
+    }, [lastEvent]);
 
     useEffect(() => {
         if (!selectedThread) { setMessages([]); setParticipants([]); return; }
         api.getMessages(selectedThread).then(d => setMessages(Array.isArray(d) ? d : []));
         api.getThreadParticipants(selectedThread).then(d => setParticipants(Array.isArray(d) ? d : []));
-        // Auto-refresh every 10s for live monitoring
+        // Keep polling as fallback (every 10s)
         const interval = setInterval(() => {
             api.getMessages(selectedThread).then(d => setMessages(Array.isArray(d) ? d : []));
         }, 10000);
@@ -83,7 +102,11 @@ export default function AgentCommsPage() {
                             transition: 'all 0.15s',
                         }}>
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                                <Users size={12} style={{ color: 'var(--accent)' }} />
+                                {t.type === 'DM' ? (
+                                    <MessageSquare size={12} style={{ color: 'var(--accent)' }} />
+                                ) : (
+                                    <Users size={12} style={{ color: 'var(--accent)' }} />
+                                )}
                                 <span style={{ fontSize: '13px', fontWeight: 500 }}>{t.title || 'Agent Thread'}</span>
                             </div>
                             <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '2px' }}>{t.type}</div>
@@ -161,7 +184,7 @@ export default function AgentCommsPage() {
                                 color: 'var(--text-muted)', fontSize: '12px',
                             }}>
                                 <Eye size={14} />
-                                Monitoring mode — messages auto-refresh every 10s
+                                Monitoring mode — live updates via WebSocket
                             </div>
                         </>
                     ) : (

@@ -45,6 +45,7 @@ export interface Message {
     sender_type: 'USER' | 'AGENT' | 'SYSTEM';
     sender_id: string;
     content: any;
+    reply_depth?: number;
     created_at: string;
 }
 

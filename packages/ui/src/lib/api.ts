@@ -65,8 +65,9 @@ export const api = {
 
     // Threads & Messages
     getThreads: () => request('/threads'),
+    getAgentOnlyThreads: () => request('/threads?agent_only=true'),
     getThread: (id: string) => request(`/threads/${id}`),
-    createThread: (data: { type: string; title?: string }) =>
+    createThread: (data: { type: string; title?: string; member_ids?: string[] }) =>
         request('/threads', { method: 'POST', body: JSON.stringify(data) }),
     getMessages: (threadId: string) => request(`/threads/${threadId}/messages`),
     sendMessage: (threadId: string, data: { content: any; sender_type?: string; sender_id?: string }) =>

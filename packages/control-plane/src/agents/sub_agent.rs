@@ -320,6 +320,61 @@ impl SubAgent {
             }));
         }
 
+        // All agents can message other agents
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "send_agent_dm",
+                "description": "Send a direct message to another agent. They will receive it and respond.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target": { "type": "string", "description": "Target agent UUID or @handle (e.g. @ceo-acme)" },
+                        "message": { "type": "string", "description": "Your message" }
+                    },
+                    "required": ["target", "message"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "send_group_message",
+                "description": "Send a message to a group thread you are part of.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "thread_id": { "type": "string", "description": "Thread UUID" },
+                        "message": { "type": "string", "description": "Your message" }
+                    },
+                    "required": ["thread_id", "message"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "create_group_chat",
+                "description": "Create a new group chat with other agents.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": { "type": "string", "description": "Group chat title" },
+                        "agent_ids": { "type": "array", "items": { "type": "string" }, "description": "List of agent UUIDs to include" }
+                    },
+                    "required": ["title", "agent_ids"]
+                }
+            }
+        }));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": "list_my_threads",
+                "description": "List your conversation threads (DMs and group chats).",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        }));
+
         // All agents can submit requests to their superior
         tools.push(json!({
             "type": "function",
@@ -358,6 +413,10 @@ impl SubAgent {
             "hire_worker" => self.tool_hire(db_pool, agent_id, args, "WORKER").await,
             "hire_manager" => self.tool_hire(db_pool, agent_id, args, "MANAGER").await,
             "submit_request" => self.tool_submit_request(db_pool, agent_id, args).await,
+            "send_agent_dm" => self.tool_send_agent_dm(db_pool, agent_id, args).await,
+            "send_group_message" => self.tool_send_group_message(db_pool, agent_id, args).await,
+            "create_group_chat" => self.tool_create_group_chat(db_pool, agent_id, args).await,
+            "list_my_threads" => self.tool_list_my_threads(db_pool, agent_id).await,
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -681,5 +740,161 @@ impl SubAgent {
             ),
             Err(e) => format!("Failed to submit request: {}", e),
         }
+    }
+
+    async fn tool_send_agent_dm(
+        &self,
+        db_pool: &PgPool,
+        agent_id: Uuid,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let target = args.get("target").and_then(|v| v.as_str()).unwrap_or("");
+        let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        if target.is_empty() || message.is_empty() {
+            return "Error: target and message are required".to_string();
+        }
+
+        // Resolve target: @handle or UUID
+        let target_id: Uuid = if target.starts_with('@') {
+            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE handle = $1")
+                .bind(target).fetch_optional(db_pool).await {
+                Ok(Some(id)) => id,
+                _ => return format!("Error: agent with handle '{}' not found", target),
+            }
+        } else {
+            match Uuid::parse_str(target) {
+                Ok(u) => u,
+                Err(_) => return "Error: invalid target — use a UUID or @handle".to_string(),
+            }
+        };
+
+        if agent_id == target_id {
+            return "Error: cannot DM yourself".to_string();
+        }
+
+        // Find existing agent-to-agent DM
+        let existing: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT t.id FROM threads t \
+             JOIN thread_members tm1 ON t.id = tm1.thread_id \
+             JOIN thread_members tm2 ON t.id = tm2.thread_id \
+             WHERE t.type = 'DM' \
+               AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+               AND tm2.member_type = 'AGENT' AND tm2.member_id = $2 \
+               AND NOT EXISTS (SELECT 1 FROM thread_members tm3 WHERE tm3.thread_id = t.id AND tm3.member_type = 'USER') \
+             LIMIT 1"
+        ).bind(agent_id).bind(target_id).fetch_optional(db_pool).await.unwrap_or(None);
+
+        let thread_id = if let Some((tid,)) = existing {
+            tid
+        } else {
+            let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(agent_id).fetch_optional(db_pool).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+            let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(db_pool).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+            let tid = Uuid::new_v4();
+            let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+                .bind(tid).bind(format!("{} <-> {}", sender_name, target_name))
+                .execute(db_pool).await;
+            let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+                .bind(tid).bind(agent_id).execute(db_pool).await;
+            let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+                .bind(tid).bind(target_id).execute(db_pool).await;
+            tid
+        };
+
+        // Insert message
+        let msg_id = Uuid::new_v4();
+        let content = json!({"text": message});
+        match sqlx::query(
+            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0)"
+        ).bind(msg_id).bind(thread_id).bind(agent_id).bind(&content).execute(db_pool).await {
+            Ok(_) => {
+                let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                    .bind(target_id).fetch_optional(db_pool).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+                format!("Message sent to {} (thread: {}). They will respond shortly.", target_name, thread_id)
+            }
+            Err(e) => format!("Failed to send DM: {}", e),
+        }
+    }
+
+    async fn tool_send_group_message(
+        &self,
+        db_pool: &PgPool,
+        agent_id: Uuid,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let thread_id_str = args.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+        let message = args.get("message").and_then(|v| v.as_str()).unwrap_or("");
+        if thread_id_str.is_empty() || message.is_empty() {
+            return "Error: thread_id and message are required".to_string();
+        }
+        let thread_id = match Uuid::parse_str(thread_id_str) {
+            Ok(u) => u,
+            Err(_) => return "Error: invalid thread_id".to_string(),
+        };
+
+        // Verify agent is a member
+        let is_member: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT thread_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT' AND member_id = $2"
+        ).bind(thread_id).bind(agent_id).fetch_optional(db_pool).await.unwrap_or(None);
+        if is_member.is_none() {
+            return "Error: you are not a member of this thread".to_string();
+        }
+
+        let msg_id = Uuid::new_v4();
+        let content = json!({"text": message});
+        match sqlx::query(
+            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0)"
+        ).bind(msg_id).bind(thread_id).bind(agent_id).bind(&content).execute(db_pool).await {
+            Ok(_) => format!("Message sent to group thread {}.", thread_id),
+            Err(e) => format!("Failed to send message: {}", e),
+        }
+    }
+
+    async fn tool_create_group_chat(
+        &self,
+        db_pool: &PgPool,
+        agent_id: Uuid,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let title = args.get("title").and_then(|v| v.as_str()).unwrap_or("Group Chat");
+        let agent_ids = args.get("agent_ids").and_then(|v| v.as_array());
+        let member_uuids: Vec<Uuid> = agent_ids
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().and_then(|s| Uuid::parse_str(s).ok())).collect())
+            .unwrap_or_default();
+
+        let thread_id = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'GROUP', $2)")
+            .bind(thread_id).bind(title).execute(db_pool).await;
+
+        // Add self as member
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING")
+            .bind(thread_id).bind(agent_id).execute(db_pool).await;
+
+        // Add specified agents
+        for mid in &member_uuids {
+            let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING")
+                .bind(thread_id).bind(mid).execute(db_pool).await;
+        }
+
+        format!("Group chat '{}' created (thread: {}). {} members added.", title, thread_id, member_uuids.len() + 1)
+    }
+
+    async fn tool_list_my_threads(&self, db_pool: &PgPool, agent_id: Uuid) -> String {
+        let threads: Vec<(Uuid, String, Option<String>)> = sqlx::query_as(
+            "SELECT t.id, t.type, t.title FROM threads t \
+             JOIN thread_members tm ON t.id = tm.thread_id \
+             WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+             ORDER BY t.created_at DESC LIMIT 20"
+        ).bind(agent_id).fetch_all(db_pool).await.unwrap_or_default();
+
+        if threads.is_empty() {
+            return "You have no conversation threads yet.".to_string();
+        }
+
+        let items: Vec<String> = threads.iter().map(|(id, typ, title)| {
+            format!("- [{}] {} (id: {})", typ, title.as_deref().unwrap_or("Untitled"), id)
+        }).collect();
+        format!("Your threads:\n{}", items.join("\n"))
     }
 }
