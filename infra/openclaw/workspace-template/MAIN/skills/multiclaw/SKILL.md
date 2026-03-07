@@ -129,6 +129,28 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/threads \
 curl -s {{MULTICLAW_API_URL}}/v1/threads/THREAD_ID/messages
 ```
 
+## File Sharing — Cross-Company File Routing
+
+As MAIN, you can send files to **any CEO** in the holding and receive files from any CEO.
+
+**You are the cross-company file router.** When a CEO needs to share a file with another company, they send it to you. You then decide whether to forward it to the other CEO.
+
+### Send a File to a CEO
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/send-file \
+  -H 'Content-Type: application/json' \
+  -d '{"target": "CEO_AGENT_ID_OR_HANDLE", "src_path": "shared/contract-draft.pdf"}'
+```
+- `target`: the recipient's UUID or `@handle`
+- `src_path`: path to the file in **your** `/workspace`
+- `dest_path` (optional): where to place it in the **recipient's** `/workspace` (defaults to filename)
+- The recipient will be notified when the file arrives.
+
+### View File Transfer History
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/file-transfers
+```
+
 ## Secrets — Access Sensitive Data
 
 ### Fetch a Secret by Name

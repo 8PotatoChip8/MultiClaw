@@ -284,6 +284,30 @@ pub struct Secret {
     pub created_at: DateTime<Utc>,
 }
 
+// ─── File Transfers ─────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct FileTransfer {
+    pub id: Uuid,
+    pub sender_id: Uuid,
+    pub receiver_id: Uuid,
+    pub filename: String,
+    pub size_bytes: i64,
+    pub encoding: String,
+    pub dest_path: String,
+    pub status: String,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentFileSendRequest {
+    pub target: String,
+    pub src_path: String,
+    pub dest_path: Option<String>,
+    pub encoding: Option<String>,
+}
+
 // ─── Install Init ──────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]

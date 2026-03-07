@@ -87,6 +87,32 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/threads \
 curl -s {{MULTICLAW_API_URL}}/v1/threads/THREAD_ID/messages
 ```
 
+## File Sharing — Send Files to Colleagues
+
+You can send files from your `/workspace` to other agents in your team.
+
+**Rules:**
+- You can send files to **other workers in your department** (same manager).
+- You can send files to **your manager**.
+- Your manager or CEO can send files down to you.
+- You **cannot** send files directly to the CEO or MAIN — go through your manager.
+
+### Send a File to Another Agent
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/send-file \
+  -H 'Content-Type: application/json' \
+  -d '{"target": "TARGET_AGENT_ID_OR_HANDLE", "src_path": "output/report.csv"}'
+```
+- `target`: the recipient's UUID or `@handle`
+- `src_path`: path to the file in **your** `/workspace`
+- `dest_path` (optional): where to place it in the **recipient's** `/workspace` (defaults to the filename at their workspace root)
+- The recipient will be notified when the file arrives.
+
+### View Your File Transfer History
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/file-transfers
+```
+
 ## Secrets — Access Sensitive Data
 
 ### Fetch a Secret by Name

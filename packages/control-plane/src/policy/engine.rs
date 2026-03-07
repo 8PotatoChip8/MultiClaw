@@ -98,6 +98,135 @@ pub fn can_hire_service(actor_role: Role) -> Decision {
     }
 }
 
+/// Context for evaluating file transfer permissions.
+/// The route handler populates this from the two Agent records.
+#[derive(Debug, Clone)]
+pub struct FileTransferContext {
+    pub sender_role: Role,
+    pub receiver_role: Role,
+    pub sender_id: uuid::Uuid,
+    pub receiver_id: uuid::Uuid,
+    pub sender_parent: Option<uuid::Uuid>,
+    pub receiver_parent: Option<uuid::Uuid>,
+    pub sender_company: Option<uuid::Uuid>,
+    pub receiver_company: Option<uuid::Uuid>,
+}
+
+/// Evaluates whether a file transfer is permitted under the hierarchy rules.
+///
+/// Allowed transfers:
+///   - WORKER ↔ peer WORKER (same parent_agent_id, same company)
+///   - WORKER → their MANAGER (sender.parent = receiver.id)
+///   - MANAGER → their WORKER (receiver.parent = sender.id)
+///   - MANAGER ↔ peer MANAGER (same company_id)
+///   - MANAGER → their CEO (sender.parent = receiver.id)
+///   - CEO → their MANAGER (receiver.parent = sender.id)
+///   - CEO → MAIN (always)
+///   - MAIN → any CEO (always)
+///   - MAIN → any MANAGER or WORKER (full downward authority)
+///
+/// Denied:
+///   - CEO → CEO (cross-company must route through MAIN)
+///   - WORKER → CEO or MAIN directly (must go through manager)
+///   - CEO → WORKER directly (must go through manager)
+pub fn can_send_file(ctx: &FileTransferContext) -> Decision {
+    use Role::*;
+
+    match (&ctx.sender_role, &ctx.receiver_role) {
+        // Workers in same department (same parent, same company)
+        (Worker, Worker) => {
+            let same_parent = ctx.sender_parent.is_some()
+                && ctx.sender_parent == ctx.receiver_parent;
+            let same_company = ctx.sender_company.is_some()
+                && ctx.sender_company == ctx.receiver_company;
+            if same_parent && same_company {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied(
+                    "Workers can only send files to peers in the same department (same manager)".into()
+                )
+            }
+        }
+
+        // Worker → their Manager (upward)
+        (Worker, Manager) => {
+            if ctx.sender_parent == Some(ctx.receiver_id) {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied("Workers can only send files to their own manager".into())
+            }
+        }
+
+        // Manager → their Worker (downward)
+        (Manager, Worker) => {
+            if ctx.receiver_parent == Some(ctx.sender_id) {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied("Managers can only send files to their own workers".into())
+            }
+        }
+
+        // Manager ↔ peer Manager (same company)
+        (Manager, Manager) => {
+            let same_company = ctx.sender_company.is_some()
+                && ctx.sender_company == ctx.receiver_company;
+            if same_company {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied(
+                    "Managers can only send files to other managers in the same company".into()
+                )
+            }
+        }
+
+        // Manager → their CEO (upward)
+        (Manager, Ceo) => {
+            if ctx.sender_parent == Some(ctx.receiver_id) {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied("Managers can only send files to their own CEO".into())
+            }
+        }
+
+        // CEO → their Manager (downward)
+        (Ceo, Manager) => {
+            if ctx.receiver_parent == Some(ctx.sender_id) {
+                Decision::AllowedImmediate
+            } else {
+                Decision::Denied("CEOs can only send files to their own managers".into())
+            }
+        }
+
+        // CEO → MAIN (always allowed)
+        (Ceo, Main) => Decision::AllowedImmediate,
+
+        // MAIN → any CEO (always allowed)
+        (Main, Ceo) => Decision::AllowedImmediate,
+
+        // MAIN → any Manager or Worker (full downward authority)
+        (Main, Manager) | (Main, Worker) => Decision::AllowedImmediate,
+
+        // CEO → CEO: denied (cross-company must route through MAIN)
+        (Ceo, Ceo) => Decision::Denied(
+            "CEOs cannot send files directly to other CEOs. \
+             Send to MAIN (KonnerBot) who can forward to any CEO.".into()
+        ),
+
+        // Worker → CEO/MAIN directly: denied
+        (Worker, Ceo) | (Worker, Main) => Decision::Denied(
+            "Workers must send files through their manager, not directly to CEO or MAIN".into()
+        ),
+
+        // CEO → Worker directly: denied
+        (Ceo, Worker) => Decision::Denied(
+            "CEOs cannot send files directly to workers — send to the worker's manager instead".into()
+        ),
+
+        // Everything else
+        _ => Decision::Denied("File transfer not permitted between these roles".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -54,6 +54,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/dm", post(agent_dm))
         .route("/v1/agents/:id/dm-user", post(agent_dm_user))
+        .route("/v1/agents/:id/send-file", post(agent_send_file))
+        .route("/v1/agents/:id/file-transfers", get(agent_file_transfers))
         .route("/v1/agents/:id/threads", get(get_agent_threads))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
@@ -1868,6 +1870,245 @@ async fn agent_dm_user(
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id, "status": "delivered"})))
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Inter-Agent File Transfer
+// ═══════════════════════════════════════════════════════════════
+
+/// Maximum file size for inter-agent transfers: 10 MB
+const MAX_FILE_TRANSFER_BYTES: u64 = 10 * 1024 * 1024;
+
+fn parse_role(role_str: &str) -> crate::policy::engine::Role {
+    use crate::policy::engine::Role;
+    match role_str {
+        "MAIN"    => Role::Main,
+        "CEO"     => Role::Ceo,
+        "MANAGER" => Role::Manager,
+        _         => Role::Worker,
+    }
+}
+
+async fn agent_send_file(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(p): Json<AgentFileSendRequest>,
+) -> impl IntoResponse {
+    let sender_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid sender ID"}))),
+    };
+
+    // Resolve target: UUID or @handle
+    let receiver_id: Uuid = if p.target.starts_with('@') {
+        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM agents WHERE handle = $1")
+            .bind(&p.target).fetch_optional(&state.db).await
+        {
+            Ok(Some(id)) => id,
+            _ => return (StatusCode::NOT_FOUND, Json(json!({"error": format!("Agent '{}' not found", p.target)}))),
+        }
+    } else {
+        match Uuid::parse_str(&p.target) {
+            Ok(u) => u,
+            Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid target — use UUID or @handle"}))),
+        }
+    };
+
+    if sender_id == receiver_id {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Cannot send a file to yourself"})));
+    }
+
+    // Fetch both agents
+    let sender: Option<Agent> = sqlx::query_as(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, \
+         preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, \
+         sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1"
+    ).bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let receiver: Option<Agent> = sqlx::query_as(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, \
+         preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, \
+         sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1"
+    ).bind(receiver_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (sender, receiver) = match (sender, receiver) {
+        (Some(s), Some(r)) => (s, r),
+        (None, _) => return (StatusCode::NOT_FOUND, Json(json!({"error":"Sender agent not found"}))),
+        (_, None) => return (StatusCode::NOT_FOUND, Json(json!({"error":"Receiver agent not found"}))),
+    };
+
+    // Policy check
+    let ctx = crate::policy::engine::FileTransferContext {
+        sender_role: parse_role(&sender.role),
+        receiver_role: parse_role(&receiver.role),
+        sender_id,
+        receiver_id,
+        sender_parent: sender.parent_agent_id,
+        receiver_parent: receiver.parent_agent_id,
+        sender_company: sender.company_id,
+        receiver_company: receiver.company_id,
+    };
+
+    match crate::policy::engine::can_send_file(&ctx) {
+        crate::policy::engine::Decision::Denied(reason) => {
+            return (StatusCode::FORBIDDEN, Json(json!({"error": reason})));
+        }
+        crate::policy::engine::Decision::AllowedImmediate => {}
+        _ => {
+            return (StatusCode::FORBIDDEN, Json(json!({"error":"File transfer not permitted"})));
+        }
+    }
+
+    // Sanitize src_path
+    let src_path = p.src_path.trim_start_matches('/');
+    if src_path.contains("..") || src_path.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid src_path"})));
+    }
+
+    // Build host filesystem paths
+    let data_root = std::env::var("MULTICLAW_OPENCLAW_DATA")
+        .unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
+
+    let sender_workspace = std::path::PathBuf::from(&data_root)
+        .join(sender_id.to_string())
+        .join("workspace");
+    let src_file = sender_workspace.join(src_path);
+
+    // Verify path stays inside workspace
+    let src_canonical = match src_file.canonicalize() {
+        Ok(p) => p,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return (StatusCode::NOT_FOUND, Json(json!({
+                "error": format!("File not found in sender workspace: {}", src_path)
+            })));
+        }
+        Err(e) => {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Path error: {}", e)})));
+        }
+    };
+    if !src_canonical.starts_with(&sender_workspace) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"src_path escapes workspace boundary"})));
+    }
+
+    // Read and enforce size limit
+    let file_bytes = match tokio::fs::read(&src_canonical).await {
+        Ok(b) => b,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read file: {}", e)}))),
+    };
+
+    if file_bytes.len() as u64 > MAX_FILE_TRANSFER_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({
+            "error": format!("File too large: {} bytes (max {} bytes)", file_bytes.len(), MAX_FILE_TRANSFER_BYTES)
+        })));
+    }
+
+    let size_bytes = file_bytes.len() as i64;
+    let encoding = p.encoding.as_deref().unwrap_or("text");
+
+    // Determine destination path
+    let filename = std::path::Path::new(src_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(src_path);
+    let dest_relative = p.dest_path.as_deref().unwrap_or(filename);
+    let dest_relative = dest_relative.trim_start_matches('/');
+    if dest_relative.contains("..") || dest_relative.is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid dest_path"})));
+    }
+
+    let receiver_workspace = std::path::PathBuf::from(&data_root)
+        .join(receiver_id.to_string())
+        .join("workspace");
+    let dest_file = receiver_workspace.join(dest_relative);
+
+    // Verify dest stays inside workspace (pre-creation check via join logic)
+    if !dest_file.starts_with(&receiver_workspace) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"dest_path escapes workspace boundary"})));
+    }
+
+    // Create parent directories if needed, then write
+    if let Some(parent) = dest_file.parent() {
+        if let Err(e) = tokio::fs::create_dir_all(parent).await {
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": format!("Failed to create destination directory: {}", e)
+            })));
+        }
+    }
+
+    if let Err(e) = tokio::fs::write(&dest_file, &file_bytes).await {
+        let transfer_id = Uuid::new_v4();
+        let _ = sqlx::query(
+            "INSERT INTO file_transfers (id, sender_id, receiver_id, filename, size_bytes, encoding, dest_path, status, error) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,'FAILED',$8)"
+        ).bind(transfer_id).bind(sender_id).bind(receiver_id)
+         .bind(filename).bind(size_bytes).bind(encoding)
+         .bind(dest_relative).bind(e.to_string())
+         .execute(&state.db).await;
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to write file: {}", e)})));
+    }
+
+    // Record successful transfer
+    let transfer_id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO file_transfers (id, sender_id, receiver_id, filename, size_bytes, encoding, dest_path, status) \
+         VALUES ($1,$2,$3,$4,$5,$6,$7,'DELIVERED')"
+    ).bind(transfer_id).bind(sender_id).bind(receiver_id)
+     .bind(filename).bind(size_bytes).bind(encoding).bind(dest_relative)
+     .execute(&state.db).await;
+
+    // Notify receiver
+    let sender_name = sender.name.clone();
+    let notify_dest = dest_relative.to_string();
+    let notify_filename = filename.to_string();
+    let notify_size = file_bytes.len();
+    let openclaw = state.openclaw.clone();
+    tokio::spawn(async move {
+        let msg = format!(
+            "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
+            sender_name, notify_filename, notify_dest, notify_size
+        );
+        let _ = openclaw.send_message(receiver_id, &msg).await;
+    });
+
+    // Broadcast WebSocket event
+    let _ = state.tx.send(json!({
+        "type": "file_transferred",
+        "transfer_id": transfer_id,
+        "sender_id": sender_id,
+        "receiver_id": receiver_id,
+        "filename": filename,
+        "dest_path": dest_relative,
+    }).to_string());
+
+    tracing::info!("File '{}' transferred from {} to {} ({} bytes)", filename, sender.name, receiver.name, notify_size);
+
+    (StatusCode::CREATED, Json(json!({
+        "transfer_id": transfer_id,
+        "status": "delivered",
+        "filename": filename,
+        "dest_path": dest_relative,
+        "size_bytes": notify_size,
+    })))
+}
+
+async fn agent_file_transfers(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))),
+    };
+    match sqlx::query_as::<_, FileTransfer>(
+        "SELECT id, sender_id, receiver_id, filename, size_bytes, encoding, dest_path, \
+         status, error, created_at \
+         FROM file_transfers \
+         WHERE sender_id = $1 OR receiver_id = $1 \
+         ORDER BY created_at DESC LIMIT 100"
+    ).bind(agent_id).fetch_all(&state.db).await {
+        Ok(transfers) => (StatusCode::OK, Json(json!(transfers))),
+        Err(_) => (StatusCode::OK, Json(json!([]))),
     }
 }
 
