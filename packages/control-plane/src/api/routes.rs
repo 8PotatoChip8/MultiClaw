@@ -53,6 +53,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/dm", post(agent_dm))
+        .route("/v1/agents/:id/dm-user", post(agent_dm_user))
         .route("/v1/agents/:id/threads", get(get_agent_threads))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
@@ -1536,14 +1537,25 @@ async fn agent_dm(
                         }
                         Err(e) => {
                             tracing::warn!("OpenClaw unavailable for agent {}: {}", responder_id, e);
-                            let resp_id = Uuid::new_v4();
                             let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
                                 .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
-                            let resp_content = json!({"text": format!("⚠️ {} is currently unavailable.", agent_name)});
+
+                            // Post a SYSTEM message so it shows in the thread UI
+                            let resp_id = Uuid::new_v4();
+                            let resp_content = json!({"text": format!("{} is currently unavailable. Your message was not delivered — please try again later.", agent_name)});
                             let _ = sqlx::query(
                                 "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'SYSTEM',$3,$4,$5)"
                             ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
                             .execute(&state_clone.db).await;
+                            let _ = state_clone.tx.send(json!({"type":"new_message","thread_id": thread_id, "system": true, "text": format!("{} is currently unavailable.", agent_name)}).to_string());
+
+                            // Notify the sender agent that delivery failed so they can retry
+                            let failure_notice = format!(
+                                "Your message to {} was NOT delivered — they are currently unavailable. \
+                                 You should retry sending this message later when they come back online.",
+                                agent_name
+                            );
+                            let _ = state_clone.openclaw.send_message(other_id, &failure_notice).await;
                             break;
                         }
                     }
@@ -1551,6 +1563,80 @@ async fn agent_dm(
             });
 
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent-to-User DM
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct AgentDmUserRequest {
+    message: String,
+}
+
+/// Allows an agent to send a DM to the human operator.
+/// Creates/finds a DM thread that includes a USER member so it shows
+/// up in the operator's thread list.
+async fn agent_dm_user(
+    State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentDmUserRequest>
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))),
+    };
+
+    // Rate limit: max 5 user-directed messages per minute per agent
+    let recent_count: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT' AND created_at > NOW() - INTERVAL '1 minute' \
+         AND thread_id IN (SELECT thread_id FROM thread_members WHERE member_type = 'USER')"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+    if recent_count.unwrap_or(0) >= 5 {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 5 user messages per minute"})));
+    }
+
+    // Find existing user-agent DM thread
+    let user_id = Uuid::from_u128(0); // placeholder user ID (matches get_agent_thread)
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT t.id FROM threads t \
+         JOIN thread_members tm1 ON t.id = tm1.thread_id \
+         JOIN thread_members tm2 ON t.id = tm2.thread_id \
+         WHERE t.type = 'DM' \
+           AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+           AND tm2.member_type = 'USER' AND tm2.member_id = $2 \
+         LIMIT 1"
+    ).bind(agent_id).bind(user_id).fetch_optional(&state.db).await.unwrap_or(None);
+
+    let thread_id = if let Some((tid,)) = existing {
+        tid
+    } else {
+        // Create new user-agent DM thread
+        let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(agent_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+        let tid = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+            .bind(tid).bind(format!("DM with {}", agent_name))
+            .execute(&state.db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+            .bind(tid).bind(agent_id).execute(&state.db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'USER', $2)")
+            .bind(tid).bind(user_id).execute(&state.db).await;
+        tid
+    };
+
+    // Insert the agent's message
+    let msg_id = Uuid::new_v4();
+    let content = json!({"text": p.message});
+    match sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(agent_id).bind(&content)
+    .fetch_one(&state.db).await {
+        Ok(msg) => {
+            let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
+            (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id, "status": "delivered"})))
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
     }

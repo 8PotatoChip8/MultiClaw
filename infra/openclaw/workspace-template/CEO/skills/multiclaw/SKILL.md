@@ -77,6 +77,15 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/dm \
   -d '{"target": "TARGET_AGENT_ID_OR_HANDLE", "message": "Your message here"}'
 ```
 The target agent will receive your message and respond. Use `@handle` (e.g. `@manager-acme`) or a UUID.
+If the target is unavailable, you'll be notified — retry later.
+
+### Send a Direct Message to the Human Operator
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/dm-user \
+  -H 'Content-Type: application/json' \
+  -d '{"message": "Your message to the operator"}'
+```
+**Important:** Before DMing the operator directly, escalate through the chain of command first (talk to your superior). Only DM the operator for urgent matters or when your superior tells you to.
 
 ### List Your Conversation Threads
 ```bash
