@@ -58,6 +58,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
         .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
+        .route("/v1/agents/:id/secrets/:name", get(get_agent_secret))
+        // Secrets
+        .route("/v1/secrets", get(list_secrets).post(create_secret))
+        .route("/v1/secrets/:id", delete(delete_secret))
         // Threads & Messages
         .route("/v1/threads", get(get_threads).post(create_thread))
         .route("/v1/threads/:id", get(get_thread))
@@ -1167,8 +1171,12 @@ async fn send_message(
 
                             match result {
                                 Ok(response) => {
+                                    // Scrub secrets from agent response before storing
+                                    let scrubbed = if let Some(ref crypto) = state_clone.crypto {
+                                        scrub_secrets(&state_clone.db, crypto, *responding_agent_id, &response).await
+                                    } else { response };
                                     let resp_id = Uuid::new_v4();
-                                    let content = json!({"text": response});
+                                    let content = json!({"text": scrubbed});
                                     if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
                                         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
                                          RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
@@ -1515,8 +1523,12 @@ async fn agent_dm(
 
                     match result {
                         Ok(response) => {
+                            // Scrub secrets before storing
+                            let scrubbed = if let Some(ref crypto) = state_clone.crypto {
+                                scrub_secrets(&state_clone.db, crypto, responder_id, &response).await
+                            } else { response.clone() };
                             let resp_id = Uuid::new_v4();
-                            let resp_content = json!({"text": response});
+                            let resp_content = json!({"text": scrubbed});
                             if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
                                 "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
                                  RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
@@ -1626,9 +1638,14 @@ async fn agent_dm_user(
         tid
     };
 
+    // Scrub secrets from agent message before storing
+    let scrubbed_message = if let Some(ref crypto) = state.crypto {
+        scrub_secrets(&state.db, crypto, agent_id, &p.message).await
+    } else { p.message.clone() };
+
     // Insert the agent's message
     let msg_id = Uuid::new_v4();
-    let content = json!({"text": p.message});
+    let content = json!({"text": scrubbed_message});
     match sqlx::query_as::<_, Message>(
         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
          RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
@@ -2172,6 +2189,180 @@ async fn delete_agent_memory(State(state): State<AppState>, Path((id, mid)): Pat
     let _ = sqlx::query("DELETE FROM agent_memories WHERE id = $1 AND agent_id = $2")
         .bind(mem_id).bind(agent_id).execute(&state.db).await;
     (StatusCode::OK, Json(json!({"status":"deleted"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Secrets Management
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct CreateSecretRequest {
+    scope_type: String,  // "agent", "company", "holding"
+    scope_id: Uuid,
+    name: String,        // e.g., "coinex_api_key"
+    value: String,       // plaintext — will be encrypted before storage
+}
+
+#[derive(Debug, Deserialize)]
+struct SecretsQuery {
+    scope_type: Option<String>,
+    scope_id: Option<Uuid>,
+}
+
+async fn create_secret(
+    State(state): State<AppState>, Json(p): Json<CreateSecretRequest>
+) -> impl IntoResponse {
+    let crypto = match &state.crypto {
+        Some(c) => c,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"Secrets not available — master key not configured"}))),
+    };
+
+    // Validate scope_type
+    if !["agent", "company", "holding"].contains(&p.scope_type.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"scope_type must be 'agent', 'company', or 'holding'"})));
+    }
+
+    let ciphertext = match crypto.encrypt(p.value.as_bytes()) {
+        Ok(ct) => ct,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Encryption failed: {}", e)}))),
+    };
+
+    let id = Uuid::new_v4();
+    match sqlx::query(
+        "INSERT INTO secrets (id, scope_type, scope_id, kind, ciphertext) VALUES ($1,$2,$3,$4,$5)"
+    ).bind(id).bind(&p.scope_type).bind(p.scope_id).bind(&p.name).bind(&ciphertext)
+    .execute(&state.db).await {
+        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": p.name, "scope_type": p.scope_type, "scope_id": p.scope_id}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)}))),
+    }
+}
+
+async fn list_secrets(
+    State(state): State<AppState>, Query(q): Query<SecretsQuery>
+) -> impl IntoResponse {
+    // Return metadata only — NEVER return plaintext values
+    let secrets: Vec<(Uuid, String, Uuid, String, chrono::DateTime<chrono::Utc>)> = if let (Some(st), Some(si)) = (&q.scope_type, &q.scope_id) {
+        sqlx::query_as(
+            "SELECT id, scope_type, scope_id, kind, created_at FROM secrets WHERE scope_type = $1 AND scope_id = $2 ORDER BY created_at DESC"
+        ).bind(st).bind(si).fetch_all(&state.db).await.unwrap_or_default()
+    } else {
+        sqlx::query_as(
+            "SELECT id, scope_type, scope_id, kind, created_at FROM secrets ORDER BY created_at DESC"
+        ).fetch_all(&state.db).await.unwrap_or_default()
+    };
+
+    let result: Vec<Value> = secrets.iter().map(|(id, st, si, kind, created)| {
+        json!({"id": id, "scope_type": st, "scope_id": si, "name": kind, "created_at": created})
+    }).collect();
+
+    (StatusCode::OK, Json(json!(result)))
+}
+
+async fn delete_secret(
+    State(state): State<AppState>, Path(id): Path<String>
+) -> impl IntoResponse {
+    let secret_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))),
+    };
+    let _ = sqlx::query("DELETE FROM secrets WHERE id = $1").bind(secret_id).execute(&state.db).await;
+    (StatusCode::OK, Json(json!({"status":"deleted"})))
+}
+
+/// Agent fetches a secret by name. Performs hierarchical lookup:
+/// 1. Agent-scoped secrets (scope_type='agent', scope_id=agent_id)
+/// 2. Company-scoped secrets (scope_type='company', scope_id=company_id)
+/// 3. Holding-scoped secrets (scope_type='holding', scope_id=holding_id)
+async fn get_agent_secret(
+    State(state): State<AppState>, Path((id, name)): Path<(String, String)>
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))),
+    };
+    let crypto = match &state.crypto {
+        Some(c) => c,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"Secrets not available"}))),
+    };
+
+    // Get agent's company_id and holding_id for hierarchical lookup
+    let agent_info: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
+        "SELECT a.company_id, a.holding_id FROM agents a WHERE a.id = $1"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (company_id, holding_id) = match agent_info {
+        Some((cid, hid)) => (cid, hid),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
+    };
+
+    // Try agent scope first, then company, then holding
+    let mut scopes: Vec<(&str, Uuid)> = vec![("agent", agent_id)];
+    if let Some(cid) = company_id {
+        scopes.push(("company", cid));
+    }
+    scopes.push(("holding", holding_id));
+
+    for (scope_type, scope_id) in &scopes {
+        let row: Option<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT ciphertext FROM secrets WHERE scope_type = $1 AND scope_id = $2 AND kind = $3 LIMIT 1"
+        ).bind(scope_type).bind(scope_id).bind(&name)
+        .fetch_optional(&state.db).await.ok().flatten();
+
+        if let Some((ciphertext,)) = row {
+            match crypto.decrypt(&ciphertext) {
+                Ok(plaintext) => {
+                    let value = String::from_utf8_lossy(&plaintext).to_string();
+                    return (StatusCode::OK, Json(json!({"name": name, "value": value})));
+                }
+                Err(e) => {
+                    tracing::error!("Failed to decrypt secret '{}': {}", name, e);
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error":"Decryption failed"})));
+                }
+            }
+        }
+    }
+
+    (StatusCode::NOT_FOUND, Json(json!({"error": format!("Secret '{}' not found", name)})))
+}
+
+/// Scrub known secret values from agent message text to prevent leaks.
+async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, agent_id: Uuid, text: &str) -> String {
+    // Get agent's company_id and holding_id
+    let agent_info: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
+        "SELECT company_id, holding_id FROM agents WHERE id = $1"
+    ).bind(agent_id).fetch_optional(db).await.ok().flatten();
+
+    let (company_id, holding_id) = match agent_info {
+        Some(info) => info,
+        None => return text.to_string(),
+    };
+
+    // Collect all scope IDs to query
+    let mut scope_conditions = vec![("agent", agent_id)];
+    if let Some(cid) = company_id {
+        scope_conditions.push(("company", cid));
+    }
+    scope_conditions.push(("holding", holding_id));
+
+    let mut scrubbed = text.to_string();
+    for (scope_type, scope_id) in &scope_conditions {
+        let rows: Vec<(Vec<u8>,)> = sqlx::query_as(
+            "SELECT ciphertext FROM secrets WHERE scope_type = $1 AND scope_id = $2"
+        ).bind(scope_type).bind(scope_id)
+        .fetch_all(db).await.unwrap_or_default();
+
+        for (ciphertext,) in rows {
+            if let Ok(plaintext) = crypto.decrypt(&ciphertext) {
+                if let Ok(secret_str) = String::from_utf8(plaintext) {
+                    if secret_str.len() >= 4 && scrubbed.contains(&secret_str) {
+                        scrubbed = scrubbed.replace(&secret_str, "[REDACTED]");
+                    }
+                }
+            }
+        }
+    }
+
+    scrubbed
 }
 
 /// Read OpenClaw's internal files (sessions, agent config) from the host filesystem.

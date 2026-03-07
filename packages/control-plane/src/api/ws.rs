@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 
 use crate::config::Config;
+use crate::crypto::CryptoMaster;
 use crate::agents::main_agent::MainAgent;
 use crate::agents::sub_agent::SubAgent;
 use crate::openclaw::OpenClawManager;
@@ -22,6 +23,7 @@ pub struct AppState {
     pub sub_agent: Arc<SubAgent>,
     pub openclaw: Arc<OpenClawManager>,
     pub vm_provider: Option<Arc<IncusProvider>>,
+    pub crypto: Option<Arc<CryptoMaster>>,
 }
 
 /// Handler for the centralized event stream (used by the Next.js UI)

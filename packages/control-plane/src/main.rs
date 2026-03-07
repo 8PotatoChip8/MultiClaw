@@ -17,6 +17,7 @@ pub mod observability;
 
 use agents::main_agent::MainAgent;
 use agents::sub_agent::SubAgent;
+use crypto::CryptoMaster;
 use openclaw::OpenClawManager;
 use provisioning::incus::IncusProvider;
 
@@ -90,6 +91,18 @@ async fn main() -> anyhow::Result<()> {
 
     let sub_agent = SubAgent::new(cfg.ollama_url.clone());
 
+    // Initialize CryptoMaster for secrets management
+    let crypto = match CryptoMaster::new(&cfg.master_key_path) {
+        Ok(c) => {
+            tracing::info!("CryptoMaster initialized (secrets enabled)");
+            Some(std::sync::Arc::new(c))
+        }
+        Err(e) => {
+            tracing::warn!("CryptoMaster not available (secrets disabled): {}", e);
+            None
+        }
+    };
+
     // Initialize OpenClaw manager
     let data_dir = std::path::PathBuf::from(
         std::env::var("MULTICLAW_OPENCLAW_DATA").unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into())
@@ -101,7 +114,7 @@ async fn main() -> anyhow::Result<()> {
     let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url);
 
     let (tx, _rx) = tokio::sync::broadcast::channel(256);
-    let app_state = api::ws::AppState { 
+    let app_state = api::ws::AppState {
         db: pool.clone(),
         tx: std::sync::Arc::new(tx),
         config: cfg.clone(),
@@ -109,6 +122,7 @@ async fn main() -> anyhow::Result<()> {
         sub_agent: std::sync::Arc::new(sub_agent),
         openclaw: std::sync::Arc::new(openclaw_mgr.clone()),
         vm_provider,
+        crypto,
     };
 
     // Recover OpenClaw instances from DB in background
