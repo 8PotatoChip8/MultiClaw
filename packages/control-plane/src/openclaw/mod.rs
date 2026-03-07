@@ -244,7 +244,7 @@ impl OpenClawManager {
             instance.container_name
         );
 
-        // Use HTTP POST to OpenClaw's /v1/responses endpoint
+        // Use HTTP POST to OpenClaw's /v1/responses endpoint (with retry for transient errors)
         let url = format!("http://127.0.0.1:{}/v1/responses", instance.port);
         let client = reqwest::Client::new();
         let body = serde_json::json!({
@@ -252,73 +252,93 @@ impl OpenClawManager {
             "input": message,
         });
 
-        let resp = client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", instance.gateway_token))
-            .header("Content-Type", "application/json")
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(600))
-            .send()
-            .await;
+        let max_retries = 3u32;
+        for attempt in 0..max_retries {
+            let resp = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", instance.gateway_token))
+                .header("Content-Type", "application/json")
+                .json(&body)
+                .timeout(std::time::Duration::from_secs(600))
+                .send()
+                .await;
 
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let resp_body: serde_json::Value = r.json().await
-                    .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
+            match resp {
+                Ok(r) if r.status().is_success() => {
+                    let resp_body: serde_json::Value = r.json().await
+                        .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
 
-                // Extract text from the OpenResponses format
-                // Response has an "output" array with items; find "message" type with "text" content
-                let text = resp_body["output"]
-                    .as_array()
-                    .and_then(|outputs| {
-                        outputs.iter().find_map(|item| {
-                            if item["type"] == "message" {
-                                item["content"]
-                                    .as_array()
-                                    .and_then(|content| {
-                                        content.iter().find_map(|c| {
-                                            if c["type"] == "output_text" {
-                                                c["text"].as_str().map(|s| s.to_string())
-                                            } else {
-                                                None
-                                            }
+                    // Extract text from the OpenResponses format
+                    // Response has an "output" array with items; find "message" type with "text" content
+                    let text = resp_body["output"]
+                        .as_array()
+                        .and_then(|outputs| {
+                            outputs.iter().find_map(|item| {
+                                if item["type"] == "message" {
+                                    item["content"]
+                                        .as_array()
+                                        .and_then(|content| {
+                                            content.iter().find_map(|c| {
+                                                if c["type"] == "output_text" {
+                                                    c["text"].as_str().map(|s| s.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            })
                                         })
-                                    })
-                            } else {
-                                None
-                            }
+                                } else {
+                                    None
+                                }
+                            })
                         })
-                    })
-                    .unwrap_or_else(|| {
-                        // Fallback: try to get any text from the response
-                        resp_body["output_text"]
-                            .as_str()
-                            .unwrap_or("[Agent produced no text output]")
-                            .to_string()
-                    });
+                        .unwrap_or_else(|| {
+                            // Fallback: try to get any text from the response
+                            resp_body["output_text"]
+                                .as_str()
+                                .unwrap_or("[Agent produced no text output]")
+                                .to_string()
+                        });
 
-                tracing::info!(
-                    "{} responded: {}",
-                    instance.agent_name,
-                    &text[..text.len().min(200)]
-                );
+                    tracing::info!(
+                        "{} responded: {}",
+                        instance.agent_name,
+                        &text[..text.len().min(200)]
+                    );
 
-                Ok(text)
-            }
-            Ok(r) => {
-                let status = r.status();
-                let err_body = r.text().await.unwrap_or_default();
-                tracing::error!(
-                    "OpenClaw HTTP error for {}: {} - {}",
-                    instance.agent_name, status, err_body
-                );
-                Err(anyhow!("OpenClaw HTTP {}: {}", status, err_body))
-            }
-            Err(e) => {
-                tracing::error!("OpenClaw request failed for {}: {}", instance.agent_name, e);
-                Err(anyhow!("OpenClaw connection error: {}", e))
+                    return Ok(text);
+                }
+                Ok(r) if matches!(r.status().as_u16(), 404 | 502 | 503) && attempt < max_retries - 1 => {
+                    tracing::warn!(
+                        "Transient {} from {}, retrying in 3s ({}/{})",
+                        r.status(), instance.agent_name, attempt + 1, max_retries
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                Ok(r) => {
+                    let status = r.status();
+                    let err_body = r.text().await.unwrap_or_default();
+                    tracing::error!(
+                        "OpenClaw HTTP error for {}: {} - {}",
+                        instance.agent_name, status, err_body
+                    );
+                    return Err(anyhow!("OpenClaw HTTP {}: {}", status, err_body));
+                }
+                Err(e) if attempt < max_retries - 1 => {
+                    tracing::warn!(
+                        "OpenClaw connection error for {}, retrying in 3s ({}/{}): {}",
+                        instance.agent_name, attempt + 1, max_retries, e
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    continue;
+                }
+                Err(e) => {
+                    tracing::error!("OpenClaw request failed for {}: {}", instance.agent_name, e);
+                    return Err(anyhow!("OpenClaw connection error: {}", e));
+                }
             }
         }
+        unreachable!()
     }
 
     /// Stop an agent's OpenClaw instance.
@@ -380,7 +400,7 @@ impl OpenClawManager {
         instances.values().cloned().collect()
     }
 
-    /// Check health of an instance by pinging its gateway.
+    /// Check health of an instance by verifying /v1/responses is serving.
     pub async fn check_health(&self, agent_id: Uuid) -> bool {
         let instance = {
             let instances = self.instances.read().await;
@@ -388,14 +408,22 @@ impl OpenClawManager {
         };
 
         if let Some(inst) = instance {
-            let url = format!("http://127.0.0.1:{}/", inst.port);
+            // Check the actual API endpoint we'll use, not just the root.
+            // Any response other than 404/502/503 means the endpoint is active.
+            let url = format!("http://127.0.0.1:{}/v1/responses", inst.port);
             match reqwest::Client::new()
-                .get(&url)
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", inst.gateway_token))
+                .header("Content-Type", "application/json")
+                .json(&serde_json::json!({}))
                 .timeout(std::time::Duration::from_secs(5))
                 .send()
                 .await
             {
-                Ok(r) => r.status().is_success() || r.status().as_u16() == 401,
+                Ok(r) => {
+                    let s = r.status().as_u16();
+                    s != 404 && s != 502 && s != 503
+                }
                 Err(_) => false,
             }
         } else {
