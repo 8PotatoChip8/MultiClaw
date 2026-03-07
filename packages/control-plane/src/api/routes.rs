@@ -13,6 +13,11 @@ use tower_http::cors::{CorsLayer, Any};
 use super::ws::{events_handler, AppState};
 use crate::db::models::*;
 use crate::provisioning::vm_provider::{VmProvider, VmResources};
+
+/// Maximum reply depth for agent-to-agent DM conversations.
+/// Depth 0 = initial message, each response increments by 1.
+/// With MAX_DM_DEPTH=5, agents can exchange up to 3 full back-and-forth rounds.
+const MAX_DM_DEPTH: i32 = 5;
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 pub fn app_router(state: AppState) -> Router {
@@ -1051,7 +1056,7 @@ async fn send_message(
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
             // Trigger agent responses for USER or AGENT senders (with depth-based loop prevention)
-            if (sender_type == "USER" || sender_type == "AGENT") && reply_depth < 1 {
+            if (sender_type == "USER" || sender_type == "AGENT") && reply_depth < MAX_DM_DEPTH {
                 let user_text = p.content.get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -1494,33 +1499,53 @@ async fn agent_dm(
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
-            // Trigger target agent to respond (depth 0 → response at depth 1)
+            // Conversation loop: agents take turns responding up to MAX_DM_DEPTH
             let state_clone = state.clone();
             let text = p.message.clone();
             tokio::spawn(async move {
-                let result = state_clone.openclaw.send_message(target_id, &text).await;
-                match result {
-                    Ok(response) => {
-                        let resp_id = Uuid::new_v4();
-                        let resp_content = json!({"text": response});
-                        if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,1) \
-                             RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-                        ).bind(resp_id).bind(thread_id).bind(target_id).bind(&resp_content)
-                        .fetch_one(&state_clone.db).await {
-                            let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                let mut current_depth: i32 = 0;
+                let mut responder_id = target_id;
+                let mut other_id = sender_id;
+                let mut current_text = text;
+
+                loop {
+                    let result = state_clone.openclaw.send_message(responder_id, &current_text).await;
+                    current_depth += 1;
+
+                    match result {
+                        Ok(response) => {
+                            let resp_id = Uuid::new_v4();
+                            let resp_content = json!({"text": response});
+                            if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
+                                 RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+                            ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
+                            .fetch_one(&state_clone.db).await {
+                                let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                            }
+
+                            // Stop if we've reached max depth
+                            if current_depth >= MAX_DM_DEPTH {
+                                tracing::info!("DM conversation on thread {} reached max depth {}", thread_id, MAX_DM_DEPTH);
+                                break;
+                            }
+
+                            // Swap roles: the other agent now responds to this one's message
+                            std::mem::swap(&mut responder_id, &mut other_id);
+                            current_text = response;
                         }
-                    }
-                    Err(e) => {
-                        tracing::warn!("OpenClaw unavailable for agent {}: {}", target_id, e);
-                        let resp_id = Uuid::new_v4();
-                        let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                            .bind(target_id).fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
-                        let resp_content = json!({"text": format!("⚠️ {} is currently unavailable.", target_name)});
-                        let _ = sqlx::query(
-                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'SYSTEM',$3,$4,1)"
-                        ).bind(resp_id).bind(thread_id).bind(target_id).bind(&resp_content)
-                        .execute(&state_clone.db).await;
+                        Err(e) => {
+                            tracing::warn!("OpenClaw unavailable for agent {}: {}", responder_id, e);
+                            let resp_id = Uuid::new_v4();
+                            let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                                .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+                            let resp_content = json!({"text": format!("⚠️ {} is currently unavailable.", agent_name)});
+                            let _ = sqlx::query(
+                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'SYSTEM',$3,$4,$5)"
+                            ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
+                            .execute(&state_clone.db).await;
+                            break;
+                        }
                     }
                 }
             });

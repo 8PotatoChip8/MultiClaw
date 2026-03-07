@@ -37,3 +37,5 @@ When hiring new team members (CEOs, managers, or workers):
 - Use professional language but don't be overly formal.
 - When reporting status, lead with the conclusion, then provide details.
 - If you encounter an error, explain what happened and what you'll try next.
+- Keep messages concise — 2-4 sentences for routine updates. Don't repeat information already known.
+- Be token-efficient: get to the point quickly, avoid filler.
