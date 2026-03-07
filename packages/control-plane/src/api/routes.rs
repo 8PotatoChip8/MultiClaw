@@ -1052,10 +1052,18 @@ async fn send_message(
     let sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
     let reply_depth = p.reply_depth.unwrap_or(0);
 
+    // Scrub secrets from agent-sent messages before storing
+    let content = if sender_type == "AGENT" {
+        if let (Some(ref crypto), Some(text)) = (&state.crypto, p.content.get("text").and_then(|v| v.as_str())) {
+            let scrubbed = scrub_secrets(&state.db, crypto, sender_id, text).await;
+            json!({"text": scrubbed})
+        } else { p.content.clone() }
+    } else { p.content.clone() };
+
     match sqlx::query_as::<_, Message>(
         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,$3,$4,$5,$6) \
          RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-    ).bind(msg_id).bind(thread_id).bind(&sender_type).bind(sender_id).bind(&p.content).bind(reply_depth)
+    ).bind(msg_id).bind(thread_id).bind(&sender_type).bind(sender_id).bind(&content).bind(reply_depth)
     .fetch_one(&state.db).await {
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
@@ -1241,9 +1249,17 @@ async fn list_requests(State(state): State<AppState>, Query(q): Query<RequestQue
 
 async fn create_request(State(state): State<AppState>, Json(p): Json<CreateRequestPayload>) -> impl IntoResponse {
     let id = Uuid::new_v4();
+    // Scrub secrets from request payload if a requester_id is present (agent-originated)
+    let payload = if let (Some(ref crypto), Some(requester_str)) = (&state.crypto, p.payload.get("requester_id").and_then(|v| v.as_str())) {
+        if let Ok(requester_id) = Uuid::parse_str(requester_str) {
+            let payload_str = p.payload.to_string();
+            let scrubbed = scrub_secrets(&state.db, crypto, requester_id, &payload_str).await;
+            serde_json::from_str(&scrubbed).unwrap_or(p.payload.clone())
+        } else { p.payload.clone() }
+    } else { p.payload.clone() };
     let _ = sqlx::query(
         "INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,$2,$3,$4,'PENDING','USER')"
-    ).bind(id).bind(&p.r#type).bind(p.company_id).bind(&p.payload).execute(&state.db).await;
+    ).bind(id).bind(&p.r#type).bind(p.company_id).bind(&payload).execute(&state.db).await;
     let _ = state.tx.send(json!({"type":"new_request","request_id": id}).to_string());
     (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING"})))
 }
@@ -1497,9 +1513,12 @@ async fn agent_dm(
         tid
     };
 
-    // Insert message
+    // Insert message (scrub secrets before storing)
     let msg_id = Uuid::new_v4();
-    let content = json!({"text": p.message});
+    let scrubbed_msg = if let Some(ref crypto) = state.crypto {
+        scrub_secrets(&state.db, crypto, sender_id, &p.message).await
+    } else { p.message.clone() };
+    let content = json!({"text": scrubbed_msg});
     match sqlx::query_as::<_, Message>(
         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
          RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
@@ -2170,13 +2189,18 @@ async fn create_agent_memory(State(state): State<AppState>, Path(id): Path<Strin
     let mem_id = Uuid::new_v4();
     let importance = p.importance.unwrap_or(5);
 
+    // Scrub secrets from memory content before storing
+    let content = if let Some(ref crypto) = state.crypto {
+        scrub_secrets(&state.db, crypto, agent_id, &p.content).await
+    } else { p.content.clone() };
+
     // Upsert: if same agent+category+key exists, update it
     match sqlx::query(
         "INSERT INTO agent_memories (id, agent_id, category, key, content, importance) \
          VALUES ($1, $2, $3, $4, $5, $6) \
          ON CONFLICT (agent_id, category, key) DO UPDATE SET content = $5, importance = $6, updated_at = NOW()"
     )
-    .bind(mem_id).bind(agent_id).bind(&p.category).bind(&p.key).bind(&p.content).bind(importance)
+    .bind(mem_id).bind(agent_id).bind(&p.category).bind(&p.key).bind(&content).bind(importance)
     .execute(&state.db).await {
         Ok(_) => (StatusCode::CREATED, Json(json!({"id": mem_id, "status": "saved"}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))

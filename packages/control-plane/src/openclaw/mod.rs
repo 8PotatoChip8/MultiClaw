@@ -339,9 +339,9 @@ impl OpenClawManager {
                         });
 
                     tracing::info!(
-                        "{} responded: {}",
+                        "{} responded ({} chars)",
                         instance.agent_name,
-                        &text[..text.len().min(200)]
+                        text.len()
                     );
 
                     return Ok(text);
