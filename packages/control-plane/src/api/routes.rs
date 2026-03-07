@@ -1596,7 +1596,7 @@ async fn serve_install_script() -> impl IntoResponse {
     (StatusCode::NOT_FOUND, "install script not found").into_response()
 }
 
-const CURRENT_VERSION: &str = "0.1.0";
+const CURRENT_VERSION: &str = "0.1.1";
 
 /// Simple semver greater-than comparison (a > b).
 fn semver_gt(a: &str, b: &str) -> bool {
