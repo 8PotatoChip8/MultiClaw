@@ -24,8 +24,28 @@ HOST_IP=$(hostname -I | awk '{print $1}')
 log "Detected host IP: $HOST_IP"
 
 log "Installing dependencies (incus, qemu-kvm, docker, curl, jq, git)..."
+
+# Wait for any running package manager (e.g., unattended-upgrades) to finish
+wait_for_apt() {
+  local waited=0
+  while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; do
+    if [ $waited -eq 0 ]; then
+      log "Waiting for another package manager to finish..."
+    fi
+    sleep 3
+    waited=$((waited + 3))
+    if [ $waited -ge 300 ]; then
+      log "WARNING: Package manager lock held for 5+ minutes, proceeding anyway..."
+      break
+    fi
+  done
+}
+
+wait_for_apt
 apt-get update
-apt-get install -y apt-transport-https ca-certificates curl software-properties-common jq git qemu-kvm 
+wait_for_apt
+apt-get install -y apt-transport-https ca-certificates curl software-properties-common jq git qemu-kvm
+wait_for_apt
 apt-get install -y incus
 
 # Initialize Incus non-interactively (creates default storage pool + network)
@@ -198,6 +218,7 @@ if ! command -v cargo &> /dev/null; then
   source "$HOME/.cargo/env"
 fi
 # Ensure C toolchain is available for native crate compilation
+wait_for_apt
 apt-get install -y build-essential pkg-config libssl-dev > /dev/null 2>&1
 cd /opt/multiclaw/packages && cargo build --release -p multiclaw-cli
 ln -sf /opt/multiclaw/packages/target/release/multiclaw-cli /usr/local/bin/multiclaw
