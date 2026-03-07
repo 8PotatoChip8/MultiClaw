@@ -1282,6 +1282,7 @@ async fn reject_request(State(state): State<AppState>, Path(id): Path<String>, b
     let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'USER',$3,'REJECT',$4)")
         .bind(approval_id).bind(uid).bind(Uuid::new_v4()).bind(&note).execute(&state.db).await;
     let _ = sqlx::query("UPDATE requests SET status = 'REJECTED', updated_at = NOW() WHERE id = $1").bind(uid).execute(&state.db).await;
+    let _ = state.tx.send(json!({"type":"request_rejected","request_id": uid}).to_string());
     (StatusCode::OK, Json(json!({"status":"rejected"})))
 }
 

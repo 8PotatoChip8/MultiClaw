@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { useMultiClawEvents } from '../lib/ws';
-import { Company, Agent } from '../lib/types';
+import { Company, Agent, Request } from '../lib/types';
 import Link from 'next/link';
 import { Building2, Users2, Activity, Zap } from 'lucide-react';
 
@@ -11,15 +11,23 @@ export default function Home() {
     const [companies, setCompanies] = useState<Company[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [healthy, setHealthy] = useState(false);
+    const [pending, setPending] = useState(0);
 
     useEffect(() => {
         api.health().then(() => setHealthy(true)).catch(() => { });
         api.getCompanies().then(d => setCompanies(Array.isArray(d) ? d : [])).catch(() => { });
         api.getAgents().then(d => setAgents(Array.isArray(d) ? d : [])).catch(() => { });
+        api.getRequests('PENDING').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
     }, []);
 
+    // Refresh pending count on request events
+    useEffect(() => {
+        if (event?.type === 'new_request' || event?.type === 'request_approved' || event?.type === 'request_rejected') {
+            api.getRequests('PENDING').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
+        }
+    }, [event]);
+
     const mainAgent = agents.find(a => a.role === 'MAIN');
-    const pending = 0; // TODO: fetch pending requests count
 
     return (
         <div className="animate-in">
