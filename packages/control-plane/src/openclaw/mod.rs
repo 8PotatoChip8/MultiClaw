@@ -88,10 +88,12 @@ impl OpenClawManager {
             }
         }
 
-        // Assign a port — reserve 3 ports per agent (gateway, internal, browser control)
+        // Assign a port — reserve 4 ports per agent.
+        // OpenClaw binds: gateway (+0), internal (+1), control service (+2), CDP relay (+3).
+        // With --network host, these must not overlap between agents.
         let port = {
             let instances = self.instances.read().await;
-            self.base_port + (instances.len() as u16 * 3)
+            self.base_port + (instances.len() as u16 * 4)
         };
 
         // Generate gateway token
