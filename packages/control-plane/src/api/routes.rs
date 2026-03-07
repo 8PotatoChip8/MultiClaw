@@ -1736,6 +1736,23 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
 
             tracing::info!("Stable update: checking out release tag {}", tag);
 
+            // Unshallow the repo if it was cloned with --depth 1 (install-stable.sh).
+            // Shallow clones may not be able to fetch tags pointing to commits outside the shallow history.
+            let is_shallow = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "rev-parse", "--is-shallow-repository"])
+                .output()
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                .unwrap_or(false);
+
+            if is_shallow {
+                tracing::info!("Repo is shallow, unshallowing before tag fetch...");
+                let _ = tokio::process::Command::new("git")
+                    .args(["-C", "/opt/multiclaw", "fetch", "--unshallow", "origin"])
+                    .output()
+                    .await;
+            }
+
             // Fetch all tags
             let fetch = tokio::process::Command::new("git")
                 .args(["-C", "/opt/multiclaw", "fetch", "origin", "--tags", "--force"])
@@ -1788,6 +1805,23 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
             // untracked dirs like openclaw-data/ are untouched.
             let branch = if channel == "beta" { "beta" } else { "main" };
 
+            // Unshallow the repo if it was cloned with --depth 1 (install-stable.sh).
+            // Shallow clones don't have remote tracking refs, so `origin/main` doesn't exist.
+            let is_shallow = tokio::process::Command::new("git")
+                .args(["-C", "/opt/multiclaw", "rev-parse", "--is-shallow-repository"])
+                .output()
+                .await
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+                .unwrap_or(false);
+
+            if is_shallow {
+                tracing::info!("Repo is shallow, unshallowing before fetch...");
+                let _ = tokio::process::Command::new("git")
+                    .args(["-C", "/opt/multiclaw", "fetch", "--unshallow", "origin"])
+                    .output()
+                    .await;
+            }
+
             let fetch = tokio::process::Command::new("git")
                 .args(["-C", "/opt/multiclaw", "fetch", "origin", branch])
                 .output()
@@ -1810,19 +1844,20 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
                 }
             }
 
-            let reset_target = format!("origin/{}", branch);
+            // Use FETCH_HEAD as the reset target — it always exists after a fetch,
+            // even on shallow clones where origin/<branch> refs may not be created.
             let reset = tokio::process::Command::new("git")
-                .args(["-C", "/opt/multiclaw", "reset", "--hard", &reset_target])
+                .args(["-C", "/opt/multiclaw", "reset", "--hard", "FETCH_HEAD"])
                 .output()
                 .await;
 
             match reset {
                 Ok(output) if output.status.success() => {
-                    tracing::info!("Git reset to {} successful, rebuilding containers...", reset_target);
+                    tracing::info!("Git reset to FETCH_HEAD ({}) successful, rebuilding containers...", branch);
                 }
                 Ok(output) => {
                     let err = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!("Git reset failed: {}", err);
+                    tracing::error!("Git reset to FETCH_HEAD failed: {}", err);
                     let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
                     return;
                 }
