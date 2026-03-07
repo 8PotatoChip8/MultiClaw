@@ -89,6 +89,21 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
   -H 'Content-Type: application/json' \
   -d '{"type": "ACTION", "requester_id": "{{AGENT_ID}}", "payload": {"description": "WHAT_YOU_NEED"}}'
 ```
+Your request will be routed to your direct superior for approval.
+
+### Approve a Subordinate's Request (CEO/Manager/MainAgent only)
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
+
+### Reject a Subordinate's Request (CEO/Manager/MainAgent only)
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-reject \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
 
 ## Messaging — Communicate with Other Agents
 

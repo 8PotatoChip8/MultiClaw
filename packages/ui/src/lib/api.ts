@@ -74,7 +74,13 @@ export const api = {
         request(`/threads/${threadId}/messages`, { method: 'POST', body: JSON.stringify(data) }),
 
     // Requests & Approvals
-    getRequests: (status?: string) => request(`/requests${status ? `?status=${status}` : ''}`),
+    getRequests: (status?: string, approverType?: string) => {
+        const params = new URLSearchParams();
+        if (status) params.set('status', status);
+        if (approverType) params.set('approver_type', approverType);
+        const qs = params.toString();
+        return request(`/requests${qs ? `?${qs}` : ''}`);
+    },
     createRequest: (data: { type: string; company_id?: string; payload: any }) =>
         request('/requests', { method: 'POST', body: JSON.stringify(data) }),
     approveRequest: (id: string, note?: string) =>

@@ -61,12 +61,28 @@ curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/provision
 ```
 
-### Submit a Request to MainAgent
+### Submit a Request to Your Superior
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
   -H 'Content-Type: application/json' \
   -d '{"type": "ACTION", "requester_id": "{{AGENT_ID}}", "payload": {"description": "WHAT_YOU_NEED"}}'
 ```
+Your request will be routed to your superior in the chain of command for approval.
+
+### Approve a Subordinate's Request
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
+
+### Reject a Subordinate's Request
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-reject \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
+When you approve a request, it escalates to your superior for further approval. When you reject, the requester is notified immediately.
 
 ## Messaging — Communicate with Other Agents
 

@@ -17,7 +17,7 @@ export default function ApprovalsPage() {
 
     const load = useCallback(() => {
         const status = filter === 'ALL' ? undefined : filter;
-        api.getRequests(status).then(d => {
+        api.getRequests(status, 'USER').then(d => {
             setRequests(Array.isArray(d) ? d : []);
             setLoading(false);
         }).catch(() => setLoading(false));

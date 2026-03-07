@@ -182,8 +182,15 @@ pub struct Request {
 #[derive(Debug, Deserialize)]
 pub struct CreateRequestPayload {
     pub r#type: String,
+    pub requester_id: Uuid,
     pub company_id: Option<Uuid>,
     pub payload: JsonValue,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentApprovalAction {
+    pub agent_id: Uuid,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]

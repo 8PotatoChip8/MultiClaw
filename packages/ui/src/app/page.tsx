@@ -17,13 +17,13 @@ export default function Home() {
         api.health().then(() => setHealthy(true)).catch(() => { });
         api.getCompanies().then(d => setCompanies(Array.isArray(d) ? d : [])).catch(() => { });
         api.getAgents().then(d => setAgents(Array.isArray(d) ? d : [])).catch(() => { });
-        api.getRequests('PENDING').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
+        api.getRequests('PENDING', 'USER').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
     }, []);
 
     // Refresh pending count on request events
     useEffect(() => {
         if (event?.type === 'new_request' || event?.type === 'request_approved' || event?.type === 'request_rejected') {
-            api.getRequests('PENDING').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
+            api.getRequests('PENDING', 'USER').then(d => setPending(Array.isArray(d) ? d.length : 0)).catch(() => { });
         }
     }, [event]);
 

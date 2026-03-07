@@ -8,7 +8,7 @@ export default function ApprovalsInbox() {
     const [requests, setRequests] = useState<Request[]>([]);
 
     const load = () => {
-        api.getRequests('PENDING').then(d => setRequests(Array.isArray(d) ? d : [])).catch(() => { });
+        api.getRequests('PENDING', 'USER').then(d => setRequests(Array.isArray(d) ? d : [])).catch(() => { });
     };
     useEffect(() => { load(); }, []);
 

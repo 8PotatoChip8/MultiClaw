@@ -72,6 +72,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/requests", get(list_requests).post(create_request))
         .route("/v1/requests/:id/approve", post(approve_request))
         .route("/v1/requests/:id/reject", post(reject_request))
+        .route("/v1/requests/:id/agent-approve", post(agent_approve_request))
+        .route("/v1/requests/:id/agent-reject", post(agent_reject_request))
         // Services
         .route("/v1/services", get(list_services).post(create_service))
         .route("/v1/engagements", post(create_engagement))
@@ -1234,55 +1236,239 @@ async fn send_message(
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Deserialize)]
-struct RequestQuery { status: Option<String> }
+struct RequestQuery { status: Option<String>, approver_type: Option<String> }
 
 async fn list_requests(State(state): State<AppState>, Query(q): Query<RequestQuery>) -> impl IntoResponse {
     let status_filter = q.status.unwrap_or_else(|| "%".into());
+    let approver_filter = q.approver_type.unwrap_or_else(|| "%".into());
     match sqlx::query_as::<_, Request>(
         "SELECT id, type, created_by_agent_id, created_by_user_id, company_id, payload, status, current_approver_type, current_approver_id, created_at, updated_at \
-         FROM requests WHERE status LIKE $1 ORDER BY created_at DESC"
-    ).bind(&status_filter).fetch_all(&state.db).await {
+         FROM requests WHERE status LIKE $1 AND current_approver_type LIKE $2 ORDER BY created_at DESC"
+    ).bind(&status_filter).bind(&approver_filter).fetch_all(&state.db).await {
         Ok(r) => (StatusCode::OK, Json(json!(r))),
         Err(_) => (StatusCode::OK, Json(json!([])))
     }
 }
 
+/// Find an agent's direct superior in the chain of command.
+/// Worker → Manager, Manager → CEO, CEO → MAIN, MAIN → None (user).
+async fn find_superior(db: &sqlx::PgPool, agent_id: Uuid) -> Option<Uuid> {
+    // First check parent_agent_id
+    let parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
+        .bind(agent_id).fetch_optional(db).await.ok().flatten();
+    if parent.is_some() {
+        return parent;
+    }
+    // No parent — check if this is a CEO (route to MAIN) or MAIN (route to user/None)
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+        .bind(agent_id).fetch_optional(db).await.ok().flatten();
+    match role.as_deref() {
+        Some("CEO") => {
+            // Route to MAIN agent
+            sqlx::query_scalar("SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1")
+                .fetch_optional(db).await.ok().flatten()
+        }
+        _ => None, // MAIN agent or unknown — route to user
+    }
+}
+
 async fn create_request(State(state): State<AppState>, Json(p): Json<CreateRequestPayload>) -> impl IntoResponse {
     let id = Uuid::new_v4();
-    // Scrub secrets from request payload if a requester_id is present (agent-originated)
-    let payload = if let (Some(ref crypto), Some(requester_str)) = (&state.crypto, p.payload.get("requester_id").and_then(|v| v.as_str())) {
-        if let Ok(requester_id) = Uuid::parse_str(requester_str) {
-            let payload_str = p.payload.to_string();
-            let scrubbed = scrub_secrets(&state.db, crypto, requester_id, &payload_str).await;
-            serde_json::from_str(&scrubbed).unwrap_or(p.payload.clone())
-        } else { p.payload.clone() }
+    let requester_id = p.requester_id;
+
+    // Scrub secrets from request payload
+    let payload = if let Some(ref crypto) = state.crypto {
+        let payload_str = p.payload.to_string();
+        let scrubbed = scrub_secrets(&state.db, crypto, requester_id, &payload_str).await;
+        serde_json::from_str(&scrubbed).unwrap_or(p.payload.clone())
     } else { p.payload.clone() };
+
+    // Route to requester's superior in the chain of command
+    let (approver_type, approver_id) = match find_superior(&state.db, requester_id).await {
+        Some(superior_id) => ("AGENT".to_string(), Some(superior_id)),
+        None => ("USER".to_string(), None), // MAIN agent or fallback → user
+    };
+
     let _ = sqlx::query(
-        "INSERT INTO requests (id, type, company_id, payload, status, current_approver_type) VALUES ($1,$2,$3,$4,'PENDING','USER')"
-    ).bind(id).bind(&p.r#type).bind(p.company_id).bind(&payload).execute(&state.db).await;
-    let _ = state.tx.send(json!({"type":"new_request","request_id": id}).to_string());
-    (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING"})))
+        "INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type, current_approver_id) \
+         VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
+    ).bind(id).bind(&p.r#type).bind(requester_id).bind(p.company_id).bind(&payload)
+     .bind(&approver_type).bind(approver_id)
+     .execute(&state.db).await;
+
+    if approver_type == "USER" {
+        // Only notify the user UI for user-targeted requests
+        let _ = state.tx.send(json!({"type":"new_request","request_id": id}).to_string());
+    } else if let Some(superior_id) = approver_id {
+        // DM the approver agent about the pending request
+        let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(requester_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "An agent".into());
+        let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("(no description)");
+        let dm_text = format!(
+            "APPROVAL REQUEST from {}: \"{}\"\n\nRequest ID: {}\nType: {}\n\n\
+             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+            requester_name, description, id, p.r#type, id, id
+        );
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = state_clone.openclaw.send_message(superior_id, &dm_text).await;
+        });
+    }
+
+    (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING", "approver_type": approver_type})))
 }
 
 async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ApprovalAction>>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    // Only allow user approval on requests targeting the user
+    let approver_type: Option<String> = sqlx::query_scalar("SELECT current_approver_type FROM requests WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    if approver_type.as_deref() != Some("USER") {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"This request is not awaiting user approval"})));
+    }
     let note = body.and_then(|b| b.note.clone());
     let approval_id = Uuid::new_v4();
     let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'USER',$3,'APPROVE',$4)")
         .bind(approval_id).bind(uid).bind(Uuid::new_v4()).bind(&note).execute(&state.db).await;
     let _ = sqlx::query("UPDATE requests SET status = 'APPROVED', updated_at = NOW() WHERE id = $1").bind(uid).execute(&state.db).await;
     let _ = state.tx.send(json!({"type":"request_approved","request_id": uid}).to_string());
+    // Notify the requester agent
+    notify_requester(&state, uid, "APPROVED", note.as_deref()).await;
     (StatusCode::OK, Json(json!({"status":"approved"})))
 }
 
 async fn reject_request(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ApprovalAction>>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    // Only allow user rejection on requests targeting the user
+    let approver_type: Option<String> = sqlx::query_scalar("SELECT current_approver_type FROM requests WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    if approver_type.as_deref() != Some("USER") {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"This request is not awaiting user approval"})));
+    }
     let note = body.and_then(|b| b.note.clone());
     let approval_id = Uuid::new_v4();
     let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'USER',$3,'REJECT',$4)")
         .bind(approval_id).bind(uid).bind(Uuid::new_v4()).bind(&note).execute(&state.db).await;
     let _ = sqlx::query("UPDATE requests SET status = 'REJECTED', updated_at = NOW() WHERE id = $1").bind(uid).execute(&state.db).await;
     let _ = state.tx.send(json!({"type":"request_rejected","request_id": uid}).to_string());
+    // Notify the requester agent
+    notify_requester(&state, uid, "REJECTED", note.as_deref()).await;
+    (StatusCode::OK, Json(json!({"status":"rejected"})))
+}
+
+/// Notify the original requester agent about request outcome.
+async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, note: Option<&str>) {
+    let requester_id: Option<Uuid> = sqlx::query_scalar("SELECT created_by_agent_id FROM requests WHERE id = $1")
+        .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some(agent_id) = requester_id {
+        let req_type: String = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
+            .bind(request_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+        let note_text = note.map(|n| format!(" Note: {}", n)).unwrap_or_default();
+        let msg = format!("Your request \"{}\" (ID: {}) has been {}.{}", req_type.replace('_', " "), request_id, decision, note_text);
+        let state_clone = state.clone();
+        tokio::spawn(async move {
+            let _ = state_clone.openclaw.send_message(agent_id, &msg).await;
+        });
+    }
+}
+
+/// Agent approves a subordinate's request. If the approving agent is MAIN, the request is
+/// fully approved. Otherwise, it escalates to the next superior in the chain.
+async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentApprovalAction>) -> impl IntoResponse {
+    let request_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Verify this agent is the current approver
+    let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT current_approver_type, current_approver_id FROM requests WHERE id = $1 AND status = 'PENDING'"
+    ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+    match &current {
+        Some((t, Some(aid))) if t == "AGENT" && *aid == p.agent_id => {},
+        _ => return (StatusCode::FORBIDDEN, Json(json!({"error":"You are not the current approver for this request"}))),
+    }
+
+    // Record this approval step
+    let approval_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'AGENT',$3,'APPROVE',$4)")
+        .bind(approval_id).bind(request_id).bind(p.agent_id).bind(&p.note).execute(&state.db).await;
+
+    // Check approver's role to decide: approve or escalate
+    let approver_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+        .bind(p.agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    if approver_role.as_deref() == Some("MAIN") {
+        // MAIN agent (KonnerBot) has final agent authority — approve the request
+        let _ = sqlx::query("UPDATE requests SET status = 'APPROVED', updated_at = NOW() WHERE id = $1")
+            .bind(request_id).execute(&state.db).await;
+        let _ = state.tx.send(json!({"type":"request_approved","request_id": request_id}).to_string());
+        notify_requester(&state, request_id, "APPROVED", p.note.as_deref()).await;
+        (StatusCode::OK, Json(json!({"status":"approved"})))
+    } else {
+        // Escalate to this agent's superior
+        match find_superior(&state.db, p.agent_id).await {
+            Some(next_superior_id) => {
+                let _ = sqlx::query("UPDATE requests SET current_approver_id = $1, updated_at = NOW() WHERE id = $2")
+                    .bind(next_superior_id).bind(request_id).execute(&state.db).await;
+
+                // DM the next approver
+                let approver_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                    .bind(p.agent_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+                let req_type: String = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
+                    .bind(request_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+                let payload: Option<Value> = sqlx::query_scalar("SELECT payload FROM requests WHERE id = $1")
+                    .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+                let description = payload.as_ref().and_then(|p| p.get("description")).and_then(|v| v.as_str()).unwrap_or("(no description)");
+
+                let dm_text = format!(
+                    "APPROVAL REQUEST (escalated, approved by {}): \"{}\"\n\nRequest ID: {}\nType: {}\n\n\
+                     To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+                     To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+                    approver_name, description, request_id, req_type, request_id, request_id
+                );
+                let state_clone = state.clone();
+                tokio::spawn(async move {
+                    let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text).await;
+                });
+                (StatusCode::OK, Json(json!({"status":"escalated","next_approver_id": next_superior_id})))
+            }
+            None => {
+                // No superior found (shouldn't happen for non-MAIN agents, but handle gracefully)
+                // Escalate to user
+                let _ = sqlx::query("UPDATE requests SET current_approver_type = 'USER', current_approver_id = NULL, updated_at = NOW() WHERE id = $1")
+                    .bind(request_id).execute(&state.db).await;
+                let _ = state.tx.send(json!({"type":"new_request","request_id": request_id}).to_string());
+                (StatusCode::OK, Json(json!({"status":"escalated_to_user"})))
+            }
+        }
+    }
+}
+
+/// Agent rejects a subordinate's request. The request is marked as rejected immediately.
+async fn agent_reject_request(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentApprovalAction>) -> impl IntoResponse {
+    let request_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Verify this agent is the current approver
+    let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
+        "SELECT current_approver_type, current_approver_id FROM requests WHERE id = $1 AND status = 'PENDING'"
+    ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+    match &current {
+        Some((t, Some(aid))) if t == "AGENT" && *aid == p.agent_id => {},
+        _ => return (StatusCode::FORBIDDEN, Json(json!({"error":"You are not the current approver for this request"}))),
+    }
+
+    // Record rejection and update status
+    let approval_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) VALUES ($1,$2,'AGENT',$3,'REJECT',$4)")
+        .bind(approval_id).bind(request_id).bind(p.agent_id).bind(&p.note).execute(&state.db).await;
+    let _ = sqlx::query("UPDATE requests SET status = 'REJECTED', updated_at = NOW() WHERE id = $1")
+        .bind(request_id).execute(&state.db).await;
+
+    // Notify requester
+    notify_requester(&state, request_id, "REJECTED", p.note.as_deref()).await;
     (StatusCode::OK, Json(json!({"status":"rejected"})))
 }
 

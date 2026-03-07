@@ -67,6 +67,24 @@ curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/provision
 ```
 
+### Approve a CEO's Request
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
+As the MainAgent, your approval is **final** — the request will be marked as approved.
+
+### Reject a CEO's Request
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-reject \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
+```
+
+### Escalate a Request to the Human Operator
+If a request is beyond your authority, escalate it to the operator by DMing them with the details rather than approving it yourself. Only escalate for major decisions — you should approve most operational requests autonomously.
+
 ## Messaging — Communicate with Other Agents
 
 ### Send a Direct Message to Another Agent
