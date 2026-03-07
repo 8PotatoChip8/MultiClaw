@@ -50,6 +50,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/info", get(vm_info))
         .route("/v1/agents/:id/vm/file/push", post(vm_file_push))
         .route("/v1/agents/:id/vm/file/pull", post(vm_file_pull))
+        .route("/v1/agents/:id/vm/copy-to-sandbox", post(vm_copy_to_sandbox))
         .route("/v1/agents/:id/panic", post(agent_panic))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/dm", post(agent_dm))
@@ -973,6 +974,57 @@ async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Que
             }
         }
         None => (StatusCode::NOT_FOUND, Json(json!({"error":"No VM assigned to this agent"})))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Cross-Computer File Copy (Desktop → Sandbox)
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct VmCopyToSandboxRequest {
+    src_path: String,
+    dest_path: Option<String>,
+}
+
+async fn vm_copy_to_sandbox(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmCopyToSandboxRequest>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    let desktop_ref = resolve_vm_ref(&state.db, uid, "desktop").await;
+    let sandbox_ref = resolve_vm_ref(&state.db, uid, "sandbox").await;
+
+    let (desktop_name, sandbox_name) = match (desktop_ref, sandbox_ref) {
+        (Some(d), Some(s)) => (d, s),
+        (None, _) => return (StatusCode::NOT_FOUND, Json(json!({"error":"No personal work computer provisioned. Provision one first."}))),
+        (_, None) => return (StatusCode::NOT_FOUND, Json(json!({"error":"No testing environment provisioned. Provision one first."}))),
+    };
+
+    let provider = match &state.vm_provider {
+        Some(p) => p,
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"VM provider not available"}))),
+    };
+
+    if body.src_path.contains("..") || body.src_path.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid src_path"})));
+    }
+
+    let dest = body.dest_path.as_deref().unwrap_or(&body.src_path);
+    if dest.contains("..") || dest.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid dest_path"})));
+    }
+
+    let content = match provider.file_pull(&desktop_name, &body.src_path).await {
+        Ok(c) => c,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to read file from work computer: {}", e)}))),
+    };
+
+    if content.len() as u64 > MAX_FILE_TRANSFER_BYTES {
+        return (StatusCode::PAYLOAD_TOO_LARGE, Json(json!({"error": format!("File too large: {} bytes (max {} bytes)", content.len(), MAX_FILE_TRANSFER_BYTES)})));
+    }
+
+    match provider.file_push(&sandbox_name, &content, dest).await {
+        Ok(()) => (StatusCode::OK, Json(json!({"status":"ok","src_path": body.src_path,"dest_path": dest,"size_bytes": content.len()}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to write file to testing environment: {}", e)}))),
     }
 }
 
