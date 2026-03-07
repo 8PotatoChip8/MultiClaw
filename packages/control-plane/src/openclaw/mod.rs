@@ -128,11 +128,48 @@ impl OpenClawManager {
             .filter(|c| c.is_alphanumeric() || *c == '-')
             .collect::<String>());
 
-        // Stop existing container if any
+        // Stop existing container with the same name if any
         let _ = tokio::process::Command::new("docker")
             .args(["rm", "-f", &container_name])
             .output()
             .await;
+
+        // Also kill any stale container that may be holding our port.
+        // With --network host, port conflicts from leftover containers are fatal.
+        if let Ok(output) = tokio::process::Command::new("docker")
+            .args(["ps", "-q", "--filter", "name=multiclaw-openclaw-"])
+            .output()
+            .await
+        {
+            let running = String::from_utf8_lossy(&output.stdout);
+            if !running.trim().is_empty() {
+                // Get names of running openclaw containers
+                if let Ok(names_output) = tokio::process::Command::new("docker")
+                    .args(["ps", "--filter", "name=multiclaw-openclaw-", "--format", "{{.Names}}"])
+                    .output()
+                    .await
+                {
+                    let names = String::from_utf8_lossy(&names_output.stdout);
+                    for name in names.lines() {
+                        let name = name.trim();
+                        if !name.is_empty() && name != container_name {
+                            // Check if this container's tracked instance uses our port
+                            let dominated = {
+                                let instances = self.instances.read().await;
+                                !instances.values().any(|i| i.container_name == name)
+                            };
+                            if dominated {
+                                tracing::warn!("Removing untracked container {} (may conflict with port {})", name, port);
+                                let _ = tokio::process::Command::new("docker")
+                                    .args(["rm", "-f", name])
+                                    .output()
+                                    .await;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Launch Docker container
         tracing::info!(
@@ -453,6 +490,26 @@ impl OpenClawManager {
 
     /// Recover instances from DB on startup.
     pub async fn recover_instances(&self, db_pool: &PgPool) -> Result<()> {
+        // Clean up ALL stale openclaw containers from previous installs/sessions.
+        // With --network host, leftover containers hold ports and cause conflicts.
+        if let Ok(output) = tokio::process::Command::new("docker")
+            .args(["ps", "-a", "--filter", "name=multiclaw-openclaw-", "--format", "{{.Names}}"])
+            .output()
+            .await
+        {
+            let containers = String::from_utf8_lossy(&output.stdout);
+            for name in containers.lines() {
+                let name = name.trim();
+                if !name.is_empty() {
+                    tracing::info!("Cleaning up stale OpenClaw container: {}", name);
+                    let _ = tokio::process::Command::new("docker")
+                        .args(["rm", "-f", name])
+                        .output()
+                        .await;
+                }
+            }
+        }
+
         // Find all agents that should have OpenClaw instances
         let agents: Vec<(Uuid, String, String, Option<String>, Option<String>, Option<Uuid>, String)> =
             sqlx::query_as(
