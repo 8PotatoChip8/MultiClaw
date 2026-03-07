@@ -272,6 +272,98 @@ tr:hover td {
   animation: pulse 2s infinite;
 }
 
+/* ── Markdown Text ── */
+.markdown-text {
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.markdown-text p {
+  margin: 0 0 8px 0;
+  white-space: pre-wrap;
+}
+
+.markdown-text p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-text strong {
+  font-weight: 700;
+  color: var(--text);
+}
+
+.markdown-text em {
+  font-style: italic;
+}
+
+.markdown-text code {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  font-size: 0.9em;
+  color: var(--accent);
+}
+
+.markdown-text pre {
+  background: rgba(0, 0, 0, 0.35);
+  padding: 12px 16px;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.markdown-text pre code {
+  background: none;
+  padding: 0;
+  font-size: 0.85em;
+  color: var(--text);
+}
+
+.markdown-text ul,
+.markdown-text ol {
+  margin: 4px 0 8px 0;
+  padding-left: 20px;
+}
+
+.markdown-text li {
+  margin-bottom: 2px;
+}
+
+.markdown-text a {
+  color: var(--primary);
+  text-decoration: underline;
+  text-decoration-color: rgba(59, 130, 246, 0.4);
+}
+
+.markdown-text a:hover {
+  color: var(--accent);
+}
+
+.markdown-text blockquote {
+  border-left: 3px solid var(--border);
+  padding-left: 12px;
+  margin: 8px 0;
+  color: var(--text-muted);
+}
+
+.markdown-text h1,
+.markdown-text h2,
+.markdown-text h3,
+.markdown-text h4,
+.markdown-text h5,
+.markdown-text h6 {
+  margin: 12px 0 6px 0;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.markdown-text hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 12px 0;
+}
+
 /* ── Scrollbar ── */
 ::-webkit-scrollbar {
   width: 6px;

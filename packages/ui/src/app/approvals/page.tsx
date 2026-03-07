@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { api } from '../../lib/api';
 import { useMultiClawEvents } from '../../lib/ws';
 import { Request, Agent } from '../../lib/types';
+import MarkdownText from '../../components/MarkdownText';
 import { CheckCircle, XCircle, Clock, AlertTriangle, Filter, Inbox } from 'lucide-react';
 
 type StatusFilter = 'PENDING' | 'APPROVED' | 'REJECTED' | 'ALL';
@@ -192,9 +193,9 @@ export default function ApprovalsPage() {
                                     </div>
 
                                     {/* Description */}
-                                    <p style={{ color: 'var(--text)', fontSize: '14px', marginBottom: '10px', lineHeight: 1.5 }}>
-                                        {getRequestDescription(r)}
-                                    </p>
+                                    <div style={{ color: 'var(--text)', fontSize: '14px', marginBottom: '10px' }}>
+                                        <MarkdownText>{getRequestDescription(r)}</MarkdownText>
+                                    </div>
 
                                     {/* Metadata */}
                                     <div style={{ display: 'flex', gap: '16px', fontSize: '12px', color: 'var(--text-muted)' }}>

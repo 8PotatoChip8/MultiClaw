@@ -3,6 +3,7 @@ import { useEffect, useState, useRef } from 'react';
 import { api } from '../lib/api';
 import { useMultiClawEvents } from '../lib/ws';
 import { Message, Agent } from '../lib/types';
+import MarkdownText from './MarkdownText';
 import { Send, Loader2, Plus, UserMinus, Users, X } from 'lucide-react';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
@@ -211,7 +212,7 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
                             <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', marginBottom: '4px', fontWeight: 600 }}>
                                 {getSenderLabel(msg)}
                             </div>
-                            <div style={{ whiteSpace: 'pre-wrap' }}>{getContent(msg)}</div>
+                            <MarkdownText>{getContent(msg)}</MarkdownText>
                         </div>
                     </div>
                 ))}

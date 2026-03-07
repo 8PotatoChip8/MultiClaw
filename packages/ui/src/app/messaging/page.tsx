@@ -3,6 +3,7 @@ import { useEffect, useState, useRef } from 'react';
 import { api } from '../../lib/api';
 import { Thread, Message, Agent } from '../../lib/types';
 import { Radio, Eye, Users, MessageSquare } from 'lucide-react';
+import MarkdownText from '../../components/MarkdownText';
 import { useMultiClawEvents } from '../../lib/ws';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
@@ -169,8 +170,8 @@ export default function AgentCommsPage() {
                                                     {new Date(m.created_at).toLocaleTimeString()}
                                                 </span>
                                             </div>
-                                            <div style={{ fontSize: '13px', lineHeight: '1.6', whiteSpace: 'pre-wrap', color: 'var(--text-muted)' }}>
-                                                {typeof m.content === 'object' ? m.content?.text || JSON.stringify(m.content) : String(m.content)}
+                                            <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                                                <MarkdownText>{typeof m.content === 'object' ? m.content?.text || JSON.stringify(m.content) : String(m.content)}</MarkdownText>
                                             </div>
                                         </div>
                                     );
