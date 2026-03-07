@@ -41,15 +41,17 @@ curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-manager \
   -H 'Content-Type: application/json' \
-  -d '{"name": "MANAGER_NAME", "specialty": "DESCRIPTION"}'
+  -d '{"name": "MANAGER_NAME", "specialty": "DESCRIPTION", "preferred_model": "MODEL_NAME"}'
 ```
+The `preferred_model` field is optional. If omitted, the manager inherits your model. Use a different model when the manager's specialty would benefit from it (e.g., a coding-focused manager might use a code-specialized model).
 
 ### Hire a Worker
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
   -H 'Content-Type: application/json' \
-  -d '{"name": "WORKER_NAME", "specialty": "DESCRIPTION"}'
+  -d '{"name": "WORKER_NAME", "specialty": "DESCRIPTION", "preferred_model": "MODEL_NAME"}'
 ```
+The `preferred_model` field is optional. If omitted, the worker inherits your model.
 
 ### View Financial Ledger
 ```bash

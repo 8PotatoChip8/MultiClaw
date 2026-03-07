@@ -31,8 +31,9 @@ curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
   -H 'Content-Type: application/json' \
-  -d '{"name": "WORKER_NAME", "specialty": "DESCRIPTION"}'
+  -d '{"name": "WORKER_NAME", "specialty": "DESCRIPTION", "preferred_model": "MODEL_NAME"}'
 ```
+The `preferred_model` field is optional. If omitted, the worker inherits your model. Use a different model when the worker's specialty would benefit from it.
 
 ### View Company Org Tree
 ```bash

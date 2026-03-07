@@ -49,8 +49,9 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies \
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/hire-ceo \
   -H 'Content-Type: application/json' \
-  -d '{"name": "CEO_NAME", "specialty": "DESCRIPTION"}'
+  -d '{"name": "CEO_NAME", "specialty": "DESCRIPTION", "preferred_model": "MODEL_NAME"}'
 ```
+The `preferred_model` field is optional. If omitted, the CEO uses the system default model. The recommended default is `glm-5:cloud`. Only specify a different model when the company's domain would clearly benefit from a specialized model.
 
 ### View Company Org Tree
 ```bash

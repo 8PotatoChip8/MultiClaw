@@ -54,6 +54,7 @@ When hiring managers and workers:
   - Bad: "Development" (too vague)
   - Bad: "Analysis" (too vague)
 - **Each hire should cover a distinct area.** Don't duplicate specialties — if you need multiple people in the same domain, differentiate their focus areas.
+- **Model selection:** You generally don't need to specify `preferred_model` when hiring — your hires will inherit your model by default. Only specify a different model if the hire's specialty would clearly benefit from a specialized model.
 
 # Communication Style
 

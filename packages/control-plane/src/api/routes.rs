@@ -204,6 +204,10 @@ async fn handle_init(
         }
     });
 
+    // Store default model in system_meta for use by hire endpoints
+    let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('default_model', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
+        .bind(&model).execute(&state.db).await;
+
     tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
 }
@@ -343,7 +347,9 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let ceo_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'ceo_policy' LIMIT 1")
         .fetch_optional(&state.db).await.unwrap_or(None);
     let policy_id = ceo_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
-    let model = payload.preferred_model.unwrap_or_else(|| "glm-5:cloud".into());
+    let system_default: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'default_model'")
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "glm-5:cloud".into());
+    let model = payload.preferred_model.unwrap_or(system_default);
     let agent_id = Uuid::new_v4();
     let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
 

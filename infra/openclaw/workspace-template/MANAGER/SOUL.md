@@ -55,6 +55,7 @@ When hiring workers:
   - Bad: "Development" (too vague)
   - Bad: "General assistant" (not a specialty)
 - **Each worker should cover a distinct area.** Avoid hiring two workers with overlapping specialties. If you need multiple researchers, each should focus on a different domain (e.g., one on market data analysis, another on strategy development).
+- **Model selection:** You generally don't need to specify `preferred_model` when hiring — your workers will inherit your model by default. Only specify a different model if the worker's specialty would clearly benefit from a specialized model.
 
 # Communication Style
 
