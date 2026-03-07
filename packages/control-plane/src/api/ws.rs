@@ -33,7 +33,7 @@ pub async fn events_handler(
 }
 
 async fn handle_ui_socket(socket: WebSocket, state: AppState) {
-    let (mut sender, mut _receiver) = socket.split();
+    let (mut sender, _receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 
     // Send initial heartbeat
