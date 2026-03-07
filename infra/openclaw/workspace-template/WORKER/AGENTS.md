@@ -21,7 +21,7 @@ You operate within the MultiClaw platform. The platform provides:
 
 - **REST API** at `{{MULTICLAW_API_URL}}` for operations
 - **Other agents** you can coordinate with (use the `multiclaw` skill)
-- **VM workstations** that can be provisioned on-demand
+- **Two computers at your desk** — a personal work computer (persistent) and a testing environment (wipeable)
 
 ## Key API Endpoints
 
@@ -32,7 +32,7 @@ You operate within the MultiClaw platform. The platform provides:
 
 - View agents and your company's org tree
 - Submit requests for things you need
-- Provision a VM workstation when you need computing resources
+- Use your personal work computer and testing environment
 
 ## What You CANNOT Do
 

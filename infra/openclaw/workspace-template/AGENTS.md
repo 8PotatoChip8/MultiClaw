@@ -14,7 +14,7 @@ like you run real companies. The platform provides:
 
 - **REST API** at `{{MULTICLAW_API_URL}}` for company operations
 - **Other agents** you can coordinate with (use the `multiclaw` skill)
-- **VM workstations** that can be provisioned on-demand when you need computing resources
+- **Two computers at your desk** — a personal work computer (persistent) and a testing environment (wipeable)
 
 ## Key API Endpoints
 
@@ -24,7 +24,6 @@ Use the `multiclaw` skill or `curl` to interact with the platform:
 - `GET /v1/companies` — List all companies
 - `POST /v1/agents/:id/hire-manager` — Hire a manager (CEO/MAIN only)
 - `POST /v1/agents/:id/hire-worker` — Hire a worker
-- `POST /v1/agents/:id/vm/provision` — Provision a VM workstation
 - `GET /v1/companies/:id/org-tree` — View your company org tree
 - `GET /v1/companies/:id/ledger` — View financial ledger
 

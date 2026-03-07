@@ -32,10 +32,101 @@ curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}
 curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
 ```
 
-### Provision a VM Workstation
+## Your Computers
+
+You have two computers at your desk — a personal work computer and a testing environment.
+
+### Your Personal Work Computer
+
+Your personal work computer is persistent — it stores your projects, programs, and files between sessions. It is yours for the long term. You cannot wipe it.
+
+**Set up your personal work computer (first time only):**
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/provision
 ```
+
+**Check status:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/info?target=desktop"
+```
+
+**Run a command:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/exec?target=desktop" \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "ls /home/agent"}'
+```
+Optional fields: `"user"` (default: `agent`), `"working_dir"` (default: `/home/agent`), `"timeout_secs"`.
+
+**Send a file to your computer:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/push?target=desktop" \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/home/agent/report.csv", "content": "FILE_CONTENT"}'
+```
+Set `"encoding": "base64"` for binary files (images, PDFs, etc.).
+
+**Download a file from your computer:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/pull?target=desktop" \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/home/agent/report.csv"}'
+```
+
+**Start / stop your computer:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/start?target=desktop"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/stop?target=desktop"
+```
+
+---
+
+### Your Testing Environment
+
+Your testing environment is a temporary computer for experiments — installing software, running tests, debugging, and trying things out. You can wipe it clean and start fresh at any time.
+
+**Set up your testing environment (first time, or after a wipe):**
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/sandbox/provision
+```
+
+**Check status:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/info?target=sandbox"
+```
+
+**Run a command:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/exec?target=sandbox" \
+  -H 'Content-Type: application/json' \
+  -d '{"command": "python3 test_script.py"}'
+```
+
+**Send a file to your testing environment:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/push?target=sandbox" \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/home/agent/test.py", "content": "FILE_CONTENT"}'
+```
+
+**Download a file from your testing environment:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/pull?target=sandbox" \
+  -H 'Content-Type: application/json' \
+  -d '{"path": "/home/agent/output.log"}'
+```
+
+**Start / stop your testing environment:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/start?target=sandbox"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/stop?target=sandbox"
+```
+
+**Wipe and rebuild your testing environment (start completely fresh):**
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/rebuild
+```
+This resets your testing environment to a clean state. Your personal work computer is not affected.
 
 ### Submit a Request to Your Manager
 ```bash
