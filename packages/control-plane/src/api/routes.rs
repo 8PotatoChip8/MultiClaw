@@ -1853,58 +1853,59 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
             .ok();
         tracing::info!("Updated deployed_commit to {}", &new_sha[..7.min(new_sha.len())]);
 
-        // Rebuild and restart containers
+        // Rebuild and restart containers via a DETACHED ephemeral container.
+        // We cannot run `docker compose up -d --build` directly because it will
+        // replace THIS container (multiclawd) mid-execution, killing the compose
+        // process before it can recreate the remaining services (ui, ollama-proxy).
+        // By running it from a separate container, the rebuild survives our replacement.
+
+        // Clean up any leftover updater from a previous run
+        let _ = tokio::process::Command::new("docker")
+            .args(["rm", "-f", "multiclaw-updater"])
+            .output()
+            .await;
+
+        // The updater container also rebuilds the CLI after compose finishes.
+        // cli_build_cmd runs inside the same ephemeral container sequentially.
         let rebuild = tokio::process::Command::new("docker")
-            .args(["compose", "-f", "/opt/multiclaw/infra/docker/docker-compose.yml", "up", "-d", "--build"])
+            .args([
+                "run", "-d", "--rm",
+                "--name", "multiclaw-updater",
+                "-v", "/var/run/docker.sock:/var/run/docker.sock",
+                "-v", "/opt/multiclaw:/opt/multiclaw",
+                "docker:cli",
+                "sh", "-c",
+                "docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml up -d --build \
+                 && docker run --rm \
+                    -v /opt/multiclaw/packages:/usr/src/app/packages \
+                    rust:1-slim-bookworm \
+                    bash -c 'apt-get update && apt-get install -y pkg-config libssl-dev > /dev/null 2>&1 && cd /usr/src/app/packages && cargo build --release -p multiclaw-cli' \
+                 || true"
+            ])
             .output()
             .await;
 
         match rebuild {
+            Ok(output) if output.status.success() => {
+                tracing::info!("Updater container launched — rebuild will continue independently");
+            }
             Ok(output) => {
-                if output.status.success() {
-                    tracing::info!("Docker rebuild complete, rebuilding CLI...");
-                } else {
-                    let err = String::from_utf8_lossy(&output.stderr);
-                    tracing::error!("Docker rebuild failed: {}", err);
-                    let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
-                    return;
-                }
+                let err = String::from_utf8_lossy(&output.stderr);
+                tracing::error!("Failed to launch updater container: {}", err);
+                let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": err.to_string()}).to_string());
+                return;
             }
             Err(e) => {
-                tracing::error!("Docker rebuild error: {}", e);
+                tracing::error!("Failed to launch updater container: {}", e);
                 let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
                 return;
             }
         }
 
-        // Rebuild CLI binary via a temporary Rust container.
-        // The compiled binary lands at /opt/multiclaw/packages/target/release/multiclaw-cli,
-        // which is where the symlink at /usr/local/bin/multiclaw already points.
-        let cli_build = tokio::process::Command::new("docker")
-            .args([
-                "run", "--rm",
-                "-v", "/opt/multiclaw/packages:/usr/src/app/packages",
-                "rust:1-slim-bookworm",
-                "bash", "-c",
-                "apt-get update && apt-get install -y pkg-config libssl-dev > /dev/null 2>&1 && cd /usr/src/app/packages && cargo build --release -p multiclaw-cli"
-            ])
-            .output()
-            .await;
-
-        match cli_build {
-            Ok(output) if output.status.success() => {
-                tracing::info!("CLI rebuild successful");
-            }
-            Ok(output) => {
-                let err = String::from_utf8_lossy(&output.stderr);
-                tracing::warn!("CLI rebuild failed (non-critical): {}", err);
-            }
-            Err(e) => {
-                tracing::warn!("CLI rebuild error (non-critical): {}", e);
-            }
-        }
-
-        tracing::info!("System update complete!");
+        // Note: "complete" message may never reach the client because multiclawd
+        // will be replaced by the updater. The frontend already handles this by
+        // polling /v1/health and reloading when the new container is up.
+        tracing::info!("System update handed off to updater container");
         let _ = state_clone.tx.send(json!({"type":"system_update","status":"complete"}).to_string());
     });
 
