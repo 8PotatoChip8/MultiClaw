@@ -854,7 +854,17 @@ async fn vm_sandbox_provision(State(state): State<AppState>, Path(id): Path<Stri
 
 async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // 1. Update DB status to QUARANTINED
     let _ = sqlx::query("UPDATE agents SET status = 'QUARANTINED' WHERE id = $1").bind(uid).execute(&state.db).await;
+
+    // 2. Stop the OpenClaw Docker container so the agent can't execute anything
+    match state.openclaw.stop_instance(uid).await {
+        Ok(()) => tracing::info!("Stopped OpenClaw instance for quarantined agent {}", uid),
+        Err(e) => tracing::warn!("Failed to stop OpenClaw instance for agent {}: {} (may not have one)", uid, e),
+    }
+
+    // 3. Broadcast quarantine event to UI
     let _ = state.tx.send(json!({"type":"agent_quarantined","agent_id": uid}).to_string());
     (StatusCode::OK, Json(json!({"status":"quarantined","agent_id": uid})))
 }
@@ -1718,6 +1728,33 @@ async fn agent_dm(
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"Cannot DM yourself"})));
     }
 
+    // Block DMs involving quarantined agents
+    let sender_status: Option<String> = sqlx::query_scalar("SELECT status FROM agents WHERE id = $1")
+        .bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+    let target_status: Option<String> = sqlx::query_scalar("SELECT status FROM agents WHERE id = $1")
+        .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
+    if sender_status.as_deref() == Some("QUARANTINED") {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Sender agent is quarantined and cannot send messages"})));
+    }
+    if target_status.as_deref() == Some("QUARANTINED") {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Target agent is quarantined and cannot receive messages"})));
+    }
+
+    // Cooldown check: prevent infinite DM loops between agent pairs
+    let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
+    {
+        let cooldowns = state.dm_cooldowns.read().await;
+        if let Some(last_completed) = cooldowns.get(&pair_key) {
+            let elapsed = last_completed.elapsed().as_secs();
+            if elapsed < 120 {
+                return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
+                    "error": "A DM conversation between these agents recently concluded. Please wait before sending another message.",
+                    "cooldown_remaining_secs": 120 - elapsed
+                })));
+            }
+        }
+    }
+
     // Rate limit: max 10 agent messages per minute per sender
     let recent_count: Option<i64> = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT' AND created_at > NOW() - INTERVAL '1 minute'"
@@ -1784,6 +1821,15 @@ async fn agent_dm(
                 let mut current_text = text;
 
                 loop {
+                    // Check if either agent was quarantined during conversation
+                    let responder_status: Option<String> = sqlx::query_scalar(
+                        "SELECT status FROM agents WHERE id = $1"
+                    ).bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                    if responder_status.as_deref() == Some("QUARANTINED") {
+                        tracing::info!("DM conversation on thread {} stopped: agent {} is quarantined", thread_id, responder_id);
+                        break;
+                    }
+
                     let result = state_clone.openclaw.send_message(responder_id, &current_text).await;
                     current_depth += 1;
 
@@ -1837,6 +1883,13 @@ async fn agent_dm(
                             break;
                         }
                     }
+                }
+
+                // Record cooldown for this agent pair to prevent infinite re-initiation
+                let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
+                {
+                    let mut cooldowns = state_clone.dm_cooldowns.write().await;
+                    cooldowns.insert(pair_key, tokio::time::Instant::now());
                 }
             });
 

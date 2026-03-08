@@ -4,8 +4,10 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use sqlx::PgPool;
+use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, RwLock};
+use uuid::Uuid;
 
 use crate::config::Config;
 use crate::crypto::CryptoMaster;
@@ -24,6 +26,9 @@ pub struct AppState {
     pub openclaw: Arc<OpenClawManager>,
     pub vm_provider: Option<Arc<IncusProvider>>,
     pub crypto: Option<Arc<CryptoMaster>>,
+    /// Tracks when the last DM conversation completed between any agent pair.
+    /// Key is (min(id_a, id_b), max(id_a, id_b)) to normalize direction.
+    pub dm_cooldowns: Arc<RwLock<HashMap<(Uuid, Uuid), tokio::time::Instant>>>,
 }
 
 /// Handler for the centralized event stream (used by the Next.js UI)

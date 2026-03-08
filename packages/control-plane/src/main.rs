@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         openclaw: std::sync::Arc::new(openclaw_mgr.clone()),
         vm_provider,
         crypto,
+        dm_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Recover OpenClaw instances from DB in background
@@ -149,6 +150,16 @@ async fn main() -> anyhow::Result<()> {
             if let Err(e) = openclaw_wd.reconcile_instances(&pool_wd).await {
                 tracing::error!("Watchdog reconciliation error: {}", e);
             }
+        }
+    });
+
+    // Cleanup stale DM cooldowns every 5 minutes
+    let dm_cooldowns_clone = app_state.dm_cooldowns.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            let mut cooldowns = dm_cooldowns_clone.write().await;
+            cooldowns.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(120));
         }
     });
 
