@@ -32,3 +32,6 @@ Agents communicate through several channels:
 - **Quarantine checks**: Before each message in a DM conversation, both agents' quarantine status is checked. If either is quarantined, the conversation stops immediately.
 
 See `docs/security.md` for details on DM anti-loop protection and panic operations.
+
+## MainAgent Heartbeat
+The MainAgent (KonnerBot) runs a periodic heartbeat loop that checks on the state of the holding company every 10 minutes (configurable via `heartbeat_interval_secs` in system settings). During each heartbeat, KonnerBot reviews pending approvals, checks on companies, and reports anything important to the human operator's DM thread. If nothing needs attention, the heartbeat response (`[HEARTBEAT_OK]`) is discarded without storing a message, keeping the conversation clean and minimizing AI model usage. The heartbeat can be disabled by setting the interval to `0`.

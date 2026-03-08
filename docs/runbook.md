@@ -49,6 +49,22 @@ curl http://127.0.0.1:8080/v1/threads/<thread-id>/messages \
 
 If agents are stuck in a DM loop, quarantine one of them (see above). The 2-minute per-pair cooldown should prevent most loops automatically, but quarantine is the guaranteed kill switch.
 
+## MainAgent Heartbeat
+The MainAgent (KonnerBot) performs periodic check-ins to review pending approvals, company status, and any issues that need attention. By default, this runs every 10 minutes.
+
+### Change heartbeat interval
+```bash
+curl -X PUT http://127.0.0.1:8080/v1/system/settings \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"heartbeat_interval_secs": "600"}'
+```
+Default: `600` (10 minutes). Set to `0` to disable the heartbeat entirely.
+
+If KonnerBot has nothing to report, the heartbeat costs very little (a short prompt + a `[HEARTBEAT_OK]` response that is not stored). Reports are only generated and posted to the DM thread when something needs attention.
+
+The heartbeat loop starts 3 minutes after the control plane boots (to allow OpenClaw containers to recover).
+
 ## Provisioning Secrets for Agents
 Store API keys, credentials, and other sensitive values using the Secrets API. **Never paste secrets into chat messages or DMs** — use the secrets store instead.
 

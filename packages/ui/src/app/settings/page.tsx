@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap } from 'lucide-react';
+import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart } from 'lucide-react';
 
 type Channel = 'stable' | 'beta' | 'dev';
 
@@ -18,12 +18,16 @@ export default function SettingsPage() {
     const [saved, setSaved] = useState(false);
     const [updateInfo, setUpdateInfo] = useState<any>(null);
     const [checking, setChecking] = useState(false);
+    const [heartbeatSecs, setHeartbeatSecs] = useState('600');
+    const [heartbeatSaving, setHeartbeatSaving] = useState(false);
+    const [heartbeatSaved, setHeartbeatSaved] = useState(false);
 
     useEffect(() => {
         api.getSettings().then(data => {
             if (data && typeof data === 'object') {
                 setSettings(data);
                 if (data.update_channel) setSelectedChannel(data.update_channel as Channel);
+                if (data.heartbeat_interval_secs) setHeartbeatSecs(data.heartbeat_interval_secs);
             }
         });
     }, []);
@@ -52,6 +56,22 @@ export default function SettingsPage() {
         if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
     };
+
+    const handleSaveHeartbeat = async () => {
+        const val = parseInt(heartbeatSecs, 10);
+        if (isNaN(val) || val < 0) return;
+        setHeartbeatSaving(true);
+        await api.updateSettings({ heartbeat_interval_secs: String(val) });
+        setHeartbeatSaving(false);
+        setHeartbeatSaved(true);
+        setTimeout(() => setHeartbeatSaved(false), 2000);
+    };
+
+    const heartbeatMinutes = (() => {
+        const secs = parseInt(heartbeatSecs, 10);
+        if (isNaN(secs) || secs === 0) return null;
+        return Math.round(secs / 60);
+    })();
 
     return (
         <div className="animate-in">
@@ -193,6 +213,77 @@ export default function SettingsPage() {
                         Click "Check Now" to see your update status
                     </p>
                 )}
+            </div>
+
+            {/* MainAgent Heartbeat */}
+            <div className="panel" style={{ maxWidth: '700px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                            <Heart size={18} style={{ color: 'var(--primary)' }} />
+                            <h2 style={{ fontSize: '18px', fontWeight: 600 }}>MainAgent Heartbeat</h2>
+                        </div>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                            How often KonnerBot checks on pending approvals, company status, and issues
+                        </p>
+                    </div>
+                    {heartbeatSaved && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--success)', fontWeight: 600 }}>
+                            <Check size={14} /> Saved
+                        </span>
+                    )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '12px' }}>
+                    <input
+                        type="number"
+                        min="0"
+                        step="60"
+                        value={heartbeatSecs}
+                        onChange={e => setHeartbeatSecs(e.target.value)}
+                        style={{
+                            width: '120px', padding: '10px 12px', borderRadius: '8px',
+                            background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                            color: 'var(--text)', fontSize: '14px', fontFamily: 'monospace',
+                            textAlign: 'center',
+                        }}
+                    />
+                    <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>
+                        seconds
+                        {heartbeatMinutes !== null && ` (${heartbeatMinutes} min)`}
+                    </span>
+                    <button className="button small" onClick={handleSaveHeartbeat} disabled={heartbeatSaving}
+                        style={{ fontSize: '12px', marginLeft: 'auto' }}>
+                        {heartbeatSaving ? 'Saving...' : 'Save'}
+                    </button>
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    {[
+                        { label: '5 min', value: '300' },
+                        { label: '10 min', value: '600' },
+                        { label: '15 min', value: '900' },
+                        { label: '30 min', value: '1800' },
+                        { label: 'Disabled', value: '0' },
+                    ].map(preset => (
+                        <button key={preset.value} onClick={() => { setHeartbeatSecs(preset.value); }}
+                            style={{
+                                padding: '4px 12px', borderRadius: '6px', fontSize: '12px',
+                                fontWeight: 500, cursor: 'pointer',
+                                border: heartbeatSecs === preset.value ? '1px solid var(--primary)' : '1px solid var(--border)',
+                                background: heartbeatSecs === preset.value ? 'rgba(59,130,246,0.15)' : 'transparent',
+                                color: heartbeatSecs === preset.value ? 'var(--primary)' : 'var(--text-muted)',
+                                transition: 'all 0.2s',
+                            }}>
+                            {preset.label}
+                        </button>
+                    ))}
+                </div>
+
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '12px' }}>
+                    Set to 0 to disable. When nothing needs attention, each heartbeat costs very little (a short prompt + a silent OK response).
+                    Takes effect on the next cycle — no restart required.
+                </p>
             </div>
 
             {/* System Info */}

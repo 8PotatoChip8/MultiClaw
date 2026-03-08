@@ -1,4 +1,5 @@
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use uuid::Uuid;
 
 mod config;
 mod crypto;
@@ -160,6 +161,96 @@ async fn main() -> anyhow::Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(300)).await;
             let mut cooldowns = dm_cooldowns_clone.write().await;
             cooldowns.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(120));
+        }
+    });
+
+    // MainAgent heartbeat: periodic check-in loop
+    let pool_hb = pool.clone();
+    let openclaw_hb = openclaw_mgr.clone();
+    let tx_hb = app_state.tx.clone();
+    tokio::spawn(async move {
+        // Wait for OpenClaw instances to recover before starting heartbeat
+        tokio::time::sleep(std::time::Duration::from_secs(180)).await;
+        tracing::info!("MainAgent heartbeat loop started");
+
+        loop {
+            // Read interval from system_meta (default 600s = 10 minutes)
+            let interval_secs: u64 = sqlx::query_scalar::<_, String>(
+                "SELECT value FROM system_meta WHERE key = 'heartbeat_interval_secs'"
+            ).fetch_optional(&pool_hb).await.ok().flatten()
+             .and_then(|v| v.parse().ok())
+             .unwrap_or(600);
+
+            // 0 = disabled
+            if interval_secs == 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                continue;
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+
+            // Find the MAIN agent
+            let main_agent: Option<(Uuid, String)> = sqlx::query_as(
+                "SELECT id, name FROM agents WHERE role = 'MAIN' AND status != 'QUARANTINED' LIMIT 1"
+            ).fetch_optional(&pool_hb).await.ok().flatten();
+
+            let (main_id, main_name) = match main_agent {
+                Some(a) => a,
+                None => {
+                    tracing::debug!("Heartbeat skipped: no active MAIN agent found");
+                    continue;
+                }
+            };
+
+            // Send heartbeat prompt via OpenClaw
+            let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
+                Review the current state of things — check for any pending approvals, \
+                see if your CEOs need anything, and note any issues. \
+                If everything is running smoothly and there is nothing to report, \
+                respond with just: [HEARTBEAT_OK] \
+                If there IS something to report or act on, handle it and then \
+                briefly summarize what you did.";
+
+            let instructions = "This is an automated periodic check-in. Be extremely concise. \
+                Only take action or report if something actually needs attention. \
+                If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else. \
+                Do not generate filler or repeat known information.";
+
+            match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
+                Ok(response) => {
+                    let trimmed = response.trim();
+                    if trimmed == "[HEARTBEAT_OK]" || trimmed.contains("[HEARTBEAT_OK]") {
+                        tracing::debug!("Heartbeat: {} reports all clear", main_name);
+                    } else {
+                        tracing::info!("Heartbeat: {} has a report ({}B)", main_name, trimmed.len());
+                        // Store the response in the MainAgent's human-operator DM thread
+                        let thread_id: Option<Uuid> = sqlx::query_scalar(
+                            "SELECT tm.thread_id FROM thread_members tm \
+                             JOIN threads t ON t.id = tm.thread_id \
+                             JOIN thread_members tm2 ON t.id = tm2.thread_id \
+                             WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                               AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
+                        ).bind(main_id).fetch_optional(&pool_hb).await.ok().flatten();
+
+                        if let Some(tid) = thread_id {
+                            let msg_id = Uuid::new_v4();
+                            let content = serde_json::json!({"text": trimmed});
+                            let _ = sqlx::query(
+                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+                                 VALUES ($1,$2,'AGENT',$3,$4,0)"
+                            ).bind(msg_id).bind(tid).bind(main_id).bind(&content)
+                            .execute(&pool_hb).await;
+                            let _ = tx_hb.send(serde_json::json!({
+                                "type":"new_message",
+                                "message": {"id": msg_id, "thread_id": tid, "sender_type": "AGENT", "sender_id": main_id, "content": content}
+                            }).to_string());
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Heartbeat failed for {}: {}", main_name, e);
+                }
+            }
         }
     });
 
