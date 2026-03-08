@@ -31,3 +31,21 @@ MultiClaw enforces a strict hierarchical corporate structure for its autonomous 
 ## Template Injection
 When a new agent is hired, the `multiclawd` control plane looks in `infra/openclaw/workspace-template/` to render their workspace.
 Since the `feat: role-specific agent brain files` update, it checks for `<ROLE>` specific subdirectories first (e.g., `CEO/SOUL.md` or `WORKER/skills/multiclaw/SKILL.md`) before falling back to generic templates. This ensures agents do not see API capabilities or instructions that exceed their authority.
+
+## Onboarding
+When an agent hires a new employee, they brief the new hire via DM — explaining the company context, role expectations, and immediate tasks. This behavior is defined in the SOUL.md operating principles for MAIN, CEO, and MANAGER roles.
+
+## Agent Computers
+Every agent receives two Incus VMs:
+- **Desktop VM**: A persistent workstation for ongoing work. Retains all software, files, and configuration across reboots.
+- **Sandbox VM**: A wipeable testing environment for running untrusted code or experiments. Can be rebuilt at any time via `POST /v1/agents/:id/vm/rebuild` without affecting the desktop.
+
+Agents can copy files between their desktop and sandbox using `POST /v1/agents/:id/vm/copy-to-sandbox`.
+
+## Inter-Agent File Sharing
+Agents can send files to other agents via `POST /v1/agents/:id/send-file`. Policy rules enforce hierarchical access:
+- Agents can send files to peers within the same company and to their direct reports.
+- Cross-company file sharing routes through the MAIN agent.
+- Maximum file size: 10 MB.
+
+File transfers are logged and visible via `GET /v1/agents/:id/file-transfers`.

@@ -8,5 +8,55 @@ Every API token, VM proxy token, and OpenClaw gateway access token is encrypted 
 - `multiclaw-agentd` initiates outbound connections to `multiclawd` only.
 - The `ollama-proxy` binds to `0.0.0.0:11436` but drops packets not from the Incus subnet.
 
-## Panic Operations
-The Quick-Panic button stops a VM forcefully and revokes its API token bindings, immediately nullifying pending actions.
+## Panic Operations (Quarantine)
+The Quick-Panic button is a **kill switch** that fully silences an agent:
+
+1. Sets the agent's status to `QUARANTINED` in the database.
+2. Stops the agent's OpenClaw Docker container, terminating all in-progress processing.
+3. Blocks all further DM delivery to and from the agent — any attempt returns `403 Forbidden`.
+4. Broadcasts a `agent_quarantined` event to the UI.
+
+Once quarantined, the agent cannot send or receive any messages. To understand what happened before quarantine, review the agent's conversation history in the **Agent Comms** page of the dashboard.
+
+API: `POST /v1/agents/:id/panic`
+
+## Secrets Management
+MultiClaw provides an encrypted secrets store for sensitive values like API keys, database credentials, and service tokens. This is the **only** safe way to give agents access to credentials — never paste secrets into chat messages or DMs.
+
+### Storing Secrets
+Create a secret via the API:
+```
+POST /v1/secrets
+{
+  "scope_type": "agent",
+  "scope_id": "<agent-uuid>",
+  "name": "COINEX_API_KEY",
+  "value": "your-secret-value"
+}
+```
+
+**Scope types:**
+- `"agent"` — Available only to the specific agent.
+- `"company"` — Available to all agents in the company.
+- `"holding"` — Available to all agents across all companies.
+
+### How Agents Retrieve Secrets
+Agents fetch secrets by name via `GET /v1/agents/:id/secrets/:name`. The lookup is **hierarchical**: it checks agent-scoped secrets first, then company-scoped, then holding-scoped. This lets you set a default at the company or holding level and override it for specific agents.
+
+### Encryption
+Secret values are encrypted at rest with AES-GCM using the same master key as API tokens. Plaintext values are never returned by `GET /v1/secrets` (which lists metadata only) — they are only decrypted when an agent fetches a specific secret by name.
+
+### Secret Scrubbing
+All stored messages (chat, DMs, approvals) are automatically scrubbed of known secret values before being written to the database. If an agent accidentally includes a secret in a message, the value is replaced before storage.
+
+### Managing Secrets
+- **List metadata**: `GET /v1/secrets` — returns names, scopes, and IDs (never values).
+- **Delete**: `DELETE /v1/secrets/:id`
+
+## DM Anti-Loop Protection
+Agent-to-agent DMs support automatic multi-turn conversations where agents take turns responding. Multiple safeguards prevent these conversations from running away:
+
+1. **Depth limit**: Each conversation is capped at `MAX_DM_DEPTH` (5) turns. After 5 exchanges, the conversation stops naturally.
+2. **Pair cooldown**: After a conversation between two agents completes, a 2-minute cooldown blocks new conversations between the same pair. This prevents agents from starting fresh conversations to circumvent the depth limit.
+3. **Quarantine checks**: Before each message in a conversation, both agents' quarantine status is checked. If either agent is quarantined mid-conversation, the conversation stops immediately.
+4. **Rate limiting**: Agents are limited to 10 messages per minute per sender.

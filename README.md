@@ -39,6 +39,23 @@ Each agent runs with role-specific "brain files" (SOUL.md, AGENTS.md, SKILL.md) 
 3. **MANAGER**: Manages a department. Can hire workers only.
 4. **WORKER**: Executes tasks. Has no hiring or management authority.
 
+## Agent Computers
+Each agent receives two Incus VMs:
+- **Desktop VM**: A persistent workstation for day-to-day work. Survives reboots and retains all installed software and files.
+- **Sandbox VM**: A wipeable testing environment for running untrusted code or experiments. Can be rebuilt at any time without affecting the desktop.
+
+Agents can copy files between their desktop and sandbox via the control plane. See `docs/architecture.md` for details.
+
+## Inter-Agent Communication
+Agents communicate through direct messages (DMs) and group threads. DMs support automatic multi-turn conversations with depth limits and cooldown protections to prevent runaway loops. The **Agent Comms** page in the dashboard shows all agent conversations.
+
+Agents can also DM the human operator directly. See `docs/security.md` for DM safety details.
+
+## Secrets Management
+Store API keys, credentials, and other secrets for your agents using the Secrets API. Secrets can be scoped to an individual agent, an entire company, or the whole holding. Values are encrypted at rest with AES-GCM and automatically scrubbed from all stored messages.
+
+Agents retrieve secrets by name with hierarchical lookup (agent → company → holding). See `docs/security.md` for full details.
+
 ## Adding Models
 To add models, use the `multiclaw` CLI or the Dashboard.
 Under the hood, this pulls the model to the host Ollama context and adjusts the agent's allowlist.
