@@ -182,7 +182,7 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
   "value": "sk-live-..."
 }
 ```
-`scope_type` can be `"agent"`, `"company"`, or `"holding"`. Agents fetch secrets via `GET /v1/agents/:id/secrets/:name` with hierarchical lookup (agent → company → holding).
+`scope_type` can be `"agent"`, `"manager"` (department), `"company"`, or `"holding"`. Agents fetch secrets via `GET /v1/agents/:id/secrets/:name` with hierarchical lookup (agent → manager → company → holding).
 
 ---
 

@@ -37,11 +37,12 @@ POST /v1/secrets
 
 **Scope types:**
 - `"agent"` — Available only to the specific agent.
+- `"manager"` — Available to the specified manager and all workers in their department. Use this to give a team shared credentials (e.g. a read-only API key for the research team vs a full-access key for the trading team).
 - `"company"` — Available to all agents in the company.
 - `"holding"` — Available to all agents across all companies.
 
 ### How Agents Retrieve Secrets
-Agents fetch secrets by name via `GET /v1/agents/:id/secrets/:name`. The lookup is **hierarchical**: it checks agent-scoped secrets first, then company-scoped, then holding-scoped. This lets you set a default at the company or holding level and override it for specific agents.
+Agents fetch secrets by name via `GET /v1/agents/:id/secrets/:name`. The lookup is **hierarchical**: agent → manager (department) → company → holding. This lets you set a company-wide default, override it per-department, and override it again per-agent.
 
 ### Encryption
 Secret values are encrypted at rest with AES-GCM using the same master key as API tokens. Plaintext values are never returned by `GET /v1/secrets` (which lists metadata only) — they are only decrypted when an agent fetches a specific secret by name.

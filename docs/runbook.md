@@ -67,10 +67,25 @@ curl -X POST http://127.0.0.1:8080/v1/secrets \
 
 **Scope types:**
 - `agent` — Only the specified agent can access it.
+- `manager` — The manager and all workers in their department can access it.
 - `company` — All agents in the company can access it.
 - `holding` — All agents across all companies can access it.
 
-Agents retrieve secrets by name. The lookup is hierarchical: agent scope is checked first, then company, then holding. This lets you set defaults at the company level and override per-agent.
+Agents retrieve secrets by name. The lookup is hierarchical: agent → manager (department) → company → holding. This lets you set defaults at the company level, override per-department, and override per-agent.
+
+### Create a department-scoped secret
+```bash
+curl -X POST http://127.0.0.1:8080/v1/secrets \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "scope_type": "manager",
+    "scope_id": "<manager-uuid>",
+    "name": "EXCHANGE_API_KEY",
+    "value": "your-department-api-key"
+  }'
+```
+This gives the manager and all their workers access to the secret. Other departments in the same company won't see it.
 
 ### List secrets (metadata only)
 ```bash

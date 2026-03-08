@@ -2806,8 +2806,8 @@ async fn create_secret(
     };
 
     // Validate scope_type
-    if !["agent", "company", "holding"].contains(&p.scope_type.as_str()) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error":"scope_type must be 'agent', 'company', or 'holding'"})));
+    if !["agent", "company", "holding", "manager"].contains(&p.scope_type.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"scope_type must be 'agent', 'company', 'holding', or 'manager'"})));
     }
 
     let ciphertext = match crypto.encrypt(p.value.as_bytes()) {
@@ -2859,8 +2859,9 @@ async fn delete_secret(
 
 /// Agent fetches a secret by name. Performs hierarchical lookup:
 /// 1. Agent-scoped secrets (scope_type='agent', scope_id=agent_id)
-/// 2. Company-scoped secrets (scope_type='company', scope_id=company_id)
-/// 3. Holding-scoped secrets (scope_type='holding', scope_id=holding_id)
+/// 2. Manager/department-scoped secrets (scope_type='manager', scope_id=manager_id)
+/// 3. Company-scoped secrets (scope_type='company', scope_id=company_id)
+/// 4. Holding-scoped secrets (scope_type='holding', scope_id=holding_id)
 async fn get_agent_secret(
     State(state): State<AppState>, Path((id, name)): Path<(String, String)>
 ) -> impl IntoResponse {
@@ -2873,18 +2874,31 @@ async fn get_agent_secret(
         None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"Secrets not available"}))),
     };
 
-    // Get agent's company_id and holding_id for hierarchical lookup
-    let agent_info: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
-        "SELECT a.company_id, a.holding_id FROM agents a WHERE a.id = $1"
+    // Get agent's company_id, holding_id, parent_agent_id, and role for hierarchical lookup
+    let agent_info: Option<(Option<Uuid>, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT a.company_id, a.holding_id, a.parent_agent_id, a.role FROM agents a WHERE a.id = $1"
     ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
 
-    let (company_id, holding_id) = match agent_info {
-        Some((cid, hid)) => (cid, hid),
+    let (company_id, holding_id, parent_agent_id, role) = match agent_info {
+        Some((cid, hid, pid, r)) => (cid, hid, pid, r),
         None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
     };
 
-    // Try agent scope first, then company, then holding
+    // Hierarchical lookup: agent → manager (department) → company → holding
     let mut scopes: Vec<(&str, Uuid)> = vec![("agent", agent_id)];
+    // Managers can access their own department secrets
+    if role == "MANAGER" {
+        scopes.push(("manager", agent_id));
+    }
+    // Workers inherit their manager's department secrets
+    if let Some(pid) = parent_agent_id {
+        let parent_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM agents WHERE id = $1"
+        ).bind(pid).fetch_optional(&state.db).await.ok().flatten();
+        if parent_role.as_deref() == Some("MANAGER") {
+            scopes.push(("manager", pid));
+        }
+    }
     if let Some(cid) = company_id {
         scopes.push(("company", cid));
     }
@@ -2915,18 +2929,31 @@ async fn get_agent_secret(
 
 /// Scrub known secret values from agent message text to prevent leaks.
 async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, agent_id: Uuid, text: &str) -> String {
-    // Get agent's company_id and holding_id
-    let agent_info: Option<(Option<Uuid>, Uuid)> = sqlx::query_as(
-        "SELECT company_id, holding_id FROM agents WHERE id = $1"
+    // Get agent's company_id, holding_id, parent_agent_id, and role
+    let agent_info: Option<(Option<Uuid>, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT company_id, holding_id, parent_agent_id, role FROM agents WHERE id = $1"
     ).bind(agent_id).fetch_optional(db).await.ok().flatten();
 
-    let (company_id, holding_id) = match agent_info {
+    let (company_id, holding_id, parent_agent_id, role) = match agent_info {
         Some(info) => info,
         None => return text.to_string(),
     };
 
-    // Collect all scope IDs to query
+    // Collect all scope IDs to query (agent → manager → company → holding)
     let mut scope_conditions = vec![("agent", agent_id)];
+    // Manager's own department secrets
+    if role == "MANAGER" {
+        scope_conditions.push(("manager", agent_id));
+    }
+    // Worker's department secrets (parent is a manager)
+    if let Some(pid) = parent_agent_id {
+        let parent_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM agents WHERE id = $1"
+        ).bind(pid).fetch_optional(db).await.ok().flatten();
+        if parent_role.as_deref() == Some("MANAGER") {
+            scope_conditions.push(("manager", pid));
+        }
+    }
     if let Some(cid) = company_id {
         scope_conditions.push(("company", cid));
     }

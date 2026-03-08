@@ -11,11 +11,11 @@ interface SecretMeta {
     created_at: string;
 }
 
-type ScopeType = 'agent' | 'company' | 'holding';
+type ScopeType = 'agent' | 'manager' | 'company' | 'holding';
 
 export default function SecretsPage() {
     const [secrets, setSecrets] = useState<SecretMeta[]>([]);
-    const [agents, setAgents] = useState<{ id: string; name: string }[]>([]);
+    const [agents, setAgents] = useState<{ id: string; name: string; role?: string }[]>([]);
     const [companies, setCompanies] = useState<{ id: string; name: string }[]>([]);
     const [loading, setLoading] = useState(true);
     const [showCreate, setShowCreate] = useState(false);
@@ -79,14 +79,21 @@ export default function SecretsPage() {
         await loadData();
     };
 
+    const managers = agents.filter(a => a.role === 'MANAGER');
+
     const scopeLabel = (s: SecretMeta) => {
         if (s.scope_type === 'holding') return 'All Agents';
+        if (s.scope_type === 'manager') {
+            const name = nameMap[s.scope_id];
+            return name ? `${name}'s dept` : s.scope_id.slice(0, 8);
+        }
         return nameMap[s.scope_id] || s.scope_id.slice(0, 8);
     };
 
     const scopeBadgeColor = (type: string) => {
         switch (type) {
             case 'agent': return 'var(--primary)';
+            case 'manager': return '#f59e0b';
             case 'company': return 'var(--accent)';
             case 'holding': return 'var(--success)';
             default: return 'var(--text-muted)';
@@ -189,8 +196,8 @@ export default function SecretsPage() {
                                 <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)', marginBottom: '8px', fontWeight: 500 }}>
                                     Scope
                                 </label>
-                                <div style={{ display: 'flex', gap: '8px' }}>
-                                    {(['agent', 'company', 'holding'] as ScopeType[]).map(st => (
+                                <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                                    {(['agent', 'manager', 'company', 'holding'] as ScopeType[]).map(st => (
                                         <button key={st} onClick={() => { setScopeType(st); setScopeId(''); }}
                                             style={{
                                                 flex: 1, padding: '8px 12px', borderRadius: '8px', fontSize: '13px',
@@ -206,6 +213,7 @@ export default function SecretsPage() {
                                 </div>
                                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
                                     {scopeType === 'agent' && 'Available only to the selected agent.'}
+                                    {scopeType === 'manager' && 'Available to the selected manager and all workers in their department.'}
                                     {scopeType === 'company' && 'Available to all agents in the selected company.'}
                                     {scopeType === 'holding' && 'Available to all agents across all companies.'}
                                 </p>
@@ -215,7 +223,7 @@ export default function SecretsPage() {
                             {scopeType !== 'holding' && (
                                 <div>
                                     <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: 500 }}>
-                                        {scopeType === 'agent' ? 'Agent' : 'Company'}
+                                        {scopeType === 'agent' ? 'Agent' : scopeType === 'manager' ? 'Manager (Department)' : 'Company'}
                                     </label>
                                     <select value={scopeId} onChange={e => setScopeId(e.target.value)}
                                         style={{
@@ -223,9 +231,11 @@ export default function SecretsPage() {
                                             background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
                                             color: 'var(--text)', fontSize: '13px',
                                         }}>
-                                        <option value="">Select {scopeType}...</option>
+                                        <option value="">Select {scopeType === 'manager' ? 'manager' : scopeType}...</option>
                                         {scopeType === 'agent'
                                             ? agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)
+                                            : scopeType === 'manager'
+                                            ? managers.map(m => <option key={m.id} value={m.id}>{m.name}</option>)
                                             : companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)
                                         }
                                     </select>
