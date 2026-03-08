@@ -1752,16 +1752,16 @@ async fn agent_dm(
         return (StatusCode::FORBIDDEN, Json(json!({"error":"Target agent is quarantined and cannot receive messages"})));
     }
 
-    // Cooldown check: prevent infinite DM loops between agent pairs
+    // Anti-spam: short cooldown to prevent rapid DM re-initiation between same pair
     let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
     {
         let cooldowns = state.dm_cooldowns.read().await;
         if let Some(last_completed) = cooldowns.get(&pair_key) {
             let elapsed = last_completed.elapsed().as_secs();
-            if elapsed < 120 {
+            if elapsed < 10 {
                 return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
-                    "error": "A DM conversation between these agents recently concluded. Please wait before sending another message.",
-                    "cooldown_remaining_secs": 120 - elapsed
+                    "error": "A DM conversation between these agents just concluded. Please wait a moment.",
+                    "cooldown_remaining_secs": 10 - elapsed
                 })));
             }
         }

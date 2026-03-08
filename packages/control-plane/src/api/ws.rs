@@ -26,8 +26,9 @@ pub struct AppState {
     pub openclaw: Arc<OpenClawManager>,
     pub vm_provider: Option<Arc<IncusProvider>>,
     pub crypto: Option<Arc<CryptoMaster>>,
-    /// Tracks when the last DM conversation completed between any agent pair.
+    /// Anti-spam cooldown: tracks when the last DM conversation completed between any agent pair.
     /// Key is (min(id_a, id_b), max(id_a, id_b)) to normalize direction.
+    /// Prevents rapid re-initiation (10s cooldown), not for rate limiting (handled by OpenClawManager).
     pub dm_cooldowns: Arc<RwLock<HashMap<(Uuid, Uuid), tokio::time::Instant>>>,
 }
 

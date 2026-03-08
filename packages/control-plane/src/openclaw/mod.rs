@@ -1,4 +1,7 @@
+mod rate_limiter;
+
 use anyhow::{anyhow, Result};
+use rate_limiter::AdaptiveRateLimiter;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
@@ -24,6 +27,8 @@ pub struct OpenClawManager {
     image: String,
     /// Base port for OpenClaw gateways (each agent gets base_port + offset)
     base_port: u16,
+    /// Adaptive rate limiter for upstream LLM API calls (handles 429s)
+    rate_limiter: AdaptiveRateLimiter,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +75,7 @@ impl OpenClawManager {
             multiclaw_api_url,
             image: "ghcr.io/openclaw/openclaw:latest".to_string(),
             base_port: 18790,
+            rate_limiter: AdaptiveRateLimiter::new(),
         }
     }
 
@@ -294,8 +300,15 @@ impl OpenClawManager {
             body["instructions"] = serde_json::Value::String(inst.to_string());
         }
 
-        let max_retries = 3u32;
-        for attempt in 0..max_retries {
+        let max_retries = 5u32;
+        let max_429_retries = 6u32;
+        let mut attempts_429 = 0u32;
+        let mut attempt = 0u32;
+
+        loop {
+            // Wait for rate limiter permit before each request
+            self.rate_limiter.wait_for_permit().await;
+
             let resp = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", instance.gateway_token))
@@ -307,6 +320,8 @@ impl OpenClawManager {
 
             match resp {
                 Ok(r) if r.status().is_success() => {
+                    self.rate_limiter.record_success().await;
+
                     let resp_body: serde_json::Value = r.json().await
                         .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
 
@@ -349,11 +364,45 @@ impl OpenClawManager {
 
                     return Ok(text);
                 }
+                // Handle 429 Too Many Requests with exponential backoff
+                Ok(r) if r.status().as_u16() == 429 => {
+                    attempts_429 += 1;
+                    self.rate_limiter.record_rate_limited().await;
+
+                    if attempts_429 >= max_429_retries {
+                        return Err(anyhow!(
+                            "Rate limited by upstream after {} retries for {}",
+                            attempts_429, instance.agent_name
+                        ));
+                    }
+
+                    // Respect Retry-After header if present, otherwise exponential backoff
+                    let retry_after = r.headers()
+                        .get("retry-after")
+                        .and_then(|v| v.to_str().ok())
+                        .and_then(|v| v.parse::<u64>().ok());
+
+                    let wait = if let Some(secs) = retry_after {
+                        std::time::Duration::from_secs(secs)
+                    } else {
+                        let base_ms = 2u64.pow(attempts_429) * 1000;
+                        let jitter_ms = rand::random::<u64>() % 1000;
+                        std::time::Duration::from_millis(base_ms + jitter_ms)
+                    };
+
+                    tracing::warn!(
+                        "429 from upstream for {} (attempt {}/{}), backing off {:?}",
+                        instance.agent_name, attempts_429, max_429_retries, wait
+                    );
+                    tokio::time::sleep(wait).await;
+                    continue; // Does NOT consume a regular retry attempt
+                }
                 Ok(r) if matches!(r.status().as_u16(), 404 | 502 | 503) && attempt < max_retries - 1 => {
                     tracing::warn!(
                         "Transient {} from {}, retrying in 3s ({}/{})",
                         r.status(), instance.agent_name, attempt + 1, max_retries
                     );
+                    attempt += 1;
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
@@ -371,6 +420,7 @@ impl OpenClawManager {
                         "OpenClaw connection error for {}, retrying in 3s ({}/{}): {}",
                         instance.agent_name, attempt + 1, max_retries, e
                     );
+                    attempt += 1;
                     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     continue;
                 }
@@ -380,7 +430,6 @@ impl OpenClawManager {
                 }
             }
         }
-        unreachable!()
     }
 
     /// Stop an agent's OpenClaw instance.

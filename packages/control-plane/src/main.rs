@@ -154,13 +154,13 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Cleanup stale DM cooldowns every 5 minutes
+    // Cleanup stale DM cooldowns every 60 seconds
     let dm_cooldowns_clone = app_state.dm_cooldowns.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             let mut cooldowns = dm_cooldowns_clone.write().await;
-            cooldowns.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(120));
+            cooldowns.retain(|_, instant| instant.elapsed() < std::time::Duration::from_secs(10));
         }
     });
 
