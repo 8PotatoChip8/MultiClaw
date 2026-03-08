@@ -2,7 +2,7 @@
 import '../styles/globals.css';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Settings } from 'lucide-react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
@@ -14,6 +14,7 @@ const navItems = [
     { href: '/approvals', icon: CheckSquare, label: 'Approvals' },
     { href: '/services', icon: Briefcase, label: 'Services' },
     { href: '/ledger', icon: Wallet, label: 'Ledger' },
+    { href: '/secrets', icon: Key, label: 'Secrets' },
     { href: '/settings', icon: Settings, label: 'Settings' },
 ];
 

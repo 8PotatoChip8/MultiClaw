@@ -56,7 +56,8 @@ All stored messages (chat, DMs, approvals) are automatically scrubbed of known s
 ## DM Anti-Loop Protection
 Agent-to-agent DMs support automatic multi-turn conversations where agents take turns responding. Multiple safeguards prevent these conversations from running away:
 
-1. **Depth limit**: Each conversation is capped at `MAX_DM_DEPTH` (5) turns. After 5 exchanges, the conversation stops naturally.
-2. **Pair cooldown**: After a conversation between two agents completes, a 2-minute cooldown blocks new conversations between the same pair. This prevents agents from starting fresh conversations to circumvent the depth limit.
-3. **Quarantine checks**: Before each message in a conversation, both agents' quarantine status is checked. If either agent is quarantined mid-conversation, the conversation stops immediately.
-4. **Rate limiting**: Agents are limited to 10 messages per minute per sender.
+1. **Natural endings**: Each agent receives instructions to end the conversation naturally by signaling `[END_CONVERSATION]` when they have nothing more to add. The tag is stripped before storing messages — users never see it.
+2. **Safety ceiling**: If an agent fails to signal completion, a hard limit of 50 turns stops the conversation to prevent truly runaway loops.
+3. **Pair cooldown**: After a conversation between two agents completes, a 2-minute cooldown blocks new conversations between the same pair. This prevents agents from starting fresh conversations immediately after one ends.
+4. **Quarantine checks**: Before each message in a conversation, both agents' quarantine status is checked. If either agent is quarantined mid-conversation, the conversation stops immediately.
+5. **Rate limiting**: Agents are limited to 10 messages per minute per sender.

@@ -133,4 +133,17 @@ export const api = {
     getSettings: () => request('/system/settings'),
     updateSettings: (data: Record<string, string>) =>
         request('/system/settings', { method: 'PUT', body: JSON.stringify(data) }),
+
+    // Secrets
+    getSecrets: (scopeType?: string, scopeId?: string) => {
+        const params = new URLSearchParams();
+        if (scopeType) params.set('scope_type', scopeType);
+        if (scopeId) params.set('scope_id', scopeId);
+        const qs = params.toString();
+        return request(`/secrets${qs ? `?${qs}` : ''}`);
+    },
+    createSecret: (data: { scope_type: string; scope_id: string; name: string; value: string }) =>
+        request('/secrets', { method: 'POST', body: JSON.stringify(data) }),
+    deleteSecret: (id: string) =>
+        request(`/secrets/${id}`, { method: 'DELETE' }),
 };

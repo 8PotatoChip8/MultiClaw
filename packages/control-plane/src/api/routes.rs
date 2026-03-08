@@ -14,10 +14,21 @@ use super::ws::{events_handler, AppState};
 use crate::db::models::*;
 use crate::provisioning::vm_provider::{VmProvider, VmResources};
 
-/// Maximum reply depth for agent-to-agent DM conversations.
-/// Depth 0 = initial message, each response increments by 1.
-/// With MAX_DM_DEPTH=5, agents can exchange up to 3 full back-and-forth rounds.
-const MAX_DM_DEPTH: i32 = 5;
+/// Maximum reply depth for thread messages (user-to-agent or agent-to-agent in threads).
+/// Prevents infinite reply chains in regular thread conversations.
+const MAX_THREAD_REPLY_DEPTH: i32 = 5;
+
+/// Safety ceiling for agent-to-agent DM conversations.
+/// Conversations should end naturally via [END_CONVERSATION] signal, but this
+/// hard limit prevents truly runaway loops if the signal is never produced.
+const DM_SAFETY_LIMIT: i32 = 50;
+
+/// System instructions injected into each DM turn so agents end conversations naturally.
+const DM_INSTRUCTIONS: &str = "You are in a direct message conversation with a colleague. \
+    Communicate naturally — ask questions, share information, and respond as needed. \
+    When the conversation has reached a natural conclusion and you have nothing more to add, \
+    end your final message with the exact tag [END_CONVERSATION] on its own line. \
+    Do NOT use this tag if the other person asked you a question or if there are unresolved topics.";
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 pub fn app_router(state: AppState) -> Router {
@@ -1141,7 +1152,7 @@ async fn send_message(
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
             // Trigger agent responses for USER or AGENT senders (with depth-based loop prevention)
-            if (sender_type == "USER" || sender_type == "AGENT") && reply_depth < MAX_DM_DEPTH {
+            if (sender_type == "USER" || sender_type == "AGENT") && reply_depth < MAX_THREAD_REPLY_DEPTH {
                 let user_text = p.content.get("text")
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
@@ -1224,7 +1235,7 @@ async fn send_message(
 
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
-                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(*responding_agent_id, &user_text).await {
+                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(*responding_agent_id, &user_text, None).await {
                                 Ok(response) => {
                                     tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
                                     Ok(response)
@@ -1384,7 +1395,7 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
         );
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let _ = state_clone.openclaw.send_message(superior_id, &dm_text).await;
+            let _ = state_clone.openclaw.send_message(superior_id, &dm_text, None).await;
         });
     }
 
@@ -1440,7 +1451,7 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
         let msg = format!("Your request \"{}\" (ID: {}) has been {}.{}", req_type.replace('_', " "), request_id, decision, note_text);
         let state_clone = state.clone();
         tokio::spawn(async move {
-            let _ = state_clone.openclaw.send_message(agent_id, &msg).await;
+            let _ = state_clone.openclaw.send_message(agent_id, &msg, None).await;
         });
     }
 }
@@ -1501,7 +1512,7 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                 );
                 let state_clone = state.clone();
                 tokio::spawn(async move {
-                    let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text).await;
+                    let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text, None).await;
                 });
                 (StatusCode::OK, Json(json!({"status":"escalated","next_approver_id": next_superior_id})))
             }
@@ -1811,7 +1822,7 @@ async fn agent_dm(
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
-            // Conversation loop: agents take turns responding up to MAX_DM_DEPTH
+            // Conversation loop: agents take turns responding until conversation ends naturally
             let state_clone = state.clone();
             let text = p.message.clone();
             tokio::spawn(async move {
@@ -1830,15 +1841,23 @@ async fn agent_dm(
                         break;
                     }
 
-                    let result = state_clone.openclaw.send_message(responder_id, &current_text).await;
+                    let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(DM_INSTRUCTIONS)).await;
                     current_depth += 1;
 
                     match result {
                         Ok(response) => {
-                            // Scrub secrets before storing
+                            // Check if the agent signaled the conversation is complete
+                            let conversation_complete = response.trim().ends_with("[END_CONVERSATION]");
+                            let clean_response = if conversation_complete {
+                                response.trim().trim_end_matches("[END_CONVERSATION]").trim().to_string()
+                            } else {
+                                response.clone()
+                            };
+
+                            // Scrub secrets before storing (use clean response without tag)
                             let scrubbed = if let Some(ref crypto) = state_clone.crypto {
-                                scrub_secrets(&state_clone.db, crypto, responder_id, &response).await
-                            } else { response.clone() };
+                                scrub_secrets(&state_clone.db, crypto, responder_id, &clean_response).await
+                            } else { clean_response.clone() };
                             let resp_id = Uuid::new_v4();
                             let resp_content = json!({"text": scrubbed});
                             if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
@@ -1849,15 +1868,21 @@ async fn agent_dm(
                                 let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
                             }
 
-                            // Stop if we've reached max depth
-                            if current_depth >= MAX_DM_DEPTH {
-                                tracing::info!("DM conversation on thread {} reached max depth {}", thread_id, MAX_DM_DEPTH);
+                            // End if the agent signaled conversation is complete
+                            if conversation_complete {
+                                tracing::info!("DM conversation on thread {} ended naturally at depth {}", thread_id, current_depth);
+                                break;
+                            }
+
+                            // Safety ceiling to prevent truly runaway conversations
+                            if current_depth >= DM_SAFETY_LIMIT {
+                                tracing::warn!("DM conversation on thread {} hit safety limit {}", thread_id, DM_SAFETY_LIMIT);
                                 break;
                             }
 
                             // Swap roles: the other agent now responds to this one's message
                             std::mem::swap(&mut responder_id, &mut other_id);
-                            current_text = response;
+                            current_text = clean_response;
                         }
                         Err(e) => {
                             tracing::warn!("OpenClaw unavailable for agent {}: {}", responder_id, e);
@@ -1879,7 +1904,7 @@ async fn agent_dm(
                                  You should retry sending this message later when they come back online.",
                                 agent_name
                             );
-                            let _ = state_clone.openclaw.send_message(other_id, &failure_notice).await;
+                            let _ = state_clone.openclaw.send_message(other_id, &failure_notice, None).await;
                             break;
                         }
                     }
@@ -2173,7 +2198,7 @@ async fn agent_send_file(
             "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
             sender_name, notify_filename, notify_dest, notify_size
         );
-        let _ = openclaw.send_message(receiver_id, &msg).await;
+        let _ = openclaw.send_message(receiver_id, &msg, None).await;
     });
 
     // Broadcast WebSocket event

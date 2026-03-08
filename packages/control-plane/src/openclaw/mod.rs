@@ -247,7 +247,7 @@ impl OpenClawManager {
 
     /// Send a message to an agent's OpenClaw instance and get the response.
     /// Uses the HTTP /v1/responses endpoint.
-    pub async fn send_message(&self, agent_id: Uuid, message: &str) -> Result<String> {
+    pub async fn send_message(&self, agent_id: Uuid, message: &str, instructions: Option<&str>) -> Result<String> {
         // Wait for instance to be ready if it's still starting
         let instance = {
             let mut retries = 0;
@@ -286,10 +286,13 @@ impl OpenClawManager {
         // Use HTTP POST to OpenClaw's /v1/responses endpoint (with retry for transient errors)
         let url = format!("http://127.0.0.1:{}/v1/responses", instance.port);
         let client = reqwest::Client::new();
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": format!("ollama/{}", instance.model),
             "input": message,
         });
+        if let Some(inst) = instructions {
+            body["instructions"] = serde_json::Value::String(inst.to_string());
+        }
 
         let max_retries = 3u32;
         for attempt in 0..max_retries {
