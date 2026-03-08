@@ -61,9 +61,11 @@ curl -X POST http://127.0.0.1:8080/v1/secrets \
     "scope_type": "agent",
     "scope_id": "<agent-uuid>",
     "name": "API_KEY",
-    "value": "your-secret-value"
+    "value": "your-secret-value",
+    "description": "Full-access API key for trading operations"
   }'
 ```
+The `description` field is optional but recommended — it helps agents choose the right credential when multiple secrets exist for the same service.
 
 **Scope types:**
 - `agent` — Only the specified agent can access it.
@@ -82,7 +84,8 @@ curl -X POST http://127.0.0.1:8080/v1/secrets \
     "scope_type": "manager",
     "scope_id": "<manager-uuid>",
     "name": "EXCHANGE_API_KEY",
-    "value": "your-department-api-key"
+    "value": "your-department-api-key",
+    "description": "Read-only exchange API key for market data research"
   }'
 ```
 This gives the manager and all their workers access to the secret. Other departments in the same company won't see it.

@@ -77,6 +77,8 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
 
 You have two computers at your desk — a personal work computer and a testing environment.
 
+**Important:** Computers take up to a few minutes to boot after provisioning or starting. After calling `vm/provision` or `vm/start`, check the status with `vm/info` and wait for the state to be `RUNNING` before running commands. If a command fails because the computer isn't ready yet, wait a moment and try again.
+
 ### Your Personal Work Computer
 
 Your personal work computer is persistent — it stores your projects, programs, and files between sessions. It is yours for the long term. You cannot wipe it.
@@ -274,11 +276,19 @@ curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/file-transfers
 
 ## Secrets — Access Sensitive Data
 
+### List Your Available Secrets
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/secrets
+```
+Returns a JSON array of secret names and descriptions available to you (never the actual values). Use this to discover what credentials you have access to before starting a task.
+
 ### Fetch a Secret by Name
 ```bash
 curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/secrets/SECRET_NAME
 ```
 Returns `{"name": "...", "value": "..."}`. Use this for API keys, passwords, and other credentials.
+
+**Choosing the right credential:** You may have multiple secrets for the same service (e.g., a read-only key and a full-access key). List your available secrets to see their descriptions, then use the most appropriate one for the task at hand. For example, use a read-only key when fetching data and a full-access key only when you need to make changes.
 
 **CRITICAL:** Never paste secret values into messages, DMs, or conversations. Access them via this API and use them only in commands (e.g., as HTTP headers or environment variables). Secret values in messages will be automatically redacted.
 

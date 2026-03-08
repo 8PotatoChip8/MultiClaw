@@ -72,6 +72,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
         .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
+        .route("/v1/agents/:id/secrets", get(list_agent_secrets))
         .route("/v1/agents/:id/secrets/:name", get(get_agent_secret))
         // Secrets
         .route("/v1/secrets", get(list_secrets).post(create_secret))
@@ -2785,10 +2786,11 @@ async fn delete_agent_memory(State(state): State<AppState>, Path((id, mid)): Pat
 
 #[derive(Debug, Deserialize)]
 struct CreateSecretRequest {
-    scope_type: String,  // "agent", "company", "holding"
+    scope_type: String,  // "agent", "manager", "company", "holding"
     scope_id: Uuid,
     name: String,        // e.g., "coinex_api_key"
     value: String,       // plaintext — will be encrypted before storage
+    description: Option<String>, // human-readable description of what the secret is for
 }
 
 #[derive(Debug, Deserialize)]
@@ -2816,11 +2818,12 @@ async fn create_secret(
     };
 
     let id = Uuid::new_v4();
+    let desc = p.description.as_deref().unwrap_or("");
     match sqlx::query(
-        "INSERT INTO secrets (id, scope_type, scope_id, kind, ciphertext) VALUES ($1,$2,$3,$4,$5)"
-    ).bind(id).bind(&p.scope_type).bind(p.scope_id).bind(&p.name).bind(&ciphertext)
+        "INSERT INTO secrets (id, scope_type, scope_id, kind, ciphertext, description) VALUES ($1,$2,$3,$4,$5,$6)"
+    ).bind(id).bind(&p.scope_type).bind(p.scope_id).bind(&p.name).bind(&ciphertext).bind(desc)
     .execute(&state.db).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": p.name, "scope_type": p.scope_type, "scope_id": p.scope_id}))),
+        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": p.name, "scope_type": p.scope_type, "scope_id": p.scope_id, "description": desc}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)}))),
     }
 }
@@ -2829,18 +2832,18 @@ async fn list_secrets(
     State(state): State<AppState>, Query(q): Query<SecretsQuery>
 ) -> impl IntoResponse {
     // Return metadata only — NEVER return plaintext values
-    let secrets: Vec<(Uuid, String, Uuid, String, chrono::DateTime<chrono::Utc>)> = if let (Some(st), Some(si)) = (&q.scope_type, &q.scope_id) {
+    let secrets: Vec<(Uuid, String, Uuid, String, String, chrono::DateTime<chrono::Utc>)> = if let (Some(st), Some(si)) = (&q.scope_type, &q.scope_id) {
         sqlx::query_as(
-            "SELECT id, scope_type, scope_id, kind, created_at FROM secrets WHERE scope_type = $1 AND scope_id = $2 ORDER BY created_at DESC"
+            "SELECT id, scope_type, scope_id, kind, description, created_at FROM secrets WHERE scope_type = $1 AND scope_id = $2 ORDER BY created_at DESC"
         ).bind(st).bind(si).fetch_all(&state.db).await.unwrap_or_default()
     } else {
         sqlx::query_as(
-            "SELECT id, scope_type, scope_id, kind, created_at FROM secrets ORDER BY created_at DESC"
+            "SELECT id, scope_type, scope_id, kind, description, created_at FROM secrets ORDER BY created_at DESC"
         ).fetch_all(&state.db).await.unwrap_or_default()
     };
 
-    let result: Vec<Value> = secrets.iter().map(|(id, st, si, kind, created)| {
-        json!({"id": id, "scope_type": st, "scope_id": si, "name": kind, "created_at": created})
+    let result: Vec<Value> = secrets.iter().map(|(id, st, si, kind, desc, created)| {
+        json!({"id": id, "scope_type": st, "scope_id": si, "name": kind, "description": desc, "created_at": created})
     }).collect();
 
     (StatusCode::OK, Json(json!(result)))
@@ -2855,6 +2858,68 @@ async fn delete_secret(
     };
     let _ = sqlx::query("DELETE FROM secrets WHERE id = $1").bind(secret_id).execute(&state.db).await;
     (StatusCode::OK, Json(json!({"status":"deleted"})))
+}
+
+/// List all secrets accessible to an agent (names and descriptions only, never values).
+/// Uses the same hierarchical scope logic as get_agent_secret.
+async fn list_agent_secrets(
+    State(state): State<AppState>, Path(id): Path<String>
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))),
+    };
+
+    // Get agent's company_id, holding_id, parent_agent_id, and role for hierarchical lookup
+    let agent_info: Option<(Option<Uuid>, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT a.company_id, a.holding_id, a.parent_agent_id, a.role FROM agents a WHERE a.id = $1"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (company_id, holding_id, parent_agent_id, role) = match agent_info {
+        Some((cid, hid, pid, r)) => (cid, hid, pid, r),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
+    };
+
+    // Build hierarchical scopes: agent → manager (department) → company → holding
+    let mut scopes: Vec<(&str, Uuid)> = vec![("agent", agent_id)];
+    if role == "MANAGER" {
+        scopes.push(("manager", agent_id));
+    }
+    if let Some(pid) = parent_agent_id {
+        let parent_role: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM agents WHERE id = $1"
+        ).bind(pid).fetch_optional(&state.db).await.ok().flatten();
+        if parent_role.as_deref() == Some("MANAGER") {
+            scopes.push(("manager", pid));
+        }
+    }
+    if let Some(cid) = company_id {
+        scopes.push(("company", cid));
+    }
+    scopes.push(("holding", holding_id));
+
+    // Collect all accessible secrets (dedup by name — first scope wins, matching fetch behavior)
+    let mut seen_names = std::collections::HashSet::new();
+    let mut result: Vec<Value> = Vec::new();
+
+    for (scope_type, scope_id) in &scopes {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT kind, description FROM secrets WHERE scope_type = $1 AND scope_id = $2 ORDER BY kind"
+        ).bind(scope_type).bind(scope_id)
+        .fetch_all(&state.db).await.unwrap_or_default();
+
+        for (name, description) in rows {
+            if seen_names.insert(name.clone()) {
+                result.push(json!({
+                    "name": name,
+                    "description": description,
+                    "scope": scope_type,
+                }));
+            }
+        }
+    }
+
+    (StatusCode::OK, Json(json!(result)))
 }
 
 /// Agent fetches a secret by name. Performs hierarchical lookup:

@@ -6,6 +6,7 @@ import { Key, Plus, Trash2, Eye, EyeOff } from 'lucide-react';
 interface SecretMeta {
     id: string;
     name: string;
+    description: string;
     scope_type: string;
     scope_id: string;
     created_at: string;
@@ -26,6 +27,7 @@ export default function SecretsPage() {
     const [scopeId, setScopeId] = useState('');
     const [secretName, setSecretName] = useState('');
     const [secretValue, setSecretValue] = useState('');
+    const [secretDescription, setSecretDescription] = useState('');
     const [showValue, setShowValue] = useState(false);
     const [creating, setCreating] = useState(false);
 
@@ -61,12 +63,14 @@ export default function SecretsPage() {
             scope_id: finalScopeId,
             name: secretName.trim(),
             value: secretValue,
+            description: secretDescription.trim() || undefined,
         });
         setShowCreate(false);
         setScopeType('agent');
         setScopeId('');
         setSecretName('');
         setSecretValue('');
+        setSecretDescription('');
         setShowValue(false);
         setCreating(false);
         await loadData();
@@ -135,6 +139,7 @@ export default function SecretsPage() {
                         <thead>
                             <tr style={{ borderBottom: '1px solid var(--border)' }}>
                                 <th style={{ textAlign: 'left', padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Name</th>
+                                <th style={{ textAlign: 'left', padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Description</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Scope</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Target</th>
                                 <th style={{ textAlign: 'left', padding: '12px 16px', color: 'var(--text-muted)', fontWeight: 600, fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>Created</th>
@@ -145,6 +150,10 @@ export default function SecretsPage() {
                             {secrets.map(s => (
                                 <tr key={s.id} style={{ borderBottom: '1px solid rgba(59, 130, 246, 0.08)' }}>
                                     <td style={{ padding: '12px 16px', fontFamily: 'monospace', fontWeight: 600 }}>{s.name}</td>
+                                    <td style={{ padding: '12px 16px', color: 'var(--text-muted)', fontSize: '12px', maxWidth: '200px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                                        title={s.description || undefined}>
+                                        {s.description || <span style={{ opacity: 0.4 }}>--</span>}
+                                    </td>
                                     <td style={{ padding: '12px 16px' }}>
                                         <span style={{
                                             fontSize: '10px', padding: '2px 8px', borderRadius: '10px',
@@ -254,6 +263,23 @@ export default function SecretsPage() {
                                         background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
                                         color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
                                     }} />
+                            </div>
+
+                            {/* Description */}
+                            <div>
+                                <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: 500 }}>
+                                    Description <span style={{ fontWeight: 400, opacity: 0.6 }}>(optional)</span>
+                                </label>
+                                <input value={secretDescription} onChange={e => setSecretDescription(e.target.value)}
+                                    placeholder="e.g. Read-only API key for market data"
+                                    style={{
+                                        width: '100%', padding: '10px 12px', borderRadius: '8px',
+                                        background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                        color: 'var(--text)', fontSize: '13px',
+                                    }} />
+                                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
+                                    Helps agents choose the right credential when they have multiple secrets for the same service.
+                                </p>
                             </div>
 
                             {/* Secret Value */}

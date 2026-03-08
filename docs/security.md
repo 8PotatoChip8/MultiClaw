@@ -31,9 +31,11 @@ POST /v1/secrets
   "scope_type": "agent",
   "scope_id": "<agent-uuid>",
   "name": "COINEX_API_KEY",
-  "value": "your-secret-value"
+  "value": "your-secret-value",
+  "description": "Full-access CoinEx API key for trading operations"
 }
 ```
+The `description` field is optional but recommended — it helps agents choose the right credential when they have multiple secrets for the same service (e.g., a read-only key vs a full-access key).
 
 **Scope types:**
 - `"agent"` — Available only to the specific agent.
@@ -42,7 +44,9 @@ POST /v1/secrets
 - `"holding"` — Available to all agents across all companies.
 
 ### How Agents Retrieve Secrets
-Agents fetch secrets by name via `GET /v1/agents/:id/secrets/:name`. The lookup is **hierarchical**: agent → manager (department) → company → holding. This lets you set a company-wide default, override it per-department, and override it again per-agent.
+Agents can list all secrets available to them via `GET /v1/agents/:id/secrets` (returns names and descriptions, never values). They fetch a specific secret's value by name via `GET /v1/agents/:id/secrets/:name`. The lookup is **hierarchical**: agent → manager (department) → company → holding. This lets you set a company-wide default, override it per-department, and override it again per-agent.
+
+When an agent has multiple credentials for the same service, they are instructed to read the descriptions and choose the most appropriate one for the task at hand (e.g., using a read-only key for data fetching rather than a full-access key).
 
 ### Encryption
 Secret values are encrypted at rest with AES-GCM using the same master key as API tokens. Plaintext values are never returned by `GET /v1/secrets` (which lists metadata only) — they are only decrypted when an agent fetches a specific secret by name.

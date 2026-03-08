@@ -63,6 +63,7 @@ Authorization: Bearer <token>
 | POST | `/v1/agents/:id/memories` | Create or update an agent memory |
 | DELETE | `/v1/agents/:id/memories/:mid` | Delete a memory entry |
 | GET | `/v1/agents/:id/openclaw-files` | Read agent's OpenClaw workspace files |
+| GET | `/v1/agents/:id/secrets` | List secrets accessible to this agent (names and descriptions, never values) |
 | GET | `/v1/agents/:id/secrets/:name` | Fetch a secret by name (hierarchical lookup) |
 
 **Agent-to-Agent DM body:**
@@ -179,10 +180,11 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
   "scope_type": "agent",
   "scope_id": "uuid",
   "name": "API_KEY",
-  "value": "sk-live-..."
+  "value": "sk-live-...",
+  "description": "Read-only API key for market data"
 }
 ```
-`scope_type` can be `"agent"`, `"manager"` (department), `"company"`, or `"holding"`. Agents fetch secrets via `GET /v1/agents/:id/secrets/:name` with hierarchical lookup (agent → manager → company → holding).
+`scope_type` can be `"agent"`, `"manager"` (department), `"company"`, or `"holding"`. The `description` field is optional but recommended — it helps agents choose the right credential when they have multiple secrets for the same service. Agents can list their accessible secrets via `GET /v1/agents/:id/secrets` (names and descriptions only) and fetch by name via `GET /v1/agents/:id/secrets/:name` with hierarchical lookup (agent → manager → company → holding).
 
 ---
 
