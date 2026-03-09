@@ -95,13 +95,16 @@ export default function LedgerPage() {
 
     return (
         <div className="animate-in">
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-                <h1 style={{ fontSize: '28px', fontWeight: 700 }}>Financial Ledger</h1>
-                <button onClick={() => setShowForm(!showForm)} style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <div style={{ marginBottom: '32px', display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between' }}>
+                <div>
+                    <h1 style={{ fontSize: '28px', fontWeight: 700, marginBottom: '4px' }}>Financial Ledger</h1>
+                    <p style={{ color: 'var(--text-muted)', fontSize: '14px' }}>Track currency flows between companies. Supports fiat and crypto.</p>
+                </div>
+                <button className="button" onClick={() => setShowForm(!showForm)}
+                    style={{ display: 'flex', alignItems: 'center', gap: '6px', whiteSpace: 'nowrap' }}>
                     <Plus size={16} /> Record Entry
                 </button>
             </div>
-            <p style={{ color: 'var(--text-muted)', marginBottom: '24px', fontSize: '14px' }}>Track currency flows between companies. Supports fiat and crypto.</p>
 
             <div style={{ marginBottom: '24px' }}>
                 <select value={selectedCompany} onChange={e => setSelectedCompany(e.target.value)} style={{ maxWidth: '300px' }}>
