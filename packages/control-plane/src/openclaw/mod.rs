@@ -820,6 +820,15 @@ impl OpenClawManager {
       }
     }
   },
+  "hooks": {
+    "internal": {
+      "enabled": true,
+      "entries": {
+        "session-memory": { "enabled": true },
+        "command-logger": { "enabled": true }
+      }
+    }
+  },
   "channels": {}
 }"#
         .to_string()

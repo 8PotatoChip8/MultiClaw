@@ -66,6 +66,19 @@
     ],
   },
 
+  // Enable OpenClaw hooks for session memory and command auditing
+  hooks: {
+    internal: {
+      enabled: true,
+      entries: {
+        // Saves conversation context to workspace/memory/ on session reset
+        "session-memory": { enabled: true },
+        // Logs all command events to ~/.openclaw/logs/commands.log (JSONL)
+        "command-logger": { enabled: true },
+      },
+    },
+  },
+
   // No external messaging channels — MultiClaw is the channel
   channels: {},
 }
