@@ -567,6 +567,16 @@ impl OpenClawManager {
             }
         }
 
+        // Clear stale in-memory state — containers are gone, map entries must go too.
+        // Without this, spawn_instance's early-return guard sees stale Running/Starting
+        // entries and skips re-creation.
+        {
+            let mut instances = self.instances.write().await;
+            instances.clear();
+        }
+        // Reset port counter — all containers are wiped, so ports are free.
+        self.next_port_offset.store(0, Ordering::SeqCst);
+
         // Find all agents that should have OpenClaw instances
         let agents: Vec<(Uuid, String, String, Option<String>, Option<String>, Option<Uuid>, String)> =
             sqlx::query_as(
@@ -621,7 +631,8 @@ impl OpenClawManager {
     }
 
     /// Periodic reconciliation — check that all ACTIVE agents have running containers.
-    /// Lighter than recover_instances: only respawns containers that are missing or stopped.
+    /// Surgically respawns only the containers that are missing or stopped, leaving
+    /// healthy containers untouched.
     pub async fn reconcile_instances(&self, db_pool: &PgPool) -> Result<()> {
         // Get all ACTIVE agent IDs from DB
         let agent_ids: Vec<(Uuid,)> = sqlx::query_as(
@@ -632,45 +643,103 @@ impl OpenClawManager {
             return Ok(());
         }
 
-        let instances = self.instances.read().await;
-
-        for (agent_id,) in &agent_ids {
-            if let Some(inst) = instances.get(agent_id) {
-                // Skip instances still starting up — avoid racing the spawn
-                if inst.status == InstanceStatus::Starting {
-                    continue;
-                }
-
-                // Check if Docker container is still running
-                let inspect = tokio::process::Command::new("docker")
-                    .args(["inspect", "--format", "{{.State.Running}}", &inst.container_name])
-                    .output()
-                    .await;
-
-                let running = match inspect {
-                    Ok(output) if output.status.success() => {
-                        String::from_utf8_lossy(&output.stdout).trim() == "true"
+        // Phase 1: Identify which agents need respawning (read lock only)
+        let mut needs_respawn: Vec<Uuid> = Vec::new();
+        {
+            let instances = self.instances.read().await;
+            for (agent_id,) in &agent_ids {
+                if let Some(inst) = instances.get(agent_id) {
+                    // Skip instances still starting up — avoid racing the spawn
+                    if inst.status == InstanceStatus::Starting {
+                        continue;
                     }
-                    _ => false,
+
+                    // Check if Docker container is still running
+                    let inspect = tokio::process::Command::new("docker")
+                        .args(["inspect", "--format", "{{.State.Running}}", &inst.container_name])
+                        .output()
+                        .await;
+
+                    let running = match inspect {
+                        Ok(output) if output.status.success() => {
+                            String::from_utf8_lossy(&output.stdout).trim() == "true"
+                        }
+                        _ => false,
+                    };
+
+                    if !running {
+                        tracing::warn!(
+                            "Watchdog: container {} for agent {} is not running, will respawn",
+                            inst.container_name, inst.agent_name
+                        );
+                        needs_respawn.push(*agent_id);
+                    }
+                } else {
+                    tracing::warn!(
+                        "Watchdog: no tracked instance for active agent {}, will respawn",
+                        agent_id
+                    );
+                    needs_respawn.push(*agent_id);
+                }
+            }
+        }
+
+        if needs_respawn.is_empty() {
+            return Ok(());
+        }
+
+        // Phase 2: Remove stale entries so spawn_instance won't early-return
+        {
+            let mut instances = self.instances.write().await;
+            for agent_id in &needs_respawn {
+                instances.remove(agent_id);
+            }
+        }
+
+        // Phase 3: Fetch configs and respawn individually
+        let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
+            .fetch_optional(db_pool)
+            .await?
+            .unwrap_or_else(|| "MultiClaw Holdings".to_string());
+
+        for agent_id in needs_respawn {
+            let row: Option<(Uuid, String, String, Option<String>, Option<String>, Option<Uuid>, String)> =
+                sqlx::query_as(
+                    "SELECT a.id, a.name, a.role, a.specialty, a.system_prompt, a.company_id, a.effective_model \
+                     FROM agents a WHERE a.id = $1 AND a.status = 'ACTIVE'"
+                )
+                .bind(agent_id)
+                .fetch_optional(db_pool)
+                .await?;
+
+            if let Some((id, name, role, specialty, system_prompt, company_id, model)) = row {
+                let company_name = if let Some(cid) = company_id {
+                    sqlx::query_scalar::<_, String>("SELECT name FROM companies WHERE id = $1")
+                        .bind(cid)
+                        .fetch_optional(db_pool)
+                        .await
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| holding_name.clone())
+                } else {
+                    holding_name.clone()
                 };
 
-                if !running {
-                    tracing::warn!(
-                        "Watchdog: container {} for agent {} is not running, will respawn",
-                        inst.container_name, inst.agent_name
-                    );
-                    // Drop read lock before respawning
-                    drop(instances);
-                    // Trigger a full recovery for this cycle and return
-                    return self.recover_instances(db_pool).await;
+                let config = AgentConfig {
+                    agent_id: id,
+                    agent_name: name.clone(),
+                    role,
+                    company_name,
+                    holding_name: holding_name.clone(),
+                    specialty,
+                    model,
+                    system_prompt,
+                };
+
+                match self.spawn_instance(&config).await {
+                    Ok(_) => tracing::info!("Watchdog: respawned OpenClaw instance for {}", name),
+                    Err(e) => tracing::error!("Watchdog: failed to respawn instance for {}: {}", name, e),
                 }
-            } else {
-                tracing::warn!(
-                    "Watchdog: no tracked instance for active agent {}, will recover",
-                    agent_id
-                );
-                drop(instances);
-                return self.recover_instances(db_pool).await;
             }
         }
 
