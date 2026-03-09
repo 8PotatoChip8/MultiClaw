@@ -228,8 +228,9 @@ async fn main() -> anyhow::Result<()> {
                     // and bare "HEARTBEAT_OK". The length guard ensures a longer substantive
                     // report that happens to include the tag still gets stored.
                     let normalized = trimmed.replace('[', "").replace(']', "").replace('\n', " ");
-                    let is_heartbeat_only = normalized.trim() == "HEARTBEAT_OK"
-                        || (trimmed.contains("HEARTBEAT_OK") && trimmed.len() < 50);
+                    let compact = normalized.replace(' ', "");
+                    let is_heartbeat_only = compact.trim() == "HEARTBEATOK"
+                        || (normalized.contains("HEARTBEAT_OK") && trimmed.len() < 50);
                     if is_heartbeat_only {
                         tracing::debug!("Heartbeat: {} reports all clear", main_name);
                     } else {

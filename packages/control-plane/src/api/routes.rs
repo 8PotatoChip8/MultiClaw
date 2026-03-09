@@ -1410,16 +1410,21 @@ async fn send_message(
                             let title = thread_title.as_deref().unwrap_or("Group Chat");
                             let members = participant_names.join(", ");
                             format!(
-                                "You are responding in the group thread '{}' (participants: {}). \
-                                 The message is from {}. \
-                                 Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.",
+                                "You are responding in the group thread '{}' (participants: {}). The message is from {}. \
+                                 Send ONLY your direct response. \
+                                 Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
+                                 Do NOT include internal thoughts, planning steps, or tool-use commentary. \
+                                 The other participants see everything you write.",
                                 title, members, sender_label
                             )
                         } else {
                             format!(
                                 "You are in a direct message with {}. \
-                                 Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.",
-                                sender_label
+                                 Send ONLY your direct response. \
+                                 Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
+                                 Do NOT include internal thoughts, planning steps, or tool-use commentary. \
+                                 {} sees everything you write.",
+                                sender_label, sender_label
                             )
                         };
 
@@ -2272,8 +2277,9 @@ async fn agent_dm(
                     let dm_ctx = format!(
                         "You are in a direct message conversation with {}. \
                          Communicate naturally — ask questions, share information, and respond as needed. \
-                         Send ONLY your actual message to {}. Do NOT include your internal thoughts, \
-                         reasoning, planning, or thinking process — {} sees everything you write. \
+                         Send ONLY your actual message to {}. \
+                         NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
+                         NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
                          When the conversation has reached a natural conclusion and you have nothing more to add, \
                          end your final message with the exact tag [END_CONVERSATION] on its own line. \
                          Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
@@ -3276,6 +3282,19 @@ async fn create_secret(
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"scope_type must be 'agent', 'company', 'holding', or 'manager'"})));
     }
 
+    // For holding-scoped secrets, resolve the actual holding ID from the database.
+    // The UI doesn't have access to the holding UUID, so the backend resolves it.
+    let final_scope_id = if p.scope_type == "holding" {
+        let hid: Option<Uuid> = sqlx::query_scalar("SELECT id FROM holdings LIMIT 1")
+            .fetch_optional(&state.db).await.ok().flatten();
+        match hid {
+            Some(id) => id,
+            None => return (StatusCode::BAD_REQUEST, Json(json!({"error":"No holding found"}))),
+        }
+    } else {
+        p.scope_id
+    };
+
     // Serialize fields to JSON before encryption (supports multi-value secrets with labels)
     let plaintext = if !p.fields.is_empty() {
         let fields_json: Vec<Value> = p.fields.iter().map(|f| {
@@ -3298,9 +3317,9 @@ async fn create_secret(
     let desc = p.description.as_deref().unwrap_or("");
     match sqlx::query(
         "INSERT INTO secrets (id, scope_type, scope_id, kind, ciphertext, description) VALUES ($1,$2,$3,$4,$5,$6)"
-    ).bind(id).bind(&p.scope_type).bind(p.scope_id).bind(&p.name).bind(&ciphertext).bind(desc)
+    ).bind(id).bind(&p.scope_type).bind(final_scope_id).bind(&p.name).bind(&ciphertext).bind(desc)
     .execute(&state.db).await {
-        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": p.name, "scope_type": p.scope_type, "scope_id": p.scope_id, "description": desc}))),
+        Ok(_) => (StatusCode::CREATED, Json(json!({"id": id, "name": p.name, "scope_type": p.scope_type, "scope_id": final_scope_id, "description": desc}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)}))),
     }
 }

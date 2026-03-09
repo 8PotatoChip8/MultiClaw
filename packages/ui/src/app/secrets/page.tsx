@@ -57,7 +57,7 @@ export default function SecretsPage() {
 
         setCreating(true);
         const finalScopeId = scopeType === 'holding'
-            ? (companies.find(c => nameMap[c.id])?.id || companies[0]?.id || '')
+            ? '00000000-0000-0000-0000-000000000000'  // backend resolves actual holding_id
             : scopeId;
         await api.createSecret({
             scope_type: scopeType,
