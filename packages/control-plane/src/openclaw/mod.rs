@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use uuid::Uuid;
@@ -29,6 +30,8 @@ pub struct OpenClawManager {
     base_port: u16,
     /// Adaptive rate limiter for upstream LLM API calls (handles 429s)
     rate_limiter: AdaptiveRateLimiter,
+    /// Atomic counter for port allocation (avoids race conditions on concurrent spawns)
+    next_port_offset: Arc<AtomicU16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +79,7 @@ impl OpenClawManager {
             image: "ghcr.io/openclaw/openclaw:latest".to_string(),
             base_port: 18790,
             rate_limiter: AdaptiveRateLimiter::new(),
+            next_port_offset: Arc::new(AtomicU16::new(0)),
         }
     }
 
@@ -97,10 +101,9 @@ impl OpenClawManager {
         // Assign a port — reserve 4 ports per agent.
         // OpenClaw binds: gateway (+0), internal (+1), control service (+2), CDP relay (+3).
         // With --network host, these must not overlap between agents.
-        let port = {
-            let instances = self.instances.read().await;
-            self.base_port + (instances.len() as u16 * 4)
-        };
+        // Use atomic counter to avoid race conditions when spawning concurrently.
+        let offset = self.next_port_offset.fetch_add(4, Ordering::SeqCst);
+        let port = self.base_port + offset;
 
         // Generate gateway token
         let gateway_token = format!("{:032x}", rand::random::<u128>());

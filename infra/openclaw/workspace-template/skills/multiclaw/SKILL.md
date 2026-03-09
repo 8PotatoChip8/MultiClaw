@@ -44,8 +44,8 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies \
   -d '{"name": "COMPANY_NAME", "type": "INTERNAL", "description": "DESCRIPTION"}'
 ```
 
-- `INTERNAL` = wholly-owned subsidiary
-- `EXTERNAL` = external partner or client company
+- `INTERNAL` = a company that only serves other companies within the holding (not public-facing)
+- `EXTERNAL` = a company whose purpose is to deal with the public (real people and outside companies)
 
 ### View Company Org Tree
 ```bash

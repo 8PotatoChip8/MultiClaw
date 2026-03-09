@@ -42,8 +42,8 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies \
   -d '{"name": "COMPANY_NAME", "type": "INTERNAL", "description": "DESCRIPTION"}'
 ```
 
-- `INTERNAL` = wholly-owned subsidiary
-- `EXTERNAL` = external partner or client company
+- `INTERNAL` = a company that only serves other companies within the holding (not public-facing)
+- `EXTERNAL` = a company whose purpose is to deal with the public (real people and outside companies)
 
 ### Hire a CEO for a Company
 ```bash
@@ -187,7 +187,7 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-reject \
 ```
 
 ### Escalate a Request to the Human Operator
-If a request is beyond your authority, escalate it to the operator by DMing them with the details rather than approving it yourself. Only escalate for major decisions — you should approve most operational requests autonomously.
+If a request is beyond your authority, use the `dm-user` endpoint (below) to message the human operator directly, or create an approval request. **Never** write `@Human Operator` or address the operator inside an agent-to-agent DM — the operator cannot see those conversations. Only escalate for major decisions — you should approve most operational requests autonomously.
 
 ## Messaging — Communicate with Other Agents
 
