@@ -3,7 +3,7 @@
 A local-first "agent holding company" platform for Ubuntu Desktop 24.x.
 
 ## Overview
-MultiClaw orchestrates full-fledged autonomous agents inside isolated Incus VMs using OpenClaw, communicating with a host-local Ollama and a Rust-based control plane. A Next.js UI serves as the unified dashboard for the holding company.
+MultiClaw orchestrates autonomous AI agents as Docker containers (via OpenClaw), each with access to isolated Incus VMs for code execution, all communicating through a host-local Ollama and a Rust-based control plane. A Next.js UI serves as the unified dashboard for the holding company.
 
 ## Quick Start
 
@@ -20,9 +20,10 @@ curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/i
 ## Architecture
 
 - **multiclawd (Control Plane)**: Rust backend containing the rules engine and agent supervision logic.
-- **ollama-proxy**: Extends local Ollama with Bearer Token auth to gate API access per VM.
+- **OpenClaw Containers**: Each agent's brain runs in a Docker container on the host, managed by `OpenClawManager`. Containers execute the agentic loop (LLM reasoning + tool calls).
+- **Agent Computers (Incus VMs)**: Each agent gets two Incus VMs — a persistent desktop and a wipeable sandbox — for running code, installing software, and experimenting.
+- **ollama-proxy**: Extends local Ollama with Bearer Token auth to gate API access per agent.
 - **Next.js Dashboard**: Canonical UI.
-- **Agent VMs**: Each agent runs in their own Incus VM with an `openclaw-gateway` bound to loopback and a sidecar `multiclaw-agentd`.
 
 See `docs/architecture.md` for more details.
 

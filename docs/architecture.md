@@ -3,18 +3,21 @@
 MultiClaw is an autonomous agent holding company platform built for local-first operations on Ubuntu 24.04.
 
 ## Core Components
+
+Each agent has three layers: a **Docker container** running the agent's brain (OpenClaw), plus **two Incus VMs** acting as the agent's computers (desktop + sandbox), all orchestrated by the **control plane**.
+
 1. **multiclawd (Control Plane)**
    Rust backend providing the central API, policy engine, user state, and holding company configuration. Uses PostgreSQL to store configurations.
 2. **Next.js UI**
    Front-end dashboard communicating with `multiclawd` over HTTP and WebSockets.
-3. **Incus VM Provisioning**
-   Agents are hosted in Incus VMs running OpenClaw. `multiclawd` coordinates with the host `incus` CLI via `subprocess` for MVP provisioning.
-4. **multiclaw-agentd (Sidecar)**
+3. **OpenClaw Containers (Agent Brains)**
+   Each agent's brain runs in a Docker container on the host, managed by `OpenClawManager`. The control plane starts containers on demand and stops them during quarantine (`agent_panic()`). The container runs the OpenClaw `/v1/responses` endpoint, which executes the full agentic loop including tool calls (bash, curl, etc.). Workspace files are volume-mounted from the host so skills and files are immediately available.
+4. **Agent Computers (Incus VMs)**
+   Each agent's two computers (desktop and sandbox) are Incus VMs. `multiclawd` coordinates with the host `incus` CLI for VM provisioning.
+5. **multiclaw-agentd (Sidecar)**
    A Rust daemon running inside each Agent VM. Provides an entrypoint for control plane messages and an `ollama-bridge` proxy over 127.0.0.1:11435.
-5. **ollama-proxy (Host Proxy)**
+6. **ollama-proxy (Host Proxy)**
    Host daemon that forwards requests to local Ollama. Validates incoming requests using Bearer tokens injected by `multiclaw-agentd`.
-6. **OpenClaw Containers**
-   Each agent's brain runs in a Docker container managed by `OpenClawManager`. The control plane starts containers on demand and stops them during quarantine (`agent_panic()`). The container runs the OpenClaw `/v1/responses` endpoint, which executes the full agentic loop including tool calls (bash, curl, etc.).
 
 ## Two-VM Architecture
 Each agent receives two Incus VMs:
