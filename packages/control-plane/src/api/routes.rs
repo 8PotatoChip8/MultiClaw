@@ -23,14 +23,6 @@ const MAX_THREAD_REPLY_DEPTH: i32 = 5;
 /// hard limit prevents truly runaway loops if the signal is never produced.
 const DM_SAFETY_LIMIT: i32 = 50;
 
-/// System instructions injected into each DM turn so agents end conversations naturally.
-const DM_INSTRUCTIONS: &str = "You are in a direct message conversation with a colleague. \
-    Communicate naturally — ask questions, share information, and respond as needed. \
-    Send ONLY your actual message to your colleague. Do NOT include your internal thoughts, \
-    reasoning, planning, or thinking process — the other person sees everything you write. \
-    When the conversation has reached a natural conclusion and you have nothing more to add, \
-    end your final message with the exact tag [END_CONVERSATION] on its own line. \
-    Do NOT use this tag if the other person asked you a question or if there are unresolved topics.";
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 /// Strip known system tags and model artifacts from agent responses.
@@ -1394,12 +1386,49 @@ async fn send_message(
                             responding_agents.retain(|id| *id != sender_id);
                         }
 
+                        // Build context-aware instructions so agents know their conversation context
+                        let thread_title: Option<String> = sqlx::query_scalar(
+                            "SELECT title FROM threads WHERE id = $1"
+                        ).bind(tid).fetch_optional(&state_clone.db).await.ok().flatten();
+
+                        let participant_names: Vec<String> = sqlx::query_scalar(
+                            "SELECT a.name FROM agents a JOIN thread_members tm ON a.id = tm.member_id \
+                             WHERE tm.thread_id = $1 AND tm.member_type = 'AGENT'"
+                        ).bind(tid).fetch_all(&state_clone.db).await.unwrap_or_default();
+
+                        let sender_label = if is_agent_sender {
+                            // Look up the sending agent's name
+                            let name: Option<String> = sqlx::query_scalar(
+                                "SELECT name FROM agents WHERE id = $1"
+                            ).bind(sender_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                            name.unwrap_or_else(|| "an agent".to_string())
+                        } else {
+                            "the human operator".to_string()
+                        };
+
+                        let thread_context = if thread_type == "GROUP" {
+                            let title = thread_title.as_deref().unwrap_or("Group Chat");
+                            let members = participant_names.join(", ");
+                            format!(
+                                "You are responding in the group thread '{}' (participants: {}). \
+                                 The message is from {}. \
+                                 Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.",
+                                title, members, sender_label
+                            )
+                        } else {
+                            format!(
+                                "You are in a direct message with {}. \
+                                 Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.",
+                                sender_label
+                            )
+                        };
+
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
                             state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
                                 *responding_agent_id, &user_text,
-                                Some("Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.")
+                                Some(&thread_context)
                             ).await {
                                 Ok(response) => {
                                     tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
@@ -2236,8 +2265,23 @@ async fn agent_dm(
                         break;
                     }
 
+                    // Build DM instructions with the conversation partner's name
+                    let partner_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten()
+                        .unwrap_or_else(|| "a colleague".into());
+                    let dm_ctx = format!(
+                        "You are in a direct message conversation with {}. \
+                         Communicate naturally — ask questions, share information, and respond as needed. \
+                         Send ONLY your actual message to {}. Do NOT include your internal thoughts, \
+                         reasoning, planning, or thinking process — {} sees everything you write. \
+                         When the conversation has reached a natural conclusion and you have nothing more to add, \
+                         end your final message with the exact tag [END_CONVERSATION] on its own line. \
+                         Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
+                        partner_name, partner_name, partner_name, partner_name
+                    );
+
                     state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
-                    let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(DM_INSTRUCTIONS)).await;
+                    let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(&dm_ctx)).await;
                     state_clone.mark_agent_done(responder_id).await;
                     current_depth += 1;
 
