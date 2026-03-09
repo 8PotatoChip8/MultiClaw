@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sqlx::PgPool;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use uuid::Uuid;
 
 /// The Main Agent runs in-process inside multiclawd, not inside a VM.
@@ -15,6 +17,7 @@ pub struct MainAgent {
     model: String,
     ollama_url: String,
     client: Client,
+    tx: Arc<broadcast::Sender<String>>,
 }
 
 #[derive(Serialize)]
@@ -39,7 +42,7 @@ struct MessageObj {
 }
 
 impl MainAgent {
-    pub fn new(name: String, model: String, ollama_url: String) -> Self {
+    pub fn new(name: String, model: String, ollama_url: String, tx: Arc<broadcast::Sender<String>>) -> Self {
         Self {
             name,
             model,
@@ -48,6 +51,7 @@ impl MainAgent {
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
+            tx,
         }
     }
 
@@ -341,6 +345,38 @@ impl MainAgent {
                     }
                 }
             }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "create_tool_for_agent",
+                    "description": "Create a new tool/skill for an agent and deliver it to their workspace. Use this when approving a REQUEST_TOOL request. Write the full SKILL.md content including usage instructions and curl examples.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "agent_id": { "type": "string", "description": "UUID of the agent to receive the tool" },
+                            "tool_name": { "type": "string", "description": "Short slug name for the tool (alphanumeric and hyphens only, e.g. 'coingecko-api')" },
+                            "skill_content": { "type": "string", "description": "Full Markdown content for the SKILL.md file, including description, usage instructions, and curl examples" },
+                            "request_id": { "type": "string", "description": "UUID of the REQUEST_TOOL request to mark as approved (optional)" }
+                        },
+                        "required": ["agent_id", "tool_name", "skill_content"]
+                    }
+                }
+            }),
+            json!({
+                "type": "function",
+                "function": {
+                    "name": "escalate_tool_request_to_user",
+                    "description": "Escalate a tool request to the human operator for approval. Use this when the requested tool involves risky operations (financial transactions, external messaging, infrastructure access, etc.).",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "request_id": { "type": "string", "description": "UUID of the REQUEST_TOOL request to escalate" },
+                            "reason": { "type": "string", "description": "Why this tool request needs human approval" }
+                        },
+                        "required": ["request_id", "reason"]
+                    }
+                }
+            }),
         ]
     }
 
@@ -368,6 +404,8 @@ impl MainAgent {
             "save_memory" => self.tool_save_memory(db_pool, args).await,
             "recall_memories" => self.tool_recall_memories(db_pool, args).await,
             "forget_memory" => self.tool_forget_memory(db_pool, args).await,
+            "create_tool_for_agent" => self.tool_create_tool_for_agent(db_pool, args).await,
+            "escalate_tool_request_to_user" => self.tool_escalate_tool_request(db_pool, args).await,
             _ => format!("Unknown tool: {}", name),
         }
     }
@@ -757,6 +795,141 @@ impl MainAgent {
                 }
             }
             Err(e) => format!("Failed to forget memory: {}", e),
+        }
+    }
+
+    async fn tool_create_tool_for_agent(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let agent_id_str = args.get("agent_id").and_then(|v| v.as_str()).unwrap_or("");
+        let agent_id = match Uuid::parse_str(agent_id_str) {
+            Ok(u) => u,
+            Err(_) => return format!("Invalid agent_id: '{}'", agent_id_str),
+        };
+        let tool_name = args.get("tool_name").and_then(|v| v.as_str()).unwrap_or("");
+        let skill_content = args.get("skill_content").and_then(|v| v.as_str()).unwrap_or("");
+        let request_id_str = args.get("request_id").and_then(|v| v.as_str());
+
+        // Sanitize tool_name: only allow alphanumeric and hyphens
+        let sanitized_name: String = tool_name.chars()
+            .filter(|c| c.is_alphanumeric() || *c == '-')
+            .collect();
+        if sanitized_name.is_empty() {
+            return "Error: tool_name must contain at least one alphanumeric character".to_string();
+        }
+
+        // Get the openclaw data directory
+        let data_dir = std::env::var("MULTICLAW_OPENCLAW_DATA")
+            .unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
+
+        // Build path: {data_dir}/{agent_id}/workspace/skills/{tool_name}/
+        let skill_dir = std::path::PathBuf::from(&data_dir)
+            .join(agent_id.to_string())
+            .join("workspace")
+            .join("skills")
+            .join(&sanitized_name);
+
+        // Create the directory
+        if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
+            return format!("Failed to create skill directory: {}", e);
+        }
+
+        // Write SKILL.md
+        let skill_path = skill_dir.join("SKILL.md");
+        if let Err(e) = tokio::fs::write(&skill_path, skill_content).await {
+            return format!("Failed to write SKILL.md: {}", e);
+        }
+
+        // Fix ownership so the OpenClaw container (uid 1000) can read it
+        let _ = tokio::process::Command::new("chown")
+            .args(["-R", "1000:1000", &skill_dir.to_string_lossy()])
+            .output()
+            .await;
+
+        // Mark request as APPROVED if request_id provided
+        if let Some(req_id_str) = request_id_str {
+            if let Ok(req_id) = Uuid::parse_str(req_id_str) {
+                let approval_id = Uuid::new_v4();
+                // Get MainAgent's agent ID for the approver
+                let main_id: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                ).fetch_optional(db_pool).await.ok().flatten();
+
+                let _ = sqlx::query(
+                    "INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) \
+                     VALUES ($1,$2,'AGENT',$3,'APPROVE',$4)"
+                )
+                .bind(approval_id)
+                .bind(req_id)
+                .bind(main_id.unwrap_or(Uuid::new_v4()))
+                .bind(format!("Tool '{}' created and delivered", sanitized_name))
+                .execute(db_pool).await;
+
+                let _ = sqlx::query(
+                    "UPDATE requests SET status = 'APPROVED', updated_at = NOW() WHERE id = $1"
+                ).bind(req_id).execute(db_pool).await;
+
+                let _ = self.tx.send(json!({"type":"request_approved","request_id": req_id}).to_string());
+            }
+        }
+
+        // Notify the agent that their tool is ready
+        let agent_name: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM agents WHERE id = $1"
+        ).bind(agent_id).fetch_optional(db_pool).await.ok().flatten();
+
+        format!(
+            "Tool '{}' created and delivered to agent {} ({}). \
+             SKILL.md written to /workspace/skills/{}/SKILL.md — \
+             it is immediately available in their workspace.",
+            sanitized_name,
+            agent_name.unwrap_or_else(|| agent_id.to_string()),
+            agent_id,
+            sanitized_name
+        )
+    }
+
+    async fn tool_escalate_tool_request(
+        &self,
+        db_pool: &PgPool,
+        args: &serde_json::Map<String, Value>,
+    ) -> String {
+        let request_id_str = args.get("request_id").and_then(|v| v.as_str()).unwrap_or("");
+        let request_id = match Uuid::parse_str(request_id_str) {
+            Ok(u) => u,
+            Err(_) => return format!("Invalid request_id: '{}'", request_id_str),
+        };
+        let reason = args.get("reason").and_then(|v| v.as_str()).unwrap_or("Requires human review");
+
+        // Update request to target the user for approval
+        match sqlx::query(
+            "UPDATE requests SET current_approver_type = 'USER', current_approver_id = NULL, updated_at = NOW() WHERE id = $1"
+        ).bind(request_id).execute(db_pool).await {
+            Ok(_) => {
+                // Record an approval entry noting the escalation
+                let approval_id = Uuid::new_v4();
+                let main_id: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                ).fetch_optional(db_pool).await.ok().flatten();
+
+                let _ = sqlx::query(
+                    "INSERT INTO approvals (id, request_id, approver_type, approver_id, decision, note) \
+                     VALUES ($1,$2,'AGENT',$3,'ESCALATE',$4)"
+                )
+                .bind(approval_id)
+                .bind(request_id)
+                .bind(main_id.unwrap_or(Uuid::new_v4()))
+                .bind(format!("Escalated to human operator: {}", reason))
+                .execute(db_pool).await;
+
+                // Broadcast so the UI picks it up
+                let _ = self.tx.send(json!({"type":"new_request","request_id": request_id}).to_string());
+
+                format!("Tool request {} escalated to the human operator. Reason: {}", request_id, reason)
+            }
+            Err(e) => format!("Failed to escalate request: {}", e),
         }
     }
 }

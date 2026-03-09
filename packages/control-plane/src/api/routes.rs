@@ -1458,6 +1458,40 @@ async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, 
     let _ = state.tx.send(json!({"type":"request_approved","request_id": uid}).to_string());
     // Notify the requester agent
     notify_requester(&state, uid, "APPROVED", note.as_deref()).await;
+
+    // Post-approval hook: if this is a REQUEST_TOOL, instruct MAIN to create and deliver the tool
+    let request_type: Option<String> = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
+        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    if request_type.as_deref() == Some("REQUEST_TOOL") {
+        let req_data: Option<(Uuid, Value)> = sqlx::query_as(
+            "SELECT requester_id, payload FROM requests WHERE id = $1"
+        ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+        if let Some((requester_id, payload)) = req_data {
+            let tool_name = payload.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unnamed-tool").to_string();
+            let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("No description").to_string();
+            let use_case = payload.get("use_case").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(requester_id).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| requester_id.to_string());
+            let msg = format!(
+                "The human operator has approved tool request {}. \
+                 Create tool '{}' for agent {} (ID: {}). \
+                 Description: {}. Use case: {}. \
+                 Use create_tool_for_agent to generate a complete SKILL.md with usage instructions and deliver it.",
+                uid, tool_name, requester_name, requester_id, description, use_case
+            );
+            let state_clone = state.clone();
+            let request_id = uid;
+            tokio::spawn(async move {
+                // Use in-process MainAgent handle_message (has create_tool_for_agent tool)
+                match state_clone.main_agent.handle_message(&state_clone.db, &msg).await {
+                    Ok(response) => tracing::info!("MAIN agent tool creation response for request {}: {}", request_id, response),
+                    Err(e) => tracing::error!("Failed to instruct MAIN to create tool for request {}: {}", request_id, e),
+                }
+            });
+        }
+    }
+
     (StatusCode::OK, Json(json!({"status":"approved"})))
 }
 

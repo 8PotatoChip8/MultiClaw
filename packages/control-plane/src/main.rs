@@ -75,8 +75,11 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
+    let (tx, _rx) = tokio::sync::broadcast::channel(256);
+    let tx_arc = std::sync::Arc::new(tx);
+
     tracing::info!("MainAgent: name={}, model={}", agent_name, agent_model);
-    let main_agent = MainAgent::new(agent_name, agent_model, cfg.ollama_url.clone());
+    let main_agent = MainAgent::new(agent_name, agent_model, cfg.ollama_url.clone(), tx_arc.clone());
 
     // Initialize VM provider (Incus) — gracefully degrade if unavailable
     let vm_provider = match IncusProvider::new().await {
@@ -114,10 +117,9 @@ async fn main() -> anyhow::Result<()> {
     let multiclaw_api_url = format!("http://127.0.0.1:{}", cfg.port);
     let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url);
 
-    let (tx, _rx) = tokio::sync::broadcast::channel(256);
     let app_state = api::ws::AppState {
         db: pool.clone(),
-        tx: std::sync::Arc::new(tx),
+        tx: tx_arc,
         config: cfg.clone(),
         main_agent: std::sync::Arc::new(main_agent),
         sub_agent: std::sync::Arc::new(sub_agent),

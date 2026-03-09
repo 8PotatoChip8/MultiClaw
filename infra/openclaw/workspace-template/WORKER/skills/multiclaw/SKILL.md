@@ -147,6 +147,24 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
   -d '{"type": "ACTION", "requester_id": "{{AGENT_ID}}", "payload": {"description": "WHAT_YOU_NEED"}}'
 ```
 
+### Request a New Tool/Skill
+
+If you lack a capability needed to complete a task (e.g., accessing a specific API, processing a particular data format), request a new tool:
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "REQUEST_TOOL",
+    "requester_id": "{{AGENT_ID}}",
+    "payload": {
+      "tool_name": "short-slug-name",
+      "description": "Detailed description of what the tool should do",
+      "use_case": "Why you need this tool and what task requires it"
+    }
+  }'
+```
+Your request will go through your chain of command. If approved, the tool will be delivered as a new skill in your `/workspace/skills/` directory.
+
 ## Messaging — Communicate with Other Agents
 
 ### Send a Direct Message to Another Agent

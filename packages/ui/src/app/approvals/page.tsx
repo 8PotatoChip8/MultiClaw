@@ -77,6 +77,11 @@ export default function ApprovalsPage() {
     };
 
     const getRequestDescription = (r: Request): string => {
+        if (r.type === 'REQUEST_TOOL') {
+            const name = r.payload?.tool_name || 'unnamed tool';
+            const desc = r.payload?.description || 'No description';
+            return `Tool: "${name}" — ${desc}`;
+        }
         if (r.payload?.description) return r.payload.description;
         if (r.payload?.reason) return r.payload.reason;
         // Build a description from the type
