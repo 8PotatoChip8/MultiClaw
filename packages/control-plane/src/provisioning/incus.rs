@@ -179,6 +179,23 @@ impl IncusProvider {
         })
     }
 
+    /// List all running VM names (for batch status checks)
+    pub async fn list_running(&self) -> Result<Vec<String>> {
+        let output = Command::new("incus")
+            .args(&["list", "--format", "json", "status=Running"])
+            .output()
+            .await?;
+
+        if !output.status.success() {
+            return Ok(vec![]);
+        }
+
+        let instances: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
+        Ok(instances.iter()
+            .filter_map(|i| i.get("name").and_then(|n| n.as_str()).map(|s| s.to_string()))
+            .collect())
+    }
+
     /// Push file content into the VM
     pub async fn file_push(
         &self,

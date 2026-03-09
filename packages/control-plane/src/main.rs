@@ -126,6 +126,7 @@ async fn main() -> anyhow::Result<()> {
         crypto,
         dm_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_dm_pairs: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        agent_activities: std::sync::Arc::new(tokio::sync::RwLock::new(Some(std::collections::HashMap::new()))),
     };
 
     // Recover OpenClaw instances from DB in background

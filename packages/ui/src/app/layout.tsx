@@ -2,10 +2,11 @@
 import '../styles/globals.css';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings } from 'lucide-react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2 } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
+    { href: '/world', icon: Globe2, label: 'World' },
     { href: '/org', icon: Users2, label: 'Org Tree' },
     { href: '/companies', icon: Building2, label: 'Companies' },
     { href: '/chats', icon: MessageSquare, label: 'My Chats' },

@@ -135,6 +135,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/system/update", post(system_update))
         .route("/v1/system/containers", get(list_containers))
         .route("/v1/system/containers/:id/logs", get(get_container_logs))
+        // World
+        .route("/v1/world/snapshot", get(world_snapshot))
         // Events WS
         .route("/v1/events", get(events_handler))
         .layer(cors)
@@ -1265,6 +1267,7 @@ async fn send_message(
 
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
+                            state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
                                 *responding_agent_id, &user_text,
                                 Some("Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.")
@@ -1292,6 +1295,7 @@ async fn send_message(
                                     ))
                                 }
                             };
+                            state_clone.mark_agent_done(*responding_agent_id).await;
 
                             match result {
                                 Ok(response) => {
@@ -1429,7 +1433,9 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
         );
         let state_clone = state.clone();
         tokio::spawn(async move {
+            state_clone.mark_agent_working(superior_id, "Processing approval request").await;
             let _ = state_clone.openclaw.send_message(superior_id, &dm_text, None).await;
+            state_clone.mark_agent_done(superior_id).await;
         });
     }
 
@@ -1485,7 +1491,9 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
         let msg = format!("Your request \"{}\" (ID: {}) has been {}.{}", req_type.replace('_', " "), request_id, decision, note_text);
         let state_clone = state.clone();
         tokio::spawn(async move {
+            state_clone.mark_agent_working(agent_id, "Processing approval decision").await;
             let _ = state_clone.openclaw.send_message(agent_id, &msg, None).await;
+            state_clone.mark_agent_done(agent_id).await;
         });
     }
 }
@@ -1546,7 +1554,9 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                 );
                 let state_clone = state.clone();
                 tokio::spawn(async move {
+                    state_clone.mark_agent_working(next_superior_id, "Processing escalated approval").await;
                     let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text, None).await;
+                    state_clone.mark_agent_done(next_superior_id).await;
                 });
                 (StatusCode::OK, Json(json!({"status":"escalated","next_approver_id": next_superior_id})))
             }
@@ -2057,7 +2067,9 @@ async fn agent_dm(
                         break;
                     }
 
+                    state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
                     let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(DM_INSTRUCTIONS)).await;
+                    state_clone.mark_agent_done(responder_id).await;
                     current_depth += 1;
 
                     match result {
@@ -2115,11 +2127,17 @@ async fn agent_dm(
                                  You should retry sending this message later when they come back online.",
                                 agent_name
                             );
+                            state_clone.mark_agent_working(other_id, "Processing delivery failure").await;
                             let _ = state_clone.openclaw.send_message(other_id, &failure_notice, None).await;
+                            state_clone.mark_agent_done(other_id).await;
                             break;
                         }
                     }
                 }
+
+                // Mark both agents as idle when the DM conversation ends
+                state_clone.mark_agent_done(sender_id).await;
+                state_clone.mark_agent_done(target_id).await;
 
                 // Record cooldown for this agent pair to prevent infinite re-initiation
                 let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
@@ -2415,13 +2433,15 @@ async fn agent_send_file(
     let notify_dest = dest_relative.to_string();
     let notify_filename = filename.to_string();
     let notify_size = file_bytes.len();
-    let openclaw = state.openclaw.clone();
+    let state_clone = state.clone();
     tokio::spawn(async move {
         let msg = format!(
             "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
             sender_name, notify_filename, notify_dest, notify_size
         );
-        let _ = openclaw.send_message(receiver_id, &msg, None).await;
+        state_clone.mark_agent_working(receiver_id, "Processing received file").await;
+        let _ = state_clone.openclaw.send_message(receiver_id, &msg, None).await;
+        state_clone.mark_agent_done(receiver_id).await;
     });
 
     // Broadcast WebSocket event
@@ -3418,4 +3438,122 @@ async fn update_system_settings(State(state): State<AppState>, Json(body): Json<
         }
     }
     (StatusCode::OK, Json(json!({"status":"updated"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// World Snapshot
+// ═══════════════════════════════════════════════════════════════
+
+/// Aggregated snapshot endpoint for the 3D world view.
+/// Returns companies, agents, balances, activities, and VM states in one call.
+async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
+    // 1. Fetch all companies
+    let companies: Vec<Company> = sqlx::query_as(
+        "SELECT id, holding_id, name, type, description, tags, status, created_at FROM companies ORDER BY created_at"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
+    // 2. Fetch all agents (excluding MAIN role — they're not in any company)
+    let agents: Vec<Agent> = sqlx::query_as(
+        "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
+         FROM agents WHERE role != 'MAIN' ORDER BY created_at"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
+    // 3. Fetch balances for all companies in one query
+    let balance_rows: Vec<(Uuid, String, String, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT company_id, currency, type, COALESCE(SUM(amount), 0) as total \
+         FROM ledger_entries GROUP BY company_id, currency, type"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
+    let mut balances: serde_json::Map<String, Value> = serde_json::Map::new();
+    for (company_id, currency, entry_type, total) in &balance_rows {
+        let company_key = company_id.to_string();
+        let company_obj = balances.entry(company_key)
+            .or_insert_with(|| json!({}));
+        let currency_obj = company_obj.as_object_mut().unwrap()
+            .entry(currency.clone())
+            .or_insert_with(|| json!({"revenue": 0.0, "expenses": 0.0, "capital": 0.0, "net": 0.0}));
+        let total_f64 = total.to_string().parse::<f64>().unwrap_or(0.0);
+        match entry_type.as_str() {
+            "REVENUE" => { currency_obj["revenue"] = json!(total_f64); }
+            "EXPENSE" => { currency_obj["expenses"] = json!(total_f64); }
+            "CAPITAL_INJECTION" => { currency_obj["capital"] = json!(total_f64); }
+            "INTERNAL_TRANSFER" => { currency_obj["expenses"] = json!(currency_obj["expenses"].as_f64().unwrap_or(0.0) + total_f64); }
+            _ => {}
+        }
+    }
+    // Calculate net for each company/currency
+    for (_, company_obj) in balances.iter_mut() {
+        if let Some(currencies) = company_obj.as_object_mut() {
+            for (_, obj) in currencies.iter_mut() {
+                let revenue = obj["revenue"].as_f64().unwrap_or(0.0);
+                let expenses = obj["expenses"].as_f64().unwrap_or(0.0);
+                let capital = obj["capital"].as_f64().unwrap_or(0.0);
+                obj["net"] = json!(capital + revenue - expenses);
+            }
+        }
+    }
+
+    // 4. Activities — from in-memory tracker (if present), otherwise empty
+    let activities: serde_json::Map<String, Value> = if let Some(ref tracker) = *state.agent_activities.read().await {
+        let mut map = serde_json::Map::new();
+        for (agent_id, activity) in tracker.iter() {
+            map.insert(agent_id.to_string(), json!({
+                "agent_id": agent_id.to_string(),
+                "status": activity.status,
+                "task": activity.task,
+                "since": activity.since,
+            }));
+        }
+        map
+    } else {
+        serde_json::Map::new()
+    };
+
+    // 5. VM states — check if agents have VMs provisioned, batch-query status
+    let mut vm_states: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // Query which agents have VMs assigned
+    let vm_rows: Vec<(Uuid, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT a.id, v_desktop.provider_ref, v_sandbox.provider_ref \
+         FROM agents a \
+         LEFT JOIN vms v_desktop ON a.vm_id = v_desktop.id \
+         LEFT JOIN vms v_sandbox ON a.sandbox_vm_id = v_sandbox.id \
+         WHERE a.role != 'MAIN'"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
+    // If we have a VM provider, batch-query running instances
+    let running_vms: std::collections::HashSet<String> = if let Some(ref provider) = state.vm_provider {
+        // Get all running instances in one call
+        match provider.list_running().await {
+            Ok(names) => names.into_iter().collect(),
+            Err(_) => std::collections::HashSet::new(),
+        }
+    } else {
+        std::collections::HashSet::new()
+    };
+
+    for (agent_id, desktop_ref, sandbox_ref) in &vm_rows {
+        let desktop_status = match desktop_ref {
+            Some(name) if running_vms.contains(name) => "RUNNING",
+            Some(_) => "STOPPED",
+            None => "UNKNOWN",
+        };
+        let sandbox_status = match sandbox_ref {
+            Some(name) if running_vms.contains(name) => "RUNNING",
+            Some(_) => "STOPPED",
+            None => "UNKNOWN",
+        };
+        vm_states.insert(agent_id.to_string(), json!({
+            "desktop": desktop_status,
+            "sandbox": sandbox_status,
+        }));
+    }
+
+    (StatusCode::OK, Json(json!({
+        "companies": companies,
+        "agents": agents,
+        "balances": balances,
+        "activities": activities,
+        "vm_states": vm_states,
+    })))
 }

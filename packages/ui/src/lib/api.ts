@@ -137,6 +137,9 @@ export const api = {
     updateSettings: (data: Record<string, string>) =>
         request('/system/settings', { method: 'PUT', body: JSON.stringify(data) }),
 
+    // World
+    getWorldSnapshot: () => request('/world/snapshot'),
+
     // Secrets
     getSecrets: (scopeType?: string, scopeId?: string) => {
         const params = new URLSearchParams();
