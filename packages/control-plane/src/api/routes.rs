@@ -26,6 +26,8 @@ const DM_SAFETY_LIMIT: i32 = 50;
 /// System instructions injected into each DM turn so agents end conversations naturally.
 const DM_INSTRUCTIONS: &str = "You are in a direct message conversation with a colleague. \
     Communicate naturally — ask questions, share information, and respond as needed. \
+    Send ONLY your actual message to your colleague. Do NOT include your internal thoughts, \
+    reasoning, planning, or thinking process — the other person sees everything you write. \
     When the conversation has reached a natural conclusion and you have nothing more to add, \
     end your final message with the exact tag [END_CONVERSATION] on its own line. \
     Do NOT use this tag if the other person asked you a question or if there are unresolved topics.";
