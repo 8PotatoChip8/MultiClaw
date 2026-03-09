@@ -1428,6 +1428,44 @@ async fn send_message(
                             )
                         };
 
+                        // Fetch recent thread history so agents have conversation context
+                        let recent_msgs: Vec<(String, Uuid, serde_json::Value)> = sqlx::query_as(
+                            "SELECT sender_type, sender_id, content FROM messages \
+                             WHERE thread_id = $1 ORDER BY created_at DESC LIMIT 20"
+                        ).bind(tid).fetch_all(&state_clone.db).await.unwrap_or_default();
+
+                        let thread_context = if recent_msgs.len() > 1 {
+                            // Build a name cache: agent_id → name (reuse participant_names query results)
+                            let mut name_cache: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+                            for (stype, sid, _) in &recent_msgs {
+                                if stype == "AGENT" && !name_cache.contains_key(sid) {
+                                    let aname: Option<String> = sqlx::query_scalar(
+                                        "SELECT name FROM agents WHERE id = $1"
+                                    ).bind(sid).fetch_optional(&state_clone.db).await.ok().flatten();
+                                    if let Some(n) = aname { name_cache.insert(*sid, n); }
+                                }
+                            }
+
+                            // Build transcript (skip the most recent msg — it's the current input)
+                            let mut transcript = String::from("Recent conversation history (most recent last):\n---\n");
+                            for (stype, sid, content) in recent_msgs.iter().rev().take(recent_msgs.len() - 1) {
+                                if stype == "SYSTEM" { continue; }
+                                let name = if stype == "USER" {
+                                    "Operator".to_string()
+                                } else {
+                                    name_cache.get(sid).cloned().unwrap_or_else(|| "Agent".to_string())
+                                };
+                                let text = content.get("text").and_then(|v| v.as_str()).unwrap_or("");
+                                // Truncate long messages to keep context compact
+                                let truncated = if text.len() > 200 { format!("{}...", &text[..200]) } else { text.to_string() };
+                                transcript.push_str(&format!("{}: {}\n", name, truncated));
+                            }
+                            transcript.push_str("---\n");
+                            format!("{}\n\n{}", transcript, thread_context)
+                        } else {
+                            thread_context
+                        };
+
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
                             state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
