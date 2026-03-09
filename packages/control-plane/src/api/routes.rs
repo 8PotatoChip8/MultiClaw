@@ -126,35 +126,35 @@ fn collapse_spaces(s: &str) -> String {
 /// - Remove space before apostrophes in contractions (I've, don't, it's)
 /// Does NOT remove space before opening quotes (e.g., He said 'hello').
 fn fix_punctuation_spacing(s: &str) -> String {
-    let bytes = s.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(len);
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(s.len());
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b' ' {
+        if chars[i] == ' ' {
             // Look ahead past any consecutive spaces
             let mut j = i + 1;
-            while j < len && bytes[j] == b' ' {
+            while j < len && chars[j] == ' ' {
                 j += 1;
             }
             if j < len {
-                let next = bytes[j];
+                let next = chars[j];
                 // Space before sentence/clause punctuation — collapse
-                if matches!(next, b'.' | b',' | b';' | b':' | b'!' | b'?') {
+                if matches!(next, '.' | ',' | ';' | ':' | '!' | '?') {
                     i = j;
                     continue;
                 }
                 // Space before apostrophe in a contraction (letter + space + ' + lowercase)
-                if next == b'\'' && j + 1 < len && bytes[j + 1].is_ascii_lowercase() {
-                    if i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+                if next == '\'' && j + 1 < len && chars[j + 1].is_lowercase() {
+                    if i > 0 && chars[i - 1].is_alphabetic() {
                         i = j;
                         continue;
                     }
                 }
             }
         }
-        result.push(bytes[i] as char);
+        result.push(chars[i]);
         i += 1;
     }
     result
