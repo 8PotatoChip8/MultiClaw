@@ -1,12 +1,9 @@
-import { Agent, Company } from '../../lib/types';
+import { Agent, AgentActivity as BaseAgentActivity, Company } from '../../lib/types';
 
 export type ViewMode = 'city' | 'floor';
 
-export interface AgentActivity {
+export interface AgentActivity extends BaseAgentActivity {
     agent_id: string;
-    status: 'WORKING' | 'IDLE';
-    task: string | null;
-    since: string;
 }
 
 export interface VmState {

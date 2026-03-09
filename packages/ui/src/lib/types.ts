@@ -1,3 +1,9 @@
+export interface AgentActivity {
+    status: 'WORKING' | 'IDLE';
+    task: string | null;
+    since: string;
+}
+
 export interface Agent {
     id: string;
     name: string;
@@ -13,6 +19,7 @@ export interface Agent {
     sandbox_vm_id: string | null;
     handle: string | null;
     status: string;
+    activity?: AgentActivity;
     created_at: string;
 }
 

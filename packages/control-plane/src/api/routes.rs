@@ -337,7 +337,24 @@ async fn list_agents(State(state): State<AppState>) -> impl IntoResponse {
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
          FROM agents ORDER BY created_at"
     ).fetch_all(&state.db).await {
-        Ok(a) => (StatusCode::OK, Json(json!(a))),
+        Ok(agents) => {
+            let activities_guard = state.agent_activities.read().await;
+            let activities = activities_guard.as_ref();
+            let result: Vec<Value> = agents.iter().map(|a| {
+                let mut obj = json!(a);
+                if let Some(act_map) = activities {
+                    if let Some(act) = act_map.get(&a.id) {
+                        obj["activity"] = json!({
+                            "status": act.status,
+                            "task": act.task,
+                            "since": act.since,
+                        });
+                    }
+                }
+                obj
+            }).collect();
+            (StatusCode::OK, Json(json!(result)))
+        },
         Err(e) => { tracing::error!("list_agents: {}", e); (StatusCode::OK, Json(json!([]))) }
     }
 }
@@ -348,7 +365,20 @@ async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> imp
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at \
          FROM agents WHERE id = $1"
     ).bind(uid).fetch_optional(&state.db).await {
-        Ok(Some(a)) => (StatusCode::OK, Json(json!(a))),
+        Ok(Some(a)) => {
+            let mut obj = json!(a);
+            let activities_guard = state.agent_activities.read().await;
+            if let Some(act_map) = activities_guard.as_ref() {
+                if let Some(act) = act_map.get(&a.id) {
+                    obj["activity"] = json!({
+                        "status": act.status,
+                        "task": act.task,
+                        "since": act.since,
+                    });
+                }
+            }
+            (StatusCode::OK, Json(obj))
+        },
         Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
     }

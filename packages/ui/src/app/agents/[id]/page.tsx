@@ -1,10 +1,12 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '../../../lib/api';
 import { Agent } from '../../../lib/types';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import { Shield, Play, Square, RefreshCw, AlertTriangle, Plus, Brain, Trash2, X, Terminal, Loader2, Monitor, Box } from 'lucide-react';
+import { useAgentPresence } from '../../../lib/ws';
+import AgentStatus from '../../../components/AgentStatus';
 
 interface Memory {
     id: string;
@@ -64,6 +66,9 @@ export default function AgentDetailPage() {
     const [vmInfoData, setVmInfoData] = useState<Record<string, VmInfoData | null>>({ desktop: null, sandbox: null });
     const [sandboxProvisioning, setSandboxProvisioning] = useState(false);
     const terminalEndRef = { current: null as HTMLDivElement | null };
+
+    const agentList = useMemo(() => agent ? [agent] : [], [agent]);
+    const presenceMap = useAgentPresence(agentList);
 
     const load = () => { api.getAgent(id).then(d => { if (d && !d.error) setAgent(d); }); };
     useEffect(() => { if (id) load(); }, [id]);
@@ -175,6 +180,7 @@ export default function AgentDetailPage() {
                     <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
                         <span className={`badge ${agent.role === 'CEO' ? 'external' : agent.role === 'MANAGER' ? 'internal' : 'active'}`}>{agent.role}</span>
                         <span className={`badge ${agent.status === 'ACTIVE' ? 'active' : 'quarantined'}`}>{agent.status}</span>
+                        <AgentStatus presence={presenceMap[agent.id]?.presenceStatus ?? 'Active'} showLabel={true} size={9} />
                         {agent.handle && (
                             <span style={{ fontSize: '13px', color: 'var(--accent)', fontFamily: 'monospace' }}>{agent.handle}</span>
                         )}

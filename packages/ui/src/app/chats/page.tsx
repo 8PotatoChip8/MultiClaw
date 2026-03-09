@@ -1,7 +1,9 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { api } from '../../lib/api';
 import { Thread, Agent } from '../../lib/types';
+import { useAgentPresence } from '../../lib/ws';
+import AgentStatus from '../../components/AgentStatus';
 import Chat from '../../components/Chat';
 import { MessageSquare, Plus, Users2, Hash, AtSign, Search, X } from 'lucide-react';
 
@@ -16,6 +18,13 @@ export default function ChatsPage() {
     const [showAgentPicker, setShowAgentPicker] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [newGroupTitle, setNewGroupTitle] = useState('');
+
+    const presenceMap = useAgentPresence(agents);
+    const agentByName = useMemo(() => {
+        const map: Record<string, Agent> = {};
+        for (const a of agents) map[a.name] = a;
+        return map;
+    }, [agents]);
 
     // Load threads and agents
     useEffect(() => {
@@ -159,13 +168,28 @@ export default function ChatsPage() {
                                 }}
                             >
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <div style={{
-                                        width: '28px', height: '28px', borderRadius: '50%',
-                                        background: 'linear-gradient(135deg, var(--primary), var(--accent))',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        fontSize: '11px', fontWeight: 700, color: '#fff', flexShrink: 0,
-                                    }}>
-                                        {(t.title || 'D')[0].toUpperCase()}
+                                    <div style={{ position: 'relative', flexShrink: 0 }}>
+                                        <div style={{
+                                            width: '28px', height: '28px', borderRadius: '50%',
+                                            background: 'linear-gradient(135deg, var(--primary), var(--accent))',
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            fontSize: '11px', fontWeight: 700, color: '#fff',
+                                        }}>
+                                            {(t.title || 'D')[0].toUpperCase()}
+                                        </div>
+                                        {(() => {
+                                            const agent = agentByName[t.title || ''];
+                                            const presence = agent ? presenceMap[agent.id] : undefined;
+                                            return presence ? (
+                                                <span style={{
+                                                    position: 'absolute', bottom: '-1px', right: '-1px',
+                                                    width: '10px', height: '10px', borderRadius: '50%',
+                                                    backgroundColor: presence.presenceStatus === 'Busy' ? '#f59e0b' : presence.presenceStatus === 'Active' ? '#22c55e' : '#6b7280',
+                                                    border: '2px solid rgba(10, 14, 26, 0.8)',
+                                                    animation: presence.presenceStatus === 'Busy' ? 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' : 'none',
+                                                }} />
+                                            ) : null;
+                                        })()}
                                     </div>
                                     <div style={{ overflow: 'hidden' }}>
                                         <div style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -277,6 +301,7 @@ export default function ChatsPage() {
                                             {agent.handle || `${agent.role}`}
                                         </div>
                                     </div>
+                                    <AgentStatus presence={presenceMap[agent.id]?.presenceStatus ?? 'Active'} showLabel={true} size={9} />
                                     <span className={`badge ${agent.role === 'CEO' ? 'external' : agent.role === 'MANAGER' ? 'internal' : 'active'}`} style={{ fontSize: '10px' }}>
                                         {agent.role}
                                     </span>
