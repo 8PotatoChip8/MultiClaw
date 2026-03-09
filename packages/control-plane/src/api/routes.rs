@@ -38,9 +38,12 @@ use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = response.contains("[END_CONVERSATION]");
     let mut text = response.to_string();
-    // Strip known system tags
+    // Strip known system tags (including variants where streaming splits brackets/text across lines)
     text = text.replace("[END_CONVERSATION]", "");
     text = text.replace("[HEARTBEAT_OK]", "");
+    text = text.replace("HEARTBEAT_OK", "");
+    // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
+    text = text.replace("[]", "");
     // Strip known model artifacts
     text = text.replace("[[reply_to_current]]", "");
     // Strip any remaining [[word_word]] artifacts (model-generated tags)
@@ -1905,10 +1908,16 @@ async fn update_company(State(state): State<AppState>, Path(id): Path<String>, J
 async fn get_agent_thread(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
 
-    // Check if a DM thread already exists with this agent
+    // Check if a user-to-agent DM thread already exists with this agent
+    // Must require a USER member to avoid returning agent-to-agent DM threads
     let existing: Option<(Uuid,)> = sqlx::query_as(
         "SELECT tm.thread_id FROM thread_members tm JOIN threads t ON t.id = tm.thread_id \
-         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 AND t.type = 'DM' LIMIT 1"
+         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 AND t.type = 'DM' \
+           AND EXISTS ( \
+               SELECT 1 FROM thread_members tm2 \
+               WHERE tm2.thread_id = t.id AND tm2.member_type = 'USER' \
+           ) \
+         LIMIT 1"
     ).bind(agent_id).fetch_optional(&state.db).await.unwrap_or(None);
 
     if let Some((thread_id,)) = existing {

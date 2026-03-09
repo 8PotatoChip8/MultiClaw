@@ -223,8 +223,14 @@ async fn main() -> anyhow::Result<()> {
             match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
                 Ok(response) => {
                     let trimmed = response.trim();
-                    // Check for heartbeat OK in the raw response (before stripping removes it)
-                    if trimmed == "[HEARTBEAT_OK]" || trimmed.contains("[HEARTBEAT_OK]") {
+                    // Check for heartbeat OK in the raw response (before stripping removes it).
+                    // Catch variants: with/without brackets, with newlines splitting the tag,
+                    // and bare "HEARTBEAT_OK". The length guard ensures a longer substantive
+                    // report that happens to include the tag still gets stored.
+                    let normalized = trimmed.replace('[', "").replace(']', "").replace('\n', " ");
+                    let is_heartbeat_only = normalized.trim() == "HEARTBEAT_OK"
+                        || (trimmed.contains("HEARTBEAT_OK") && trimmed.len() < 50);
+                    if is_heartbeat_only {
                         tracing::debug!("Heartbeat: {} reports all clear", main_name);
                     } else {
                         // Strip system tags from reports before storing

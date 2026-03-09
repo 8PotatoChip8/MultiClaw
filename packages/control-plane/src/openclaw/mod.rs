@@ -329,35 +329,36 @@ impl OpenClawManager {
                         .map_err(|e| anyhow!("Failed to parse OpenClaw response: {}", e))?;
 
                     // Extract text from the OpenResponses format
-                    // Response has an "output" array with items; find "message" type with "text" content
-                    let text = resp_body["output"]
-                        .as_array()
-                        .and_then(|outputs| {
-                            outputs.iter().find_map(|item| {
+                    // Response has an "output" array with message items containing output_text chunks.
+                    // Concatenate ALL chunks — OpenClaw may split a streamed response across multiple
+                    // output_text entries, and taking only the first drops most of the content.
+                    let text = {
+                        let mut all_text = String::new();
+                        if let Some(outputs) = resp_body["output"].as_array() {
+                            for item in outputs {
                                 if item["type"] == "message" {
-                                    item["content"]
-                                        .as_array()
-                                        .and_then(|content| {
-                                            content.iter().find_map(|c| {
-                                                if c["type"] == "output_text" {
-                                                    c["text"].as_str().map(|s| s.to_string())
-                                                } else {
-                                                    None
+                                    if let Some(content) = item["content"].as_array() {
+                                        for c in content {
+                                            if c["type"] == "output_text" {
+                                                if let Some(chunk) = c["text"].as_str() {
+                                                    all_text.push_str(chunk);
                                                 }
-                                            })
-                                        })
-                                } else {
-                                    None
+                                            }
+                                        }
+                                    }
                                 }
-                            })
-                        })
-                        .unwrap_or_else(|| {
+                            }
+                        }
+                        if all_text.is_empty() {
                             // Fallback: try to get any text from the response
                             resp_body["output_text"]
                                 .as_str()
                                 .unwrap_or("[Agent produced no text output]")
                                 .to_string()
-                        });
+                        } else {
+                            all_text
+                        }
+                    };
 
                     tracing::info!(
                         "{} responded ({} chars)",
