@@ -115,6 +115,12 @@ a:hover {
   box-shadow: 0 4px 30px rgba(0, 0, 0, 0.2);
 }
 
+.panel.no-hover:hover {
+  background: var(--panel);
+  border-color: rgba(59, 130, 246, 0.15);
+  box-shadow: none;
+}
+
 /* ── Badges ── */
 .badge {
   display: inline-flex;

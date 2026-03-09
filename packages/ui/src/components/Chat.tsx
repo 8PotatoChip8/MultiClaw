@@ -4,7 +4,7 @@ import { api } from '../lib/api';
 import { useMultiClawEvents } from '../lib/ws';
 import { Message, Agent } from '../lib/types';
 import MarkdownText from './MarkdownText';
-import { Send, Loader2, Plus, UserMinus, Users, X } from 'lucide-react';
+import { Send, Loader2, Plus, UserMinus, Users, X, Copy, Check } from 'lucide-react';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
 
@@ -22,6 +22,8 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [showAddMember, setShowAddMember] = useState(false);
+    const [hoveredMsg, setHoveredMsg] = useState<string | null>(null);
+    const [copiedId, setCopiedId] = useState<string | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
     const event = useMultiClawEvents();
     const agentMap = new Map(agents.map(a => [a.id, a]));
@@ -134,11 +136,17 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
         return '🤖 Agent';
     };
 
+    const handleCopy = (msgId: string, text: string) => {
+        navigator.clipboard.writeText(text);
+        setCopiedId(msgId);
+        setTimeout(() => setCopiedId(null), 1500);
+    };
+
     const agentParticipants = participants.filter(p => p.member_type === 'AGENT');
     const nonMemberAgents = agents.filter(a => !agentParticipants.some(p => p.member_id === a.id));
 
     return (
-        <div className="panel" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: '0' }}>
+        <div className="panel no-hover" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: '0' }}>
             {/* Group header with participants */}
             {isGroup && agentParticipants.length > 0 && (
                 <div style={{
@@ -201,18 +209,39 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
                         justifyContent: msg.sender_type === 'USER' ? 'flex-end' : 'flex-start',
                         marginBottom: '12px',
                     }}>
-                        <div style={{
-                            maxWidth: '70%',
-                            padding: '10px 16px',
-                            borderRadius: msg.sender_type === 'USER' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                            background: msg.sender_type === 'USER' ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'rgba(30,40,68,0.9)',
-                            fontSize: '14px',
-                            lineHeight: '1.5',
-                        }}>
-                            <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', marginBottom: '4px', fontWeight: 600 }}>
-                                {getSenderLabel(msg)}
+                        <div
+                            style={{ position: 'relative', maxWidth: '70%' }}
+                            onMouseEnter={() => setHoveredMsg(msg.id)}
+                            onMouseLeave={() => setHoveredMsg(null)}
+                        >
+                            <div style={{
+                                padding: '10px 16px',
+                                borderRadius: msg.sender_type === 'USER' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                                background: msg.sender_type === 'USER' ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'rgba(30,40,68,0.9)',
+                                fontSize: '14px',
+                                lineHeight: '1.5',
+                            }}>
+                                <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', marginBottom: '4px', fontWeight: 600 }}>
+                                    {getSenderLabel(msg)}
+                                </div>
+                                <MarkdownText>{getContent(msg)}</MarkdownText>
                             </div>
-                            <MarkdownText>{getContent(msg)}</MarkdownText>
+                            {hoveredMsg === msg.id && (
+                                <button
+                                    onClick={() => handleCopy(msg.id, getContent(msg))}
+                                    title="Copy message"
+                                    style={{
+                                        position: 'absolute', top: '6px', right: '-32px',
+                                        background: 'rgba(30,40,68,0.9)', border: '1px solid var(--border)',
+                                        borderRadius: '6px', padding: '4px', cursor: 'pointer',
+                                        color: copiedId === msg.id ? 'var(--success)' : 'var(--text-muted)',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                        transition: 'color 0.2s',
+                                    }}
+                                >
+                                    {copiedId === msg.id ? <Check size={14} /> : <Copy size={14} />}
+                                </button>
+                            )}
                         </div>
                     </div>
                 ))}
