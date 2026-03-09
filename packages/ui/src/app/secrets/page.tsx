@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { Key, Plus, Trash2, Eye, EyeOff } from 'lucide-react';
+import { Key, Plus, Trash2, Eye, EyeOff, X } from 'lucide-react';
 
 interface SecretMeta {
     id: string;
@@ -26,9 +26,9 @@ export default function SecretsPage() {
     const [scopeType, setScopeType] = useState<ScopeType>('agent');
     const [scopeId, setScopeId] = useState('');
     const [secretName, setSecretName] = useState('');
-    const [secretValue, setSecretValue] = useState('');
+    const [fields, setFields] = useState<{ label: string; value: string }[]>([{ label: '', value: '' }]);
     const [secretDescription, setSecretDescription] = useState('');
-    const [showValue, setShowValue] = useState(false);
+    const [showValues, setShowValues] = useState(false);
     const [creating, setCreating] = useState(false);
 
     const nameMap: Record<string, string> = {};
@@ -51,7 +51,8 @@ export default function SecretsPage() {
     useEffect(() => { loadData(); }, []);
 
     const handleCreate = async () => {
-        if (!secretName.trim() || !secretValue.trim()) return;
+        const validFields = fields.filter(f => f.value.trim());
+        if (!secretName.trim() || validFields.length === 0) return;
         if (scopeType !== 'holding' && !scopeId) return;
 
         setCreating(true);
@@ -62,19 +63,25 @@ export default function SecretsPage() {
             scope_type: scopeType,
             scope_id: finalScopeId,
             name: secretName.trim(),
-            value: secretValue,
+            fields: validFields,
             description: secretDescription.trim() || undefined,
         });
         setShowCreate(false);
         setScopeType('agent');
         setScopeId('');
         setSecretName('');
-        setSecretValue('');
+        setFields([{ label: '', value: '' }]);
         setSecretDescription('');
-        setShowValue(false);
+        setShowValues(false);
         setCreating(false);
         await loadData();
     };
+
+    const updateField = (index: number, key: 'label' | 'value', val: string) => {
+        setFields(prev => prev.map((f, i) => i === index ? { ...f, [key]: val } : f));
+    };
+    const addField = () => setFields(prev => [...prev, { label: '', value: '' }]);
+    const removeField = (index: number) => setFields(prev => prev.filter((_, i) => i !== index));
 
     const handleDelete = async (id: string) => {
         setDeleting(id);
@@ -282,32 +289,79 @@ export default function SecretsPage() {
                                 </p>
                             </div>
 
-                            {/* Secret Value */}
+                            {/* Secret Value Fields */}
                             <div>
-                                <label style={{ display: 'block', fontSize: '13px', color: 'var(--text-muted)', marginBottom: '6px', fontWeight: 500 }}>
-                                    Value
-                                </label>
-                                <div style={{ position: 'relative' }}>
-                                    <input value={secretValue}
-                                        onChange={e => setSecretValue(e.target.value)}
-                                        type={showValue ? 'text' : 'password'}
-                                        placeholder="Your secret value"
+                                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '6px' }}>
+                                    <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 500 }}>
+                                        Value{fields.length > 1 ? 's' : ''}
+                                    </label>
+                                    <button onClick={() => setShowValues(!showValues)}
                                         style={{
-                                            width: '100%', padding: '10px 40px 10px 12px', borderRadius: '8px',
-                                            background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
-                                            color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
-                                        }} />
-                                    <button onClick={() => setShowValue(!showValue)}
-                                        style={{
-                                            position: 'absolute', right: '8px', top: '50%', transform: 'translateY(-50%)',
                                             background: 'none', border: 'none', cursor: 'pointer',
-                                            color: 'var(--text-muted)', padding: '4px',
+                                            color: 'var(--text-muted)', padding: '2px', display: 'flex', alignItems: 'center', gap: '4px',
+                                            fontSize: '11px',
                                         }}>
-                                        {showValue ? <EyeOff size={16} /> : <Eye size={16} />}
+                                        {showValues ? <EyeOff size={14} /> : <Eye size={14} />}
+                                        {showValues ? 'Hide' : 'Show'}
                                     </button>
                                 </div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                    {fields.map((field, i) => (
+                                        <div key={i} style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                            <input
+                                                value={field.label}
+                                                onChange={e => updateField(i, 'label', e.target.value)}
+                                                placeholder="Label (optional)"
+                                                style={{
+                                                    width: '120px', minWidth: '120px', padding: '10px 12px', borderRadius: '8px',
+                                                    background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                                    color: 'var(--text)', fontSize: '12px',
+                                                }}
+                                            />
+                                            <input
+                                                value={field.value}
+                                                onChange={e => updateField(i, 'value', e.target.value)}
+                                                type={showValues ? 'text' : 'password'}
+                                                placeholder="Secret value"
+                                                style={{
+                                                    flex: 1, padding: '10px 12px', borderRadius: '8px',
+                                                    background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                                    color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
+                                                }}
+                                            />
+                                            {fields.length > 1 && (
+                                                <button onClick={() => removeField(i)}
+                                                    title="Remove field"
+                                                    style={{
+                                                        background: 'none', border: 'none', cursor: 'pointer',
+                                                        color: 'var(--text-muted)', padding: '4px', flexShrink: 0,
+                                                        opacity: 0.6, transition: 'opacity 0.2s',
+                                                    }}
+                                                    onMouseEnter={e => (e.currentTarget.style.opacity = '1', e.currentTarget.style.color = 'var(--danger)')}
+                                                    onMouseLeave={e => (e.currentTarget.style.opacity = '0.6', e.currentTarget.style.color = 'var(--text-muted)')}
+                                                >
+                                                    <X size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+                                    ))}
+                                </div>
+                                <button onClick={addField}
+                                    style={{
+                                        background: 'none', border: '1px dashed var(--border)', borderRadius: '8px',
+                                        color: 'var(--primary)', cursor: 'pointer', padding: '8px 12px',
+                                        fontSize: '12px', fontWeight: 500, marginTop: '8px', width: '100%',
+                                        display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '4px',
+                                        transition: 'border-color 0.2s, background 0.2s',
+                                    }}
+                                    onMouseEnter={e => (e.currentTarget.style.borderColor = 'var(--primary)', e.currentTarget.style.background = 'var(--primary-glow)')}
+                                    onMouseLeave={e => (e.currentTarget.style.borderColor = 'var(--border)', e.currentTarget.style.background = 'none')}
+                                >
+                                    <Plus size={14} /> Add Field
+                                </button>
                                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '6px' }}>
                                     Encrypted at rest with AES-GCM. Cannot be viewed after creation.
+                                    {fields.length === 1 && ' Use "Add Field" for multi-value secrets (e.g. Access ID + Secret Key).'}
                                 </p>
                             </div>
 
@@ -315,7 +369,7 @@ export default function SecretsPage() {
                             <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end', marginTop: '8px' }}>
                                 <button className="button secondary" onClick={() => setShowCreate(false)}>Cancel</button>
                                 <button className="button" onClick={handleCreate}
-                                    disabled={creating || !secretName.trim() || !secretValue.trim() || (scopeType !== 'holding' && !scopeId)}>
+                                    disabled={creating || !secretName.trim() || !fields.some(f => f.value.trim()) || (scopeType !== 'holding' && !scopeId)}>
                                     {creating ? 'Creating...' : 'Create Secret'}
                                 </button>
                             </div>

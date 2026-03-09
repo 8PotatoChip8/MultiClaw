@@ -3100,11 +3100,20 @@ async fn delete_agent_memory(State(state): State<AppState>, Path((id, mid)): Pat
 // ═══════════════════════════════════════════════════════════════
 
 #[derive(Debug, Deserialize)]
+struct SecretField {
+    label: String,
+    value: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct CreateSecretRequest {
     scope_type: String,  // "agent", "manager", "company", "holding"
     scope_id: Uuid,
     name: String,        // e.g., "coinex_api_key"
-    value: String,       // plaintext — will be encrypted before storage
+    #[serde(default)]
+    fields: Vec<SecretField>,    // multi-value: [{label: "Access ID", value: "..."}, ...]
+    #[serde(default)]
+    value: Option<String>,       // legacy single-value (backward compat for API callers)
     description: Option<String>, // human-readable description of what the secret is for
 }
 
@@ -3127,7 +3136,20 @@ async fn create_secret(
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"scope_type must be 'agent', 'company', 'holding', or 'manager'"})));
     }
 
-    let ciphertext = match crypto.encrypt(p.value.as_bytes()) {
+    // Serialize fields to JSON before encryption (supports multi-value secrets with labels)
+    let plaintext = if !p.fields.is_empty() {
+        let fields_json: Vec<Value> = p.fields.iter().map(|f| {
+            json!({"label": f.label, "value": f.value})
+        }).collect();
+        serde_json::to_string(&json!({"fields": fields_json})).unwrap()
+    } else if let Some(ref val) = p.value {
+        // Legacy single-value (backward compat for API callers)
+        serde_json::to_string(&json!({"fields": [{"label": "", "value": val}]})).unwrap()
+    } else {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Either 'fields' or 'value' is required"})));
+    };
+
+    let ciphertext = match crypto.encrypt(plaintext.as_bytes()) {
         Ok(ct) => ct,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Encryption failed: {}", e)}))),
     };
@@ -3293,8 +3315,15 @@ async fn get_agent_secret(
         if let Some((ciphertext,)) = row {
             match crypto.decrypt(&ciphertext) {
                 Ok(plaintext) => {
-                    let value = String::from_utf8_lossy(&plaintext).to_string();
-                    return (StatusCode::OK, Json(json!({"name": name, "value": value})));
+                    let text = String::from_utf8_lossy(&plaintext).to_string();
+                    // Try JSON multi-value format first
+                    if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
+                        if parsed.get("fields").is_some() {
+                            return (StatusCode::OK, Json(json!({"name": name, "fields": parsed["fields"]})));
+                        }
+                    }
+                    // Legacy: plain string value — wrap in fields format
+                    return (StatusCode::OK, Json(json!({"name": name, "fields": [{"label": "", "value": text}]})));
                 }
                 Err(e) => {
                     tracing::error!("Failed to decrypt secret '{}': {}", name, e);
@@ -3349,6 +3378,20 @@ async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, 
         for (ciphertext,) in rows {
             if let Ok(plaintext) = crypto.decrypt(&ciphertext) {
                 if let Ok(secret_str) = String::from_utf8(plaintext) {
+                    // Try JSON multi-value format: scrub each field's value individually
+                    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&secret_str) {
+                        if let Some(fields) = parsed["fields"].as_array() {
+                            for field in fields {
+                                if let Some(val) = field["value"].as_str() {
+                                    if val.len() >= 4 && scrubbed.contains(val) {
+                                        scrubbed = scrubbed.replace(val, "[REDACTED]");
+                                    }
+                                }
+                            }
+                            continue;
+                        }
+                    }
+                    // Legacy: plain string value
                     if secret_str.len() >= 4 && scrubbed.contains(&secret_str) {
                         scrubbed = scrubbed.replace(&secret_str, "[REDACTED]");
                     }

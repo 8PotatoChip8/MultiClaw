@@ -148,7 +148,7 @@ export const api = {
         const qs = params.toString();
         return request(`/secrets${qs ? `?${qs}` : ''}`);
     },
-    createSecret: (data: { scope_type: string; scope_id: string; name: string; value: string; description?: string }) =>
+    createSecret: (data: { scope_type: string; scope_id: string; name: string; fields: { label: string; value: string }[]; description?: string }) =>
         request('/secrets', { method: 'POST', body: JSON.stringify(data) }),
     deleteSecret: (id: string) =>
         request(`/secrets/${id}`, { method: 'DELETE' }),
