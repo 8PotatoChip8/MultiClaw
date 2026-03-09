@@ -55,6 +55,7 @@ export default function SettingsPage() {
         setUpdateInfo(info);
         if (info) localStorage.setItem('_update_info', JSON.stringify(info));
         setChecking(false);
+        window.dispatchEvent(new Event('multiclaw-update-check'));
     };
 
     const handleSaveHeartbeat = async () => {
