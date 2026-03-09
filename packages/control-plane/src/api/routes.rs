@@ -35,6 +35,100 @@ use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 /// Strip known system tags and model artifacts from agent responses.
 /// Returns (cleaned_text, had_end_conversation).
+/// Remove spurious single newlines inserted by OpenClaw's streaming token assembly.
+/// Preserves structurally significant newlines: paragraph breaks (\n\n), code blocks,
+/// list items, headings, blockquotes, tables, and CommonMark hard breaks.
+fn clean_spurious_newlines(text: &str) -> String {
+    let lines: Vec<&str> = text.split('\n').collect();
+    if lines.len() <= 1 {
+        return text.to_string();
+    }
+
+    let mut result = String::with_capacity(text.len());
+    let mut in_code_block = false;
+
+    for i in 0..lines.len() {
+        let line = lines[i];
+
+        // Track code fence state
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+        }
+
+        result.push_str(line);
+
+        // Don't add separator after the last line
+        if i == lines.len() - 1 {
+            break;
+        }
+
+        let next_line = lines[i + 1];
+        let next_trimmed = next_line.trim_start();
+
+        // Keep this newline if it's structurally significant; otherwise replace with space
+        let keep_newline =
+            in_code_block
+            || line.is_empty()                              // part of paragraph break
+            || next_line.is_empty()                         // part of paragraph break
+            || next_trimmed.starts_with("```")              // entering/leaving code block
+            || line.trim_start().starts_with("```")         // just entered/left code block
+            || next_trimmed.starts_with("# ")
+            || next_trimmed.starts_with("## ")
+            || next_trimmed.starts_with("### ")
+            || next_trimmed.starts_with("#### ")
+            || next_trimmed.starts_with("#####")
+            || line.trim_start().starts_with('#')            // prev was heading
+            || next_trimmed.starts_with("- ")
+            || next_trimmed.starts_with("* ")
+            || next_trimmed.starts_with("+ ")
+            || is_ordered_list_marker(next_trimmed)
+            || next_trimmed.starts_with("> ")                // blockquote
+            || next_trimmed.starts_with('|')                 // table
+            || line.ends_with("  ")                          // hard line break (two trailing spaces)
+            || line.ends_with('\\')                          // hard line break (backslash)
+            ;
+
+        if keep_newline {
+            result.push('\n');
+        } else {
+            result.push(' ');
+        }
+    }
+
+    collapse_spaces(&result)
+}
+
+/// Check if a line starts with an ordered list marker like "1. ", "12. ", etc.
+fn is_ordered_list_marker(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    if i >= bytes.len() || !bytes[i].is_ascii_digit() {
+        return false;
+    }
+    while i < bytes.len() && bytes[i].is_ascii_digit() {
+        i += 1;
+    }
+    i + 1 < bytes.len() && bytes[i] == b'.' && bytes[i + 1] == b' '
+}
+
+/// Collapse runs of multiple spaces into a single space.
+fn collapse_spaces(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_space = false;
+    for ch in s.chars() {
+        if ch == ' ' {
+            if !prev_space {
+                result.push(ch);
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+            result.push(ch);
+        }
+    }
+    result
+}
+
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = response.contains("[END_CONVERSATION]");
     let mut text = response.to_string();
@@ -59,6 +153,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
         }
         break;
     }
+    // Clean spurious newlines from streaming token assembly
+    text = clean_spurious_newlines(&text);
     (text.trim().to_string(), end_conv)
 }
 
