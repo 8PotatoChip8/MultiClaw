@@ -121,6 +121,45 @@ fn collapse_spaces(s: &str) -> String {
     result
 }
 
+/// Fix spacing artifacts from streaming token assembly:
+/// - Remove space before sentence punctuation (. , ; : ! ?)
+/// - Remove space before apostrophes in contractions (I've, don't, it's)
+/// Does NOT remove space before opening quotes (e.g., He said 'hello').
+fn fix_punctuation_spacing(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let len = bytes.len();
+    let mut result = String::with_capacity(len);
+    let mut i = 0;
+
+    while i < len {
+        if bytes[i] == b' ' {
+            // Look ahead past any consecutive spaces
+            let mut j = i + 1;
+            while j < len && bytes[j] == b' ' {
+                j += 1;
+            }
+            if j < len {
+                let next = bytes[j];
+                // Space before sentence/clause punctuation — collapse
+                if matches!(next, b'.' | b',' | b';' | b':' | b'!' | b'?') {
+                    i = j;
+                    continue;
+                }
+                // Space before apostrophe in a contraction (letter + space + ' + lowercase)
+                if next == b'\'' && j + 1 < len && bytes[j + 1].is_ascii_lowercase() {
+                    if i > 0 && bytes[i - 1].is_ascii_alphabetic() {
+                        i = j;
+                        continue;
+                    }
+                }
+            }
+        }
+        result.push(bytes[i] as char);
+        i += 1;
+    }
+    result
+}
+
 /// Remove lines that are pure narration filler (defense-in-depth for model ignoring instructions).
 /// Only strips lines where the ENTIRE content is a narration phrase + optional trailing punctuation.
 fn strip_narration_lines(text: &str) -> String {
@@ -192,6 +231,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = strip_narration_lines(&text);
     // Clean spurious newlines from streaming token assembly
     text = clean_spurious_newlines(&text);
+    // Fix spacing artifacts: space before punctuation/contractions from token boundaries
+    text = fix_punctuation_spacing(&text);
     (text.trim().to_string(), end_conv)
 }
 
@@ -1304,6 +1345,36 @@ async fn get_thread(State(state): State<AppState>, Path(id): Path<String>) -> im
 }
 
 async fn create_thread(State(state): State<AppState>, Json(p): Json<CreateThreadRequest>) -> impl IntoResponse {
+    // Deduplication for GROUP threads: reuse existing thread if one has the exact same member set
+    if p.r#type == "GROUP" {
+        if let Some(ref member_ids) = p.member_ids {
+            if !member_ids.is_empty() {
+                let mut sorted_ids: Vec<Uuid> = member_ids.iter().copied().collect();
+                sorted_ids.sort();
+                sorted_ids.dedup();
+                let member_count = sorted_ids.len() as i64;
+
+                // Find a GROUP thread with EXACTLY this member set (same IDs, same count)
+                let existing: Option<(Uuid, Option<String>)> = sqlx::query_as(
+                    "SELECT t.id, t.title FROM threads t \
+                     WHERE t.type = 'GROUP' \
+                       AND (SELECT COUNT(*) FROM thread_members tm WHERE tm.thread_id = t.id AND tm.member_type = 'AGENT') = $1 \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM unnest($2::uuid[]) AS req_id \
+                           WHERE req_id NOT IN (SELECT tm2.member_id FROM thread_members tm2 WHERE tm2.thread_id = t.id AND tm2.member_type = 'AGENT') \
+                       ) \
+                     LIMIT 1"
+                ).bind(member_count).bind(&sorted_ids).fetch_optional(&state.db).await.ok().flatten();
+
+                if let Some((existing_id, existing_title)) = existing {
+                    return (StatusCode::OK, Json(json!({
+                        "id": existing_id, "type": "GROUP", "title": existing_title, "deduplicated": true
+                    })));
+                }
+            }
+        }
+    }
+
     let id = Uuid::new_v4();
     let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, $2, $3)")
         .bind(id).bind(&p.r#type).bind(&p.title).execute(&state.db).await;
@@ -1517,10 +1588,24 @@ async fn send_message(
 
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
+                            // Prepend per-agent identity so the agent knows who they are
+                            let agent_role: Option<String> = sqlx::query_scalar(
+                                "SELECT role FROM agents WHERE id = $1"
+                            ).bind(responding_agent_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                            let agent_name_ctx: String = sqlx::query_scalar(
+                                "SELECT name FROM agents WHERE id = $1"
+                            ).bind(responding_agent_id).fetch_optional(&state_clone.db).await.ok().flatten()
+                                .unwrap_or_else(|| "Agent".to_string());
+                            let role_str = match agent_role.as_deref() {
+                                Some("CEO") => "CEO", Some("MANAGER") => "Manager",
+                                Some("WORKER") => "Worker", _ => "member",
+                            };
+                            let agent_context = format!("You are {} ({}). {}", agent_name_ctx, role_str, thread_context);
+
                             state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
                                 *responding_agent_id, &user_text,
-                                Some(&thread_context)
+                                Some(&agent_context)
                             ).await {
                                 Ok(response) => {
                                     tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
@@ -2237,8 +2322,8 @@ async fn agent_dm(
                 _ if sender_parent == Some(target_id) => true,
                 // Can DM your direct child
                 _ if target_parent == Some(sender_id) => true,
-                // CEO can DM any agent in their company
-                (Some("CEO"), _) if sender_company == target_company && sender_company.is_some() => true,
+                // CEO can DM managers in their company (not workers — go through the manager)
+                (Some("CEO"), Some("MANAGER")) if sender_company == target_company && sender_company.is_some() => true,
                 // Peers under the same parent in the same company
                 _ if sender_company == target_company && sender_parent == target_parent
                     && sender_company.is_some() => true,
@@ -2357,12 +2442,40 @@ async fn agent_dm(
                         break;
                     }
 
-                    // Build DM instructions with the conversation partner's name
+                    // Build DM instructions with role/hierarchy context
                     let partner_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
                         .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten()
                         .unwrap_or_else(|| "a colleague".into());
+                    let responder_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten()
+                        .unwrap_or_else(|| "Agent".into());
+                    let responder_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                    let partner_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                    let responder_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
+                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                    let partner_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
+                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten();
+                    let responder_company: Option<String> = sqlx::query_scalar(
+                        "SELECT c.name FROM companies c JOIN agents a ON a.company_id = c.id WHERE a.id = $1"
+                    ).bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
+
+                    let role_label = |r: &Option<String>| match r.as_deref() {
+                        Some("CEO") => "CEO", Some("MANAGER") => "Manager",
+                        Some("WORKER") => "Worker", Some("MAIN") => "Main Agent", _ => "colleague",
+                    };
+                    let relationship = if responder_parent == Some(other_id) {
+                        "They are your superior — you report to them."
+                    } else if partner_parent == Some(responder_id) {
+                        "They report to you."
+                    } else if responder_parent == partner_parent && responder_parent.is_some() {
+                        "They are your peer — you share the same manager."
+                    } else { "" };
+
+                    let company_label = responder_company.as_deref().unwrap_or("the company");
                     let dm_ctx = format!(
-                        "You are in a direct message conversation with {}. \
+                        "You are {} ({} at {}). You are in a DM with {} ({}). {} \
                          Communicate naturally — ask questions, share information, and respond as needed. \
                          Send ONLY your actual message to {}. \
                          NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
@@ -2370,7 +2483,9 @@ async fn agent_dm(
                          When the conversation has reached a natural conclusion and you have nothing more to add, \
                          end your final message with the exact tag [END_CONVERSATION] on its own line. \
                          Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
-                        partner_name, partner_name, partner_name, partner_name
+                        responder_name, role_label(&responder_role), company_label,
+                        partner_name, role_label(&partner_role), relationship,
+                        partner_name, partner_name, partner_name
                     );
 
                     state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
