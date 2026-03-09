@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use rate_limiter::AdaptiveRateLimiter;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
@@ -32,6 +32,8 @@ pub struct OpenClawManager {
     rate_limiter: AdaptiveRateLimiter,
     /// Atomic counter for port allocation (avoids race conditions on concurrent spawns)
     next_port_offset: Arc<AtomicU16>,
+    /// Agent IDs with a spawn in flight — watchdog must skip these to avoid duplicate containers.
+    pending_spawns: Arc<RwLock<HashSet<Uuid>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,11 +82,26 @@ impl OpenClawManager {
             base_port: 18790,
             rate_limiter: AdaptiveRateLimiter::new(),
             next_port_offset: Arc::new(AtomicU16::new(0)),
+            pending_spawns: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
+    /// Register an agent as having a spawn in flight.
+    /// Call BEFORE tokio::spawn(spawn_instance()) to prevent watchdog races.
+    pub async fn register_pending_spawn(&self, agent_id: Uuid) {
+        self.pending_spawns.write().await.insert(agent_id);
+    }
+
     /// Spawn an OpenClaw instance for an agent.
+    /// Automatically clears the pending-spawn flag on all exit paths.
     pub async fn spawn_instance(&self, config: &AgentConfig) -> Result<OpenClawInstance> {
+        let result = self.spawn_instance_inner(config).await;
+        // Always clear pending flag — instance is now tracked (success) or failed
+        self.pending_spawns.write().await.remove(&config.agent_id);
+        result
+    }
+
+    async fn spawn_instance_inner(&self, config: &AgentConfig) -> Result<OpenClawInstance> {
         let agent_id = config.agent_id;
 
         // Check if already running
@@ -575,6 +592,10 @@ impl OpenClawManager {
             let mut instances = self.instances.write().await;
             instances.clear();
         }
+        {
+            let mut pending = self.pending_spawns.write().await;
+            pending.clear();
+        }
         // Reset port counter — all containers are wiped, so ports are free.
         self.next_port_offset.store(0, Ordering::SeqCst);
 
@@ -647,8 +668,14 @@ impl OpenClawManager {
         // Phase 1: Identify which agents need respawning (read lock only)
         let mut needs_respawn: Vec<Uuid> = Vec::new();
         {
+            let pending = self.pending_spawns.read().await;
             let instances = self.instances.read().await;
             for (agent_id,) in &agent_ids {
+                // Skip agents with a spawn already in flight
+                if pending.contains(agent_id) {
+                    tracing::debug!("Watchdog: skipping agent {} (spawn pending)", agent_id);
+                    continue;
+                }
                 if let Some(inst) = instances.get(agent_id) {
                     // Skip instances still starting up — avoid racing the spawn
                     if inst.status == InstanceStatus::Starting {

@@ -121,6 +121,47 @@ fn collapse_spaces(s: &str) -> String {
     result
 }
 
+/// Remove lines that are pure narration filler (defense-in-depth for model ignoring instructions).
+/// Only strips lines where the ENTIRE content is a narration phrase + optional trailing punctuation.
+fn strip_narration_lines(text: &str) -> String {
+    const NARRATION_PREFIXES: &[&str] = &[
+        "let me check", "let me look", "let me review", "let me send",
+        "let me see", "let me find", "let me get", "let me pull", "let me search",
+        "now let me", "now i'll", "now i will",
+        "i'll check", "i'll review", "i'll look", "i'll send",
+        "i'll search", "i'll find", "i'll get",
+        "i will check", "i will review", "i will look",
+        "sending now", "checking now", "looking now", "reviewing now", "searching now",
+    ];
+
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut result: Vec<&str> = Vec::with_capacity(lines.len());
+
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            result.push(line);
+            continue;
+        }
+        let lower = trimmed.to_lowercase();
+
+        // Check if the line is JUST a narration prefix + optional punctuation
+        let is_pure_narration = NARRATION_PREFIXES.iter().any(|prefix| {
+            if !lower.starts_with(prefix) {
+                return false;
+            }
+            let remainder = lower[prefix.len()..].trim();
+            remainder.is_empty() || remainder.chars().all(|c| ".,;:!?…".contains(c))
+        });
+
+        if !is_pure_narration {
+            result.push(line);
+        }
+    }
+
+    result.join("\n")
+}
+
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = response.contains("[END_CONVERSATION]");
     let mut text = response.to_string();
@@ -128,6 +169,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("[END_CONVERSATION]", "");
     text = text.replace("[HEARTBEAT_OK]", "");
     text = text.replace("HEARTBEAT_OK", "");
+    text = text.replace("[NO_ACTION_NEEDED]", "");
+    text = text.replace("NO_ACTION_NEEDED", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
     // Strip known model artifacts
@@ -145,6 +188,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
         }
         break;
     }
+    // Strip pure narration lines (defense-in-depth for model ignoring instructions)
+    text = strip_narration_lines(&text);
     // Clean spurious newlines from streaming token assembly
     text = clean_spurious_newlines(&text);
     (text.trim().to_string(), end_conv)
@@ -320,6 +365,7 @@ async fn handle_init(
     .execute(&state.db).await;
 
     // Spawn OpenClaw instance for MainAgent in background
+    state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let agent_name_clone = agent_name.clone();
     let model_clone = model.clone();
@@ -529,6 +575,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
         .bind(company_id).bind(agent_id).execute(&state.db).await;
 
     // Spawn OpenClaw instance in background
+    state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
     let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
@@ -592,6 +639,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     .execute(&state.db).await;
 
     // Spawn OpenClaw instance in background
+    state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
     let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
@@ -654,6 +702,7 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     .execute(&state.db).await;
 
     // Spawn OpenClaw instance in background
+    state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
     let company_name: String = sqlx::query_scalar("SELECT name FROM companies WHERE id = $1").bind(company_id)
@@ -2395,6 +2444,51 @@ async fn agent_dm(
                 // Mark both agents as idle when the DM conversation ends
                 state_clone.mark_agent_done(sender_id).await;
                 state_clone.mark_agent_done(target_id).await;
+
+                // Post-conversation action prompt: nudge the TARGET agent (the one who
+                // received the DM) to act on what was discussed (hire workers, start tasks, etc.).
+                // Only for CEO and MANAGER roles — WORKERS act on direct instructions,
+                // and MAIN already has its own heartbeat loop.
+                let target_role: Option<String> = sqlx::query_scalar(
+                    "SELECT role FROM agents WHERE id = $1 AND status = 'ACTIVE'"
+                ).bind(target_id).fetch_optional(&state_clone.db).await.ok().flatten();
+
+                if matches!(target_role.as_deref(), Some("CEO") | Some("MANAGER")) {
+                    let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(sender_id).fetch_optional(&state_clone.db).await.ok().flatten()
+                        .unwrap_or_else(|| "your colleague".into());
+
+                    let action_prompt = format!(
+                        "SYSTEM: The conversation with {} has concluded. \
+                         Based on what was discussed, take any immediate actions you need to: \
+                         hire staff, assign tasks, start projects, send messages to your team, etc. \
+                         If no action is needed right now, respond with just: [NO_ACTION_NEEDED] \
+                         Do NOT repeat or summarize the conversation — just act.",
+                        sender_name
+                    );
+
+                    let action_instructions = "You just finished receiving a briefing or directive. \
+                        Execute on it immediately using your available tools. \
+                        Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
+
+                    tracing::info!("Post-DM action prompt for {} ({})", target_id, target_role.as_deref().unwrap_or("?"));
+                    state_clone.mark_agent_working(target_id, "Acting on briefing").await;
+                    match state_clone.openclaw.send_message(target_id, &action_prompt, Some(action_instructions)).await {
+                        Ok(response) => {
+                            let (cleaned, _) = strip_agent_tags(&response);
+                            let normalized = cleaned.replace('[', "").replace(']', "").replace('\n', " ").replace(' ', "");
+                            if normalized.trim().is_empty() || normalized.trim().eq_ignore_ascii_case("NOACTIONNEEDED") {
+                                tracing::debug!("Post-DM: {} has no immediate actions", target_id);
+                            } else {
+                                tracing::info!("Post-DM: {} took action ({} chars)", target_id, cleaned.len());
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Post-DM action prompt failed for {}: {}", target_id, e);
+                        }
+                    }
+                    state_clone.mark_agent_done(target_id).await;
+                }
 
                 // Record cooldown for this agent pair to prevent infinite re-initiation
                 let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
