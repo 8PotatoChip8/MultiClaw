@@ -39,6 +39,9 @@ export const api = {
     hireCeo: (companyId: string, data: { name: string; specialty?: string; preferred_model?: string }) =>
         request(`/companies/${companyId}/hire-ceo`, { method: 'POST', body: JSON.stringify(data) }),
     getLedger: (companyId: string) => request(`/companies/${companyId}/ledger`),
+    createLedgerEntry: (companyId: string, data: { type: string; amount: number; currency: string; memo?: string; counterparty_company_id?: string }) =>
+        request(`/companies/${companyId}/ledger`, { method: 'POST', body: JSON.stringify(data) }),
+    getBalance: (companyId: string) => request(`/companies/${companyId}/balance`),
 
     // Agents
     getAgents: () => request('/agents'),

@@ -77,7 +77,7 @@ export interface LedgerEntry {
     id: string;
     company_id: string;
     counterparty_company_id: string | null;
-    type: 'EXPENSE' | 'REVENUE' | 'INTERNAL_TRANSFER';
+    type: 'EXPENSE' | 'REVENUE' | 'INTERNAL_TRANSFER' | 'CAPITAL_INJECTION';
     amount: number;
     currency: string;
     memo: string | null;

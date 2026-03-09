@@ -188,6 +188,22 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox 
 curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
 ```
 
+### Record a Ledger Entry
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger" \
+  -H 'Content-Type: application/json' \
+  -d '{"type": "CAPITAL_INJECTION", "amount": 50000, "currency": "USD", "memo": "Initial funding"}'
+```
+Types: `CAPITAL_INJECTION` (starting capital), `REVENUE`, `EXPENSE`, `INTERNAL_TRANSFER` (sends to counterparty).
+Currency: any string — `USD`, `EUR`, `BTC`, `ETH`, etc.
+For `INTERNAL_TRANSFER`, include `"counterparty_company_id": "UUID"` to auto-create the paired REVENUE entry on the receiving company.
+
+### Check Company Balance
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/balance
+```
+Returns balance breakdown by currency: `{ "USD": { "revenue": ..., "expenses": ..., "capital": ..., "net": ... } }`.
+
 ### Submit a Request to Superior
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \

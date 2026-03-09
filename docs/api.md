@@ -31,6 +31,23 @@ Authorization: Bearer <token>
 | GET | `/v1/companies/:id/org-tree` | Get organizational hierarchy |
 | POST | `/v1/companies/:id/hire-ceo` | Start CEO hiring workflow |
 | GET | `/v1/companies/:id/ledger` | Get company financial ledger |
+| POST | `/v1/companies/:id/ledger` | Create a ledger entry |
+| GET | `/v1/companies/:id/balance` | Get balance breakdown by currency |
+
+**Create Ledger Entry body:**
+```json
+{
+  "type": "CAPITAL_INJECTION",
+  "amount": 50000,
+  "currency": "USD",
+  "memo": "Initial funding",
+  "counterparty_company_id": "uuid",
+  "engagement_id": "uuid"
+}
+```
+Types: `CAPITAL_INJECTION`, `REVENUE`, `EXPENSE`, `INTERNAL_TRANSFER`. Currency is any string (USD, EUR, BTC, ETH, etc.). For `INTERNAL_TRANSFER`, the counterparty receives a paired `REVENUE` entry automatically.
+
+**Balance response:** `{ "USD": { "revenue": 0, "expenses": 0, "capital": 50000, "net": 50000 } }`
 
 **Hire CEO body:**
 ```json

@@ -48,7 +48,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/companies/:id", get(get_company).patch(update_company))
         .route("/v1/companies/:id/org-tree", get(get_org_tree))
         .route("/v1/companies/:id/hire-ceo", post(hire_ceo))
-        .route("/v1/companies/:id/ledger", get(get_ledger))
+        .route("/v1/companies/:id/ledger", get(get_ledger).post(create_ledger_entry))
+        .route("/v1/companies/:id/balance", get(get_balance))
         // Agents
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:id", get(get_agent).patch(patch_agent))
@@ -1605,6 +1606,45 @@ async fn activate_engagement(State(state): State<AppState>, Path(id): Path<Strin
 async fn complete_engagement(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let _ = sqlx::query("UPDATE service_engagements SET status = 'COMPLETED' WHERE id = $1").bind(uid).execute(&state.db).await;
+
+    // Auto-record paired ledger entries for the engagement
+    let engagement: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
+        "SELECT client_company_id, provider_company_id, service_id FROM service_engagements WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    if let Some((client_id, provider_id, service_id)) = engagement {
+        let svc: Option<(String, Value)> = sqlx::query_as(
+            "SELECT name, rate FROM service_catalog WHERE id = $1"
+        ).bind(service_id).fetch_optional(&state.db).await.ok().flatten();
+
+        if let Some((service_name, rate)) = svc {
+            let amount = rate["amount"].as_f64().unwrap_or(0.0);
+            let currency = rate["currency"].as_str().unwrap_or("USD").to_string();
+
+            if amount > 0.0 {
+                let amount_str = format!("{}", amount);
+                let expense_memo = format!("Service: {} (engagement completed)", service_name);
+                let revenue_memo = format!("Service: {} (engagement completed)", service_name);
+
+                // EXPENSE for client
+                let _ = sqlx::query(
+                    "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual) \
+                     VALUES ($1, $2, $3, $4, 'EXPENSE', $5::NUMERIC, $6, $7, true)"
+                ).bind(Uuid::new_v4()).bind(client_id).bind(Some(provider_id)).bind(Some(uid))
+                 .bind(&amount_str).bind(&currency).bind(&expense_memo)
+                 .execute(&state.db).await;
+
+                // REVENUE for provider
+                let _ = sqlx::query(
+                    "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual) \
+                     VALUES ($1, $2, $3, $4, 'REVENUE', $5::NUMERIC, $6, $7, true)"
+                ).bind(Uuid::new_v4()).bind(provider_id).bind(Some(client_id)).bind(Some(uid))
+                 .bind(&amount_str).bind(&currency).bind(&revenue_memo)
+                 .execute(&state.db).await;
+            }
+        }
+    }
+
     (StatusCode::OK, Json(json!({"status":"completed"})))
 }
 
@@ -1621,6 +1661,93 @@ async fn get_ledger(State(state): State<AppState>, Path(id): Path<String>) -> im
         Ok(l) => (StatusCode::OK, Json(json!(l))),
         Err(_) => (StatusCode::OK, Json(json!([])))
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateLedgerEntryRequest {
+    r#type: String,
+    amount: f64,
+    currency: String,
+    memo: Option<String>,
+    counterparty_company_id: Option<String>,
+    engagement_id: Option<String>,
+}
+
+async fn create_ledger_entry(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateLedgerEntryRequest>) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let valid_types = ["EXPENSE", "REVENUE", "INTERNAL_TRANSFER", "CAPITAL_INJECTION"];
+    if !valid_types.contains(&p.r#type.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid type. Must be one of: {}", valid_types.join(", "))})));
+    }
+    if p.amount <= 0.0 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error":"Amount must be positive"})));
+    }
+
+    let counterparty_id = p.counterparty_company_id.as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok());
+    let engagement_id = p.engagement_id.as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    let entry_id = Uuid::new_v4();
+    let amount_str = format!("{}", p.amount);
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual) \
+         VALUES ($1, $2, $3, $4, $5, $6::NUMERIC, $7, $8, true)"
+    ).bind(entry_id).bind(company_id).bind(counterparty_id).bind(engagement_id)
+     .bind(&p.r#type).bind(&amount_str).bind(&p.currency).bind(&p.memo)
+     .execute(&state.db).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
+    }
+
+    // For INTERNAL_TRANSFER, create the paired entry on the counterparty
+    if p.r#type == "INTERNAL_TRANSFER" {
+        if let Some(cp_id) = counterparty_id {
+            let paired_id = Uuid::new_v4();
+            let paired_memo = p.memo.as_deref().map(|m| format!("Transfer from counterparty: {}", m))
+                .unwrap_or_else(|| "Transfer from counterparty".to_string());
+            let _ = sqlx::query(
+                "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual) \
+                 VALUES ($1, $2, $3, $4, 'REVENUE', $5::NUMERIC, $6, $7, true)"
+            ).bind(paired_id).bind(cp_id).bind(Some(company_id)).bind(engagement_id)
+             .bind(&amount_str).bind(&p.currency).bind(&paired_memo)
+             .execute(&state.db).await;
+        }
+    }
+
+    (StatusCode::CREATED, Json(json!({"id": entry_id})))
+}
+
+async fn get_balance(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    let rows: Vec<(String, String, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT currency, type, COALESCE(SUM(amount), 0) as total \
+         FROM ledger_entries WHERE company_id = $1 GROUP BY currency, type"
+    ).bind(uid).fetch_all(&state.db).await.unwrap_or_default();
+
+    let mut balances: serde_json::Map<String, Value> = serde_json::Map::new();
+    for (currency, entry_type, total) in &rows {
+        let currency_obj = balances.entry(currency.clone())
+            .or_insert_with(|| json!({"revenue": 0.0, "expenses": 0.0, "capital": 0.0, "net": 0.0}));
+        let total_f64 = total.to_string().parse::<f64>().unwrap_or(0.0);
+        match entry_type.as_str() {
+            "REVENUE" => { currency_obj["revenue"] = json!(total_f64); }
+            "EXPENSE" => { currency_obj["expenses"] = json!(total_f64); }
+            "CAPITAL_INJECTION" => { currency_obj["capital"] = json!(total_f64); }
+            "INTERNAL_TRANSFER" => { currency_obj["expenses"] = json!(currency_obj["expenses"].as_f64().unwrap_or(0.0) + total_f64); }
+            _ => {}
+        }
+    }
+    // Calculate net for each currency
+    for (_, obj) in balances.iter_mut() {
+        let revenue = obj["revenue"].as_f64().unwrap_or(0.0);
+        let expenses = obj["expenses"].as_f64().unwrap_or(0.0);
+        let capital = obj["capital"].as_f64().unwrap_or(0.0);
+        obj["net"] = json!(capital + revenue - expenses);
+    }
+
+    (StatusCode::OK, Json(json!(balances)))
 }
 
 // ═══════════════════════════════════════════════════════════════
