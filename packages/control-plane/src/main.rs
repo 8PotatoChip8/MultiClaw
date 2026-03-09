@@ -220,31 +220,38 @@ async fn main() -> anyhow::Result<()> {
             match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
                 Ok(response) => {
                     let trimmed = response.trim();
+                    // Check for heartbeat OK in the raw response (before stripping removes it)
                     if trimmed == "[HEARTBEAT_OK]" || trimmed.contains("[HEARTBEAT_OK]") {
                         tracing::debug!("Heartbeat: {} reports all clear", main_name);
                     } else {
-                        tracing::info!("Heartbeat: {} has a report ({}B)", main_name, trimmed.len());
-                        // Store the response in the MainAgent's human-operator DM thread
-                        let thread_id: Option<Uuid> = sqlx::query_scalar(
-                            "SELECT tm.thread_id FROM thread_members tm \
-                             JOIN threads t ON t.id = tm.thread_id \
-                             JOIN thread_members tm2 ON t.id = tm2.thread_id \
-                             WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
-                               AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
-                        ).bind(main_id).fetch_optional(&pool_hb).await.ok().flatten();
+                        // Strip system tags from reports before storing
+                        let (cleaned, _) = api::routes::strip_agent_tags(trimmed);
+                        if cleaned.is_empty() {
+                            tracing::debug!("Heartbeat: {} response was empty after cleaning", main_name);
+                        } else {
+                            tracing::info!("Heartbeat: {} has a report ({}B)", main_name, cleaned.len());
+                            // Store the cleaned response in the MainAgent's human-operator DM thread
+                            let thread_id: Option<Uuid> = sqlx::query_scalar(
+                                "SELECT tm.thread_id FROM thread_members tm \
+                                 JOIN threads t ON t.id = tm.thread_id \
+                                 JOIN thread_members tm2 ON t.id = tm2.thread_id \
+                                 WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                                   AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
+                            ).bind(main_id).fetch_optional(&pool_hb).await.ok().flatten();
 
-                        if let Some(tid) = thread_id {
-                            let msg_id = Uuid::new_v4();
-                            let content = serde_json::json!({"text": trimmed});
-                            let _ = sqlx::query(
-                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
-                                 VALUES ($1,$2,'AGENT',$3,$4,0)"
-                            ).bind(msg_id).bind(tid).bind(main_id).bind(&content)
-                            .execute(&pool_hb).await;
-                            let _ = tx_hb.send(serde_json::json!({
-                                "type":"new_message",
-                                "message": {"id": msg_id, "thread_id": tid, "sender_type": "AGENT", "sender_id": main_id, "content": content}
-                            }).to_string());
+                            if let Some(tid) = thread_id {
+                                let msg_id = Uuid::new_v4();
+                                let content = serde_json::json!({"text": cleaned});
+                                let _ = sqlx::query(
+                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+                                     VALUES ($1,$2,'AGENT',$3,$4,0)"
+                                ).bind(msg_id).bind(tid).bind(main_id).bind(&content)
+                                .execute(&pool_hb).await;
+                                let _ = tx_hb.send(serde_json::json!({
+                                    "type":"new_message",
+                                    "message": {"id": msg_id, "thread_id": tid, "sender_type": "AGENT", "sender_id": main_id, "content": content}
+                                }).to_string());
+                            }
                         }
                     }
                 }

@@ -35,7 +35,7 @@ use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 /// Strip known system tags and model artifacts from agent responses.
 /// Returns (cleaned_text, had_end_conversation).
-fn strip_agent_tags(response: &str) -> (String, bool) {
+pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = response.contains("[END_CONVERSATION]");
     let mut text = response.to_string();
     // Strip known system tags
@@ -1909,6 +1909,48 @@ async fn agent_dm(
     }
     if target_status.as_deref() == Some("QUARANTINED") {
         return (StatusCode::FORBIDDEN, Json(json!({"error":"Target agent is quarantined and cannot receive messages"})));
+    }
+
+    // Enforce communication hierarchy
+    {
+        let sender_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+            .bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+        let target_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+            .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
+
+        // MAIN can DM anyone
+        if sender_role.as_deref() != Some("MAIN") {
+            let sender_company: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM agents WHERE id = $1")
+                .bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+            let target_company: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
+            let sender_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
+                .bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+            let target_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
+
+            let allowed = match (sender_role.as_deref(), target_role.as_deref()) {
+                // Only CEOs can DM MAIN
+                (Some("CEO"), Some("MAIN")) => true,
+                (_, Some("MAIN")) => false,
+                // Can DM your direct parent
+                _ if sender_parent == Some(target_id) => true,
+                // Can DM your direct child
+                _ if target_parent == Some(sender_id) => true,
+                // CEO can DM any agent in their company
+                (Some("CEO"), _) if sender_company == target_company && sender_company.is_some() => true,
+                // Peers under the same parent in the same company
+                _ if sender_company == target_company && sender_parent == target_parent
+                    && sender_company.is_some() => true,
+                _ => false,
+            };
+
+            if !allowed {
+                return (StatusCode::FORBIDDEN, Json(json!({
+                    "error": "You can only message agents in your direct chain of command. Escalate through your superior."
+                })));
+            }
+        }
     }
 
     // Anti-spam: short cooldown to prevent rapid DM re-initiation between same pair
