@@ -33,6 +33,32 @@ const DM_INSTRUCTIONS: &str = "You are in a direct message conversation with a c
     Do NOT use this tag if the other person asked you a question or if there are unresolved topics.";
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
+/// Strip known system tags and model artifacts from agent responses.
+/// Returns (cleaned_text, had_end_conversation).
+fn strip_agent_tags(response: &str) -> (String, bool) {
+    let end_conv = response.contains("[END_CONVERSATION]");
+    let mut text = response.to_string();
+    // Strip known system tags
+    text = text.replace("[END_CONVERSATION]", "");
+    text = text.replace("[HEARTBEAT_OK]", "");
+    // Strip known model artifacts
+    text = text.replace("[[reply_to_current]]", "");
+    // Strip any remaining [[word_word]] artifacts (model-generated tags)
+    while let Some(start) = text.find("[[") {
+        if let Some(end) = text[start..].find("]]") {
+            let tag = &text[start..start + end + 2];
+            // Only strip if it looks like a simple tag (letters, underscores, hyphens)
+            let inner = &tag[2..tag.len() - 2];
+            if inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                text = text.replacen(tag, "", 1);
+                continue;
+            }
+        }
+        break;
+    }
+    (text.trim().to_string(), end_conv)
+}
+
 pub fn app_router(state: AppState) -> Router {
     let cors = CorsLayer::new()
         .allow_origin(Any)
@@ -1239,7 +1265,10 @@ async fn send_message(
 
                         // Send to each responding agent (sequentially to avoid token waste)
                         for responding_agent_id in &responding_agents {
-                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(*responding_agent_id, &user_text, None).await {
+                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
+                                *responding_agent_id, &user_text,
+                                Some("Respond directly to the message. Do not include your internal thoughts, reasoning, or planning process.")
+                            ).await {
                                 Ok(response) => {
                                     tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
                                     Ok(response)
@@ -1266,10 +1295,11 @@ async fn send_message(
 
                             match result {
                                 Ok(response) => {
-                                    // Scrub secrets from agent response before storing
+                                    // Strip system tags and model artifacts, then scrub secrets
+                                    let (cleaned, _) = strip_agent_tags(&response);
                                     let scrubbed = if let Some(ref crypto) = state_clone.crypto {
-                                        scrub_secrets(&state_clone.db, crypto, *responding_agent_id, &response).await
-                                    } else { response };
+                                        scrub_secrets(&state_clone.db, crypto, *responding_agent_id, &cleaned).await
+                                    } else { cleaned };
                                     let resp_id = Uuid::new_v4();
                                     let content = json!({"text": scrubbed});
                                     if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
@@ -1904,6 +1934,20 @@ async fn agent_dm(
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 10 agent messages per minute"})));
     }
 
+    // Prevent concurrent DM conversations between the same pair
+    {
+        let active = state.active_dm_pairs.read().await;
+        if active.contains(&pair_key) {
+            return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
+                "error": "A DM conversation between these agents is already in progress."
+            })));
+        }
+    }
+    {
+        let mut active = state.active_dm_pairs.write().await;
+        active.insert(pair_key);
+    }
+
     // Find existing agent-to-agent DM (no USER members)
     let existing: Option<(Uuid,)> = sqlx::query_as(
         "SELECT t.id FROM threads t \
@@ -1976,13 +2020,8 @@ async fn agent_dm(
 
                     match result {
                         Ok(response) => {
-                            // Check if the agent signaled the conversation is complete
-                            let conversation_complete = response.trim().ends_with("[END_CONVERSATION]");
-                            let clean_response = if conversation_complete {
-                                response.trim().trim_end_matches("[END_CONVERSATION]").trim().to_string()
-                            } else {
-                                response.clone()
-                            };
+                            // Strip system tags and model artifacts from response
+                            let (clean_response, conversation_complete) = strip_agent_tags(&response);
 
                             // Scrub secrets before storing (use clean response without tag)
                             let scrubbed = if let Some(ref crypto) = state_clone.crypto {
@@ -2046,11 +2085,23 @@ async fn agent_dm(
                     let mut cooldowns = state_clone.dm_cooldowns.write().await;
                     cooldowns.insert(pair_key, tokio::time::Instant::now());
                 }
+                // Release active-conversation lock
+                {
+                    let mut active = state_clone.active_dm_pairs.write().await;
+                    active.remove(&pair_key);
+                }
             });
 
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+        Err(e) => {
+            // Release active-conversation lock on failure
+            {
+                let mut active = state.active_dm_pairs.write().await;
+                active.remove(&pair_key);
+            }
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})))
+        }
     }
 }
 

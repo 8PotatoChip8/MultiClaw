@@ -4,7 +4,7 @@ use axum::{
 };
 use futures::{sink::SinkExt, stream::StreamExt};
 use sqlx::PgPool;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
@@ -30,6 +30,9 @@ pub struct AppState {
     /// Key is (min(id_a, id_b), max(id_a, id_b)) to normalize direction.
     /// Prevents rapid re-initiation (10s cooldown), not for rate limiting (handled by OpenClawManager).
     pub dm_cooldowns: Arc<RwLock<HashMap<(Uuid, Uuid), tokio::time::Instant>>>,
+    /// Tracks agent pairs with an active DM conversation in progress.
+    /// Prevents concurrent DM initiation between the same pair.
+    pub active_dm_pairs: Arc<RwLock<HashSet<(Uuid, Uuid)>>>,
 }
 
 /// Handler for the centralized event stream (used by the Next.js UI)

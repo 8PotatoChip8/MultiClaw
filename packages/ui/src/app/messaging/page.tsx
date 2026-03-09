@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../../lib/api';
 import { Thread, Message, Agent } from '../../lib/types';
-import { Radio, Eye, Users, MessageSquare } from 'lucide-react';
+import { Radio, Eye, Users, MessageSquare, ArrowDownToLine } from 'lucide-react';
 import MarkdownText from '../../components/MarkdownText';
 import { useMultiClawEvents } from '../../lib/ws';
 
@@ -15,6 +15,7 @@ export default function AgentCommsPage() {
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [loading, setLoading] = useState(true);
+    const [autoScroll, setAutoScroll] = useState(true);
     const feedRef = useRef<HTMLDivElement>(null);
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const lastEvent = useMultiClawEvents();
@@ -58,7 +59,7 @@ export default function AgentCommsPage() {
         return () => clearInterval(interval);
     }, [selectedThread]);
 
-    useEffect(() => { feedRef.current?.scrollTo(0, feedRef.current.scrollHeight); }, [messages]);
+    useEffect(() => { if (autoScroll) feedRef.current?.scrollTo(0, feedRef.current.scrollHeight); }, [messages, autoScroll]);
 
     const agentParticipants = participants.filter(p => p.member_type === 'AGENT');
 
@@ -121,10 +122,25 @@ export default function AgentCommsPage() {
                         <>
                             {/* Header */}
                             <div style={{ paddingBottom: '12px', borderBottom: '1px solid var(--border)', marginBottom: '12px' }}>
-                                <h3 style={{ fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <Radio size={14} style={{ color: 'var(--accent)' }} />
-                                    {threads.find(t => t.id === selectedThread)?.title || 'Agent Thread'}
-                                </h3>
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                                    <h3 style={{ fontSize: '14px', fontWeight: 600, display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <Radio size={14} style={{ color: 'var(--accent)' }} />
+                                        {threads.find(t => t.id === selectedThread)?.title || 'Agent Thread'}
+                                    </h3>
+                                    <button
+                                        onClick={() => setAutoScroll(!autoScroll)}
+                                        style={{
+                                            display: 'flex', alignItems: 'center', gap: '5px',
+                                            fontSize: '11px', padding: '4px 10px', borderRadius: '6px',
+                                            background: autoScroll ? 'rgba(99,102,241,0.2)' : 'rgba(255,255,255,0.06)',
+                                            color: autoScroll ? 'var(--primary)' : 'var(--text-muted)',
+                                            border: 'none', cursor: 'pointer',
+                                        }}
+                                    >
+                                        <ArrowDownToLine size={12} />
+                                        Auto-scroll {autoScroll ? 'ON' : 'OFF'}
+                                    </button>
+                                </div>
                                 {agentParticipants.length > 0 && (
                                     <div style={{ display: 'flex', gap: '6px', marginTop: '6px', flexWrap: 'wrap' }}>
                                         {agentParticipants.map(p => {
