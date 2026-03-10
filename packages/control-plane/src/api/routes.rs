@@ -189,6 +189,8 @@ fn fix_broken_words(s: &str) -> String {
         ("cer tainly", "certainly"),
         ("Im mediately", "Immediately"),
         ("im mediately", "immediately"),
+        ("Not ed", "Noted"),
+        ("not ed", "noted"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -2699,7 +2701,6 @@ async fn agent_dm(
                     state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
                     let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(&dm_ctx)).await;
                     state_clone.mark_agent_done(responder_id).await;
-                    current_depth += 1;
 
                     match result {
                         Ok(response) => {
@@ -2725,6 +2726,8 @@ async fn agent_dm(
                                     let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
                                 }
                             }
+
+                            current_depth += 1;
 
                             // End if the agent signaled conversation is complete
                             if conversation_complete {
@@ -2800,15 +2803,18 @@ async fn agent_dm(
 
                     let action_prompt = format!(
                         "SYSTEM: The conversation with {} has concluded. \
-                         Based on what was discussed, take any immediate actions you need to: \
-                         hire staff, assign tasks, start projects, send messages to your team, etc. \
-                         If no action is needed right now, respond with just: [NO_ACTION_NEEDED] \
-                         Do NOT repeat or summarize the conversation — just act.",
+                         Based on what was discussed, take any NEW actions you need to. \
+                         Do NOT repeat actions you have already taken — do not re-hire staff you already hired, \
+                         do not re-brief workers you already briefed, do not restart work already in progress. \
+                         Check your existing team and threads before taking action. \
+                         If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
+                         Do NOT repeat or summarize the conversation — just act on what is NEW.",
                         sender_name
                     );
 
                     let action_instructions = "You just finished receiving a briefing or directive. \
-                        Execute on it immediately using your available tools. \
+                        Execute on it immediately using your available tools — but only NEW actions. \
+                        Do not repeat hiring, briefing, or tasks you have already completed. \
                         Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
                     tracing::info!("Post-DM action prompt for {} ({})", target_id, target_role.as_deref().unwrap_or("?"));
