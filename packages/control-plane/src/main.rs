@@ -1,3 +1,6 @@
+use sqlx::PgPool;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use uuid::Uuid;
 
@@ -59,6 +62,18 @@ async fn main() -> anyhow::Result<()> {
     } else {
         tracing::warn!("Could not resolve git HEAD at /opt/multiclaw, deployed_commit not seeded");
     }
+
+    // Record restart timestamp so recovery prompts can reference it
+    let restart_time = chrono::Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO system_meta (key, value) VALUES ('last_restart_at', $1) \
+         ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()"
+    )
+    .bind(&restart_time)
+    .execute(&pool)
+    .await
+    .ok();
+    tracing::info!("Recorded last_restart_at={}", restart_time);
 
     // Try to load MainAgent config from DB (name + model)
     let (agent_name, agent_model) = {
@@ -135,7 +150,11 @@ async fn main() -> anyhow::Result<()> {
         action_prompt_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
-    // Probe Ollama concurrency limit, then recover OpenClaw instances
+    // Watch channel: signals when OpenClaw instance recovery is complete and all containers are ready.
+    // The heartbeat, watchdog, and recovery prompt tasks all wait on this instead of fixed timers.
+    let (recovery_tx, recovery_rx) = tokio::sync::watch::channel(false);
+
+    // Probe Ollama concurrency limit, recover OpenClaw instances, signal when ready
     let pool_clone = pool.clone();
     let openclaw_clone = openclaw_mgr.clone();
     tokio::spawn(async move {
@@ -144,17 +163,38 @@ async fn main() -> anyhow::Result<()> {
 
         tracing::info!("Recovering OpenClaw instances from DB...");
         match openclaw_clone.recover_instances(&pool_clone).await {
-            Ok(()) => tracing::info!("OpenClaw instance recovery complete"),
+            Ok(()) => {
+                tracing::info!("OpenClaw instance recovery complete, waiting for containers to be ready...");
+                // Poll until all instances are Running or Failed (up to 120s)
+                let mut attempts = 0u32;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    attempts += 1;
+                    let instances = openclaw_clone.list_instances().await;
+                    let all_ready = instances.iter().all(|i| {
+                        i.status == openclaw::InstanceStatus::Running
+                            || i.status == openclaw::InstanceStatus::Failed
+                    });
+                    if instances.is_empty() || all_ready || attempts > 24 {
+                        break;
+                    }
+                }
+                tracing::info!("All OpenClaw instances ready (or timed out)");
+            }
             Err(e) => tracing::error!("OpenClaw recovery failed: {}", e),
         }
+        // Signal all waiting tasks that recovery is done
+        let _ = recovery_tx.send(true);
     });
 
     // Watchdog: periodically reconcile OpenClaw instances (every 60s)
     let pool_wd = pool.clone();
     let openclaw_wd = openclaw_mgr.clone();
+    let mut wd_rx = recovery_rx.clone();
     tokio::spawn(async move {
-        // Wait for initial recovery to finish before starting watchdog
-        tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+        // Wait for recovery to actually complete instead of guessing with a timer
+        let _ = wd_rx.changed().await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         tracing::info!("Watchdog reconciliation loop started");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
         loop {
@@ -175,14 +215,111 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Post-restart recovery prompts: cascade top-down so agents resume work
+    let pool_rp = pool.clone();
+    let openclaw_rp = openclaw_mgr.clone();
+    let tx_rp = app_state.tx.clone();
+    let mut rp_rx = recovery_rx.clone();
+    tokio::spawn(async move {
+        // Wait for all containers to be ready
+        let _ = rp_rx.changed().await;
+        tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+
+        // Check if recovery prompts are enabled (default: true)
+        let enabled: bool = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM system_meta WHERE key = 'recovery_prompts_enabled'"
+        ).fetch_optional(&pool_rp).await.ok().flatten()
+         .map(|v| v != "false" && v != "0")
+         .unwrap_or(true);
+
+        if !enabled {
+            tracing::info!("Recovery prompts disabled via system_meta, skipping");
+            return;
+        }
+
+        // Fetch the restart timestamp for the prompt
+        let restart_ts: String = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM system_meta WHERE key = 'last_restart_at'"
+        ).fetch_optional(&pool_rp).await.ok().flatten()
+         .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+        // Fetch all active agents ordered by role tier
+        let agents: Vec<(Uuid, String, String)> = sqlx::query_as(
+            "SELECT id, name, role FROM agents WHERE status = 'ACTIVE' \
+             ORDER BY CASE role \
+               WHEN 'MAIN' THEN 0 \
+               WHEN 'CEO' THEN 1 \
+               WHEN 'MANAGER' THEN 2 \
+               WHEN 'WORKER' THEN 3 \
+               ELSE 4 END, created_at"
+        ).fetch_all(&pool_rp).await.unwrap_or_default();
+
+        if agents.is_empty() {
+            tracing::info!("No active agents — skipping recovery prompts");
+            return;
+        }
+
+        tracing::info!("Starting post-restart recovery prompts for {} agents...", agents.len());
+
+        // Group by tier and send cascade
+        let tiers = ["MAIN", "CEO", "MANAGER", "WORKER"];
+        for tier_name in &tiers {
+            let tier_agents: Vec<&(Uuid, String, String)> = agents.iter()
+                .filter(|a| a.2 == *tier_name)
+                .collect();
+
+            if tier_agents.is_empty() {
+                continue;
+            }
+
+            tracing::info!(
+                "Recovery prompts: sending to {} tier ({} agents)",
+                tier_name, tier_agents.len()
+            );
+
+            // Send to all agents in this tier concurrently
+            let mut handles = Vec::new();
+            for (agent_id, agent_name, role) in &tier_agents {
+                let pool = pool_rp.clone();
+                let openclaw = openclaw_rp.clone();
+                let tx = tx_rp.clone();
+                let agent_id = **agent_id;
+                let agent_name = (*agent_name).clone();
+                let role = (*role).clone();
+                let restart_ts = restart_ts.clone();
+
+                handles.push(tokio::spawn(async move {
+                    send_recovery_prompt(
+                        &pool, &openclaw, &tx,
+                        agent_id, &agent_name, &role, &restart_ts,
+                    ).await;
+                }));
+            }
+
+            // Wait for all agents in this tier to respond before moving to next
+            for handle in handles {
+                let _ = handle.await;
+            }
+
+            // Delay between tiers so agent actions can settle
+            tracing::info!("Recovery prompts: {} tier complete, waiting 30s before next tier", tier_name);
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+        }
+
+        tracing::info!("Post-restart recovery prompts complete");
+    });
+
     // MainAgent heartbeat: periodic check-in loop
     let pool_hb = pool.clone();
     let openclaw_hb = openclaw_mgr.clone();
     let tx_hb = app_state.tx.clone();
+    let mut hb_rx = recovery_rx.clone();
     tokio::spawn(async move {
-        // Wait for OpenClaw instances to recover before starting heartbeat
-        tokio::time::sleep(std::time::Duration::from_secs(180)).await;
-        tracing::info!("MainAgent heartbeat loop started");
+        // Wait for recovery + recovery prompts to finish before starting heartbeat.
+        // The 300s settling delay gives recovery prompts (~5-7 min) time to complete.
+        let _ = hb_rx.changed().await;
+        tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+        tracing::info!("MainAgent heartbeat loop started (post-recovery)");
 
         loop {
             // Read interval from system_meta (default 600s = 10 minutes)
@@ -286,6 +423,135 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
     axum::serve(listener, app).await?;
-    
+
     Ok(())
+}
+
+/// Send a recovery prompt to a single agent after system restart.
+/// Crafts a role-appropriate prompt, sends via OpenClaw, and handles the response.
+/// Only MAIN agent substantive responses are posted to the user DM thread.
+async fn send_recovery_prompt(
+    db: &PgPool,
+    openclaw: &OpenClawManager,
+    tx: &Arc<broadcast::Sender<String>>,
+    agent_id: Uuid,
+    agent_name: &str,
+    role: &str,
+    restart_time: &str,
+) {
+    let prompt = match role {
+        "MAIN" => format!(
+            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
+             All agent containers have been recovered. Your in-memory context from before the restart is gone. \
+             Review your current situation: \
+             1. Check your org tree (companies and their CEOs) \
+             2. Check your recent threads and messages for any in-progress work \
+             3. Check your workspace memory for any saved state \
+             4. Resume any interrupted work or verify everything is on track \
+             If everything looks good and nothing needs immediate attention, respond with just: [RECOVERY_OK] \
+             If there are issues or interrupted work to resume, briefly describe what you're doing about it.",
+            restart_time
+        ),
+        "CEO" => format!(
+            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
+             Your container has been recovered but your in-memory context is gone. \
+             Review your situation: \
+             1. Check your team (managers and workers under you) \
+             2. Check your recent threads and DMs for any in-progress work \
+             3. Check your workspace memory for saved state \
+             4. Resume any interrupted work — do NOT re-hire people you already hired or re-brief people already briefed \
+             If everything is on track, respond with: [RECOVERY_OK] \
+             If you need to resume something, briefly act on it.",
+            restart_time
+        ),
+        "MANAGER" => format!(
+            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
+             Your container has been recovered but your in-memory context is gone. \
+             Review your situation: \
+             1. Check your team (workers under you) \
+             2. Check your recent threads for any in-progress work \
+             3. Check your workspace memory for saved state \
+             4. Resume any interrupted work — do NOT re-hire or re-brief workers already in place \
+             If everything is on track, respond with: [RECOVERY_OK] \
+             If you need to resume something, briefly act on it.",
+            restart_time
+        ),
+        _ => format!(
+            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
+             Your container has been recovered but your in-memory context is gone. \
+             Review your situation: \
+             1. Check your workspace for any in-progress files or work \
+             2. Check your recent threads for context on what you were working on \
+             3. Check your workspace memory for saved state \
+             4. Resume any interrupted work from where you left off \
+             If everything is on track, respond with: [RECOVERY_OK] \
+             If you have interrupted work to resume, briefly describe what you're picking back up.",
+            restart_time
+        ),
+    };
+
+    let instructions = "This is a system-generated restart notification. \
+        Be concise. Review your state using available tools, then either resume \
+        interrupted work or confirm everything is on track with [RECOVERY_OK]. \
+        Do NOT narrate what you are about to do — just do it and respond with the result. \
+        Do NOT repeat or summarize information you already know.";
+
+    tracing::info!("Sending recovery prompt to {} ({})", agent_name, role);
+
+    match openclaw.send_message(agent_id, &prompt, Some(instructions)).await {
+        Ok(response) => {
+            let (cleaned, _) = api::routes::strip_agent_tags(&response);
+            let has_recovery_ok = {
+                let normalized: String = response.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+                    .collect();
+                normalized.contains("RECOVERY_OK") || normalized.contains("RECOVERYOK")
+            };
+
+            if has_recovery_ok {
+                tracing::info!("Recovery: {} ({}) reports all clear", agent_name, role);
+            } else if cleaned.trim().is_empty() {
+                tracing::warn!("Recovery: {} ({}) returned empty response", agent_name, role);
+            } else {
+                tracing::info!(
+                    "Recovery: {} ({}) is resuming work ({} chars)",
+                    agent_name, role, cleaned.len()
+                );
+
+                // For MAIN agent only: post substantive recovery reports to user DM thread
+                // (mirrors heartbeat behavior so the operator sees what MAIN is doing)
+                if role == "MAIN" {
+                    let thread_id: Option<Uuid> = sqlx::query_scalar(
+                        "SELECT tm.thread_id FROM thread_members tm \
+                         JOIN threads t ON t.id = tm.thread_id \
+                         JOIN thread_members tm2 ON t.id = tm2.thread_id \
+                         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                           AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
+                    ).bind(agent_id).fetch_optional(db).await.ok().flatten();
+
+                    if let Some(tid) = thread_id {
+                        let msg_id = Uuid::new_v4();
+                        let prefixed = format!("[Post-Restart Recovery] {}", cleaned);
+                        let content = serde_json::json!({"text": prefixed});
+                        let _ = sqlx::query(
+                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+                             VALUES ($1,$2,'AGENT',$3,$4,0)"
+                        ).bind(msg_id).bind(tid).bind(agent_id).bind(&content)
+                        .execute(db).await;
+                        let _ = tx.send(serde_json::json!({
+                            "type": "new_message",
+                            "message": {
+                                "id": msg_id, "thread_id": tid,
+                                "sender_type": "AGENT", "sender_id": agent_id,
+                                "content": content
+                            }
+                        }).to_string());
+                    }
+                }
+            }
+        }
+        Err(e) => {
+            tracing::error!("Recovery prompt failed for {} ({}): {}", agent_name, role, e);
+        }
+    }
 }
