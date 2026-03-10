@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
     let tx_arc = std::sync::Arc::new(tx);
 
     tracing::info!("MainAgent: name={}, model={}", agent_name, agent_model);
+    let probe_model = agent_model.clone();
     let main_agent = MainAgent::new(agent_name, agent_model, cfg.ollama_url.clone(), tx_arc.clone());
 
     // Initialize VM provider (Incus) — gracefully degrade if unavailable
@@ -115,7 +116,8 @@ async fn main() -> anyhow::Result<()> {
     let ollama_url_for_containers = cfg.ollama_url.clone();
     // MultiClaw API URL from inside containers (host networking = localhost:8080)
     let multiclaw_api_url = format!("http://127.0.0.1:{}", cfg.port);
-    let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url);
+    tracing::info!("Ollama concurrency: max_concurrent_ollama={}", cfg.max_concurrent_ollama);
+    let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url, cfg.max_concurrent_ollama);
 
     let app_state = api::ws::AppState {
         db: pool.clone(),
@@ -133,10 +135,13 @@ async fn main() -> anyhow::Result<()> {
         action_prompt_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
-    // Recover OpenClaw instances from DB in background
+    // Probe Ollama concurrency limit, then recover OpenClaw instances
     let pool_clone = pool.clone();
     let openclaw_clone = openclaw_mgr.clone();
     tokio::spawn(async move {
+        // Probe concurrency before spawning agents (minimises interference)
+        openclaw_clone.probe_concurrency(&probe_model).await;
+
         tracing::info!("Recovering OpenClaw instances from DB...");
         match openclaw_clone.recover_instances(&pool_clone).await {
             Ok(()) => tracing::info!("OpenClaw instance recovery complete"),

@@ -69,6 +69,18 @@ if ! command -v ollama &> /dev/null; then
 fi
 systemctl enable --now ollama
 
+# ── Configure Ollama for concurrent requests ──
+OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL:-4}
+log "Configuring Ollama for $OLLAMA_NUM_PARALLEL parallel requests..."
+mkdir -p /etc/systemd/system/ollama.service.d
+cat > /etc/systemd/system/ollama.service.d/concurrency.conf <<EOF
+[Service]
+Environment="OLLAMA_NUM_PARALLEL=${OLLAMA_NUM_PARALLEL}"
+Environment="OLLAMA_HOST=0.0.0.0"
+EOF
+systemctl daemon-reload
+systemctl restart ollama
+
 # ── Ollama Login for cloud models ──
 log "Ollama Login (required for cloud models)..."
 echo ""
@@ -133,6 +145,7 @@ PORT=8080
 UI_PORT=3000
 PROXY_PORT=11436
 HOST_IP=${HOST_IP}
+MULTICLAW_MAX_CONCURRENT_OLLAMA=${OLLAMA_NUM_PARALLEL}
 EOF
 
 log "Pulling OpenClaw Docker image..."

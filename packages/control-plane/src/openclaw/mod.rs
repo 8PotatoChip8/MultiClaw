@@ -1,7 +1,8 @@
 mod rate_limiter;
 
 use anyhow::{anyhow, Result};
-use rate_limiter::AdaptiveRateLimiter;
+use futures::future::join_all;
+use rate_limiter::ConcurrentRateLimiter;
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
@@ -28,8 +29,8 @@ pub struct OpenClawManager {
     image: String,
     /// Base port for OpenClaw gateways (each agent gets base_port + offset)
     base_port: u16,
-    /// Adaptive rate limiter for upstream LLM API calls (handles 429s)
-    rate_limiter: AdaptiveRateLimiter,
+    /// Concurrency-aware rate limiter for upstream LLM API calls (semaphore + 429 backoff)
+    rate_limiter: ConcurrentRateLimiter,
     /// Atomic counter for port allocation (avoids race conditions on concurrent spawns)
     next_port_offset: Arc<AtomicU16>,
     /// Agent IDs with a spawn in flight — watchdog must skip these to avoid duplicate containers.
@@ -72,6 +73,7 @@ impl OpenClawManager {
         data_dir: PathBuf,
         ollama_url: String,
         multiclaw_api_url: String,
+        max_concurrent_ollama: usize,
     ) -> Self {
         Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
@@ -80,9 +82,91 @@ impl OpenClawManager {
             multiclaw_api_url,
             image: "ghcr.io/openclaw/openclaw:latest".to_string(),
             base_port: 18790,
-            rate_limiter: AdaptiveRateLimiter::new(),
+            rate_limiter: ConcurrentRateLimiter::new(max_concurrent_ollama),
             next_port_offset: Arc::new(AtomicU16::new(0)),
             pending_spawns: Arc::new(RwLock::new(HashSet::new())),
+        }
+    }
+
+    /// Probe Ollama to discover the effective concurrency limit for the account.
+    ///
+    /// Sends `probe_count` concurrent minimal requests directly to the Ollama API
+    /// and counts how many succeed vs. get 429'd. Adjusts the rate limiter's
+    /// semaphore to the discovered limit.
+    ///
+    /// Call this at startup BEFORE any agent traffic. Uses the default model
+    /// with a 1-token response to minimise cost.
+    pub async fn probe_concurrency(&self, model: &str) {
+        let probe_count: usize = 10; // test up to 10 concurrent
+        let ollama_url = self.ollama_url.clone();
+
+        tracing::info!(
+            "Probing Ollama concurrency limit (sending {} concurrent requests to {})...",
+            probe_count, ollama_url
+        );
+
+        let client = reqwest::Client::new();
+        let mut handles = Vec::with_capacity(probe_count);
+
+        for i in 0..probe_count {
+            let client = client.clone();
+            let url = format!("{}/v1/chat/completions", ollama_url);
+            let model = model.to_string();
+            handles.push(tokio::spawn(async move {
+                let resp = client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .json(&serde_json::json!({
+                        "model": model,
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "max_tokens": 1,
+                    }))
+                    .timeout(std::time::Duration::from_secs(60))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(r) => {
+                        let status = r.status().as_u16();
+                        tracing::debug!("Concurrency probe #{}: HTTP {}", i, status);
+                        status != 429
+                    }
+                    Err(e) => {
+                        tracing::debug!("Concurrency probe #{}: error {}", i, e);
+                        false
+                    }
+                }
+            }));
+        }
+
+        let results = join_all(handles).await;
+        let succeeded = results.iter().filter(|r| matches!(r, Ok(true))).count();
+
+        if succeeded == 0 {
+            tracing::warn!(
+                "Concurrency probe: 0/{} succeeded — Ollama may not be ready or login may have expired. \
+                 Keeping configured limit of {}.",
+                probe_count,
+                self.rate_limiter.get_max_concurrent().await
+            );
+            return;
+        }
+
+        // Use the number of successes as the discovered limit.
+        // If all succeeded, the real limit may be higher, but we cap at probe_count.
+        let discovered = succeeded;
+        let configured = self.rate_limiter.get_max_concurrent().await;
+
+        if discovered != configured {
+            tracing::info!(
+                "Concurrency probe: {}/{} succeeded — adjusting limit from {} to {}",
+                succeeded, probe_count, configured, discovered
+            );
+            self.rate_limiter.set_max_concurrent(discovered).await;
+        } else {
+            tracing::info!(
+                "Concurrency probe: {}/{} succeeded — configured limit of {} is correct",
+                succeeded, probe_count, configured
+            );
         }
     }
 
@@ -327,8 +411,10 @@ impl OpenClawManager {
         let mut empty_retries = 0u32;
 
         loop {
-            // Wait for rate limiter permit before each request
-            self.rate_limiter.wait_for_permit().await;
+            // Acquire a concurrency permit (blocks if all slots are in use).
+            // The permit is held until we get a response or decide to retry,
+            // preventing more than max_concurrent simultaneous Ollama requests.
+            let _permit = self.rate_limiter.acquire().await;
 
             let resp = client
                 .post(&url)

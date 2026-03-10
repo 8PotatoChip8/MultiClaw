@@ -26,6 +26,7 @@ services:
       - MASTER_KEY_PATH=${MASTER_KEY_PATH}
       - HOST_IP=${HOST_IP}
       - MULTICLAW_OPENCLAW_DATA=/opt/multiclaw/openclaw-data
+      - MULTICLAW_MAX_CONCURRENT_OLLAMA=${MULTICLAW_MAX_CONCURRENT_OLLAMA:-4}
     volumes:
       - /opt/multiclaw:/opt/multiclaw # Full repo access for git operations (auto-updater)
       - /var/lib/multiclaw:/var/lib/multiclaw
