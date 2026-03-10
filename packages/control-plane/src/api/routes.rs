@@ -25,6 +25,50 @@ const DM_SAFETY_LIMIT: i32 = 20;
 
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
+/// Remove a tag from text even when streaming tokenization has inserted spaces
+/// within the tag (e.g. "HE ARTBEAT_OK" or "END _CONVERSATION").  Matches the
+/// tag characters in order while allowing arbitrary whitespace between them,
+/// optionally wrapped in brackets.  Returns the text with all such occurrences removed.
+fn strip_fragmented_tag(text: &str, tag: &str) -> String {
+    // Build a char-sequence to match (the tag letters in order)
+    let tag_chars: Vec<char> = tag.chars().collect();
+    let text_chars: Vec<char> = text.chars().collect();
+    let mut result = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < text_chars.len() {
+        // Try to match the tag (with optional leading '[') starting at position i
+        let has_bracket = text_chars[i] == '[';
+        let start = if has_bracket { i + 1 } else { i };
+        let mut ti = 0; // index into tag_chars
+        let mut j = start;
+        while ti < tag_chars.len() && j < text_chars.len() {
+            if text_chars[j] == tag_chars[ti] {
+                ti += 1;
+                j += 1;
+            } else if text_chars[j].is_whitespace() {
+                j += 1; // skip whitespace between tag chars
+            } else {
+                break;
+            }
+        }
+        if ti == tag_chars.len() {
+            // Matched the full tag — skip optional trailing ']'
+            if j < text_chars.len() && text_chars[j] == ']' {
+                j += 1;
+            }
+            // Only accept if the match started at a word boundary (not mid-word)
+            let at_boundary = i == 0 || !text_chars[i - 1].is_alphanumeric();
+            if at_boundary {
+                i = j; // skip over the matched tag
+                continue;
+            }
+        }
+        result.push(text_chars[i]);
+        i += 1;
+    }
+    result
+}
+
 /// Strip known system tags and model artifacts from agent responses.
 /// Returns (cleaned_text, had_end_conversation).
 /// Remove spurious single newlines inserted by OpenClaw's streaming token assembly.
@@ -241,7 +285,12 @@ fn strip_narration_lines(text: &str) -> String {
 }
 
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
-    let end_conv = response.contains("[END_CONVERSATION]");
+    let end_conv = {
+        let normalized: String = response.chars()
+            .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+            .collect();
+        normalized.contains("END_CONVERSATION") || normalized.contains("ENDCONVERSATION")
+    };
     let mut text = response.to_string();
     // Strip known system tags (including variants where streaming splits brackets/text across lines)
     text = text.replace("[END_CONVERSATION]", "");
@@ -249,6 +298,11 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("HEARTBEAT_OK", "");
     text = text.replace("[NO_ACTION_NEEDED]", "");
     text = text.replace("NO_ACTION_NEEDED", "");
+    // Strip fragmented variants where streaming split the tag across tokens
+    // (e.g. "HE ARTBEAT_OK", "END _CONVERSATION", "NO_ACTION _NEEDED")
+    text = strip_fragmented_tag(&text, "HEARTBEAT_OK");
+    text = strip_fragmented_tag(&text, "END_CONVERSATION");
+    text = strip_fragmented_tag(&text, "NO_ACTION_NEEDED");
     // Strip internal sentinel from send_message() retry failures
     text = text.replace("[Agent produced no text output]", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")

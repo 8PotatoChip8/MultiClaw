@@ -234,8 +234,9 @@ async fn main() -> anyhow::Result<()> {
                             .collect();
                         normalized.contains("HEARTBEAT_OK") || normalized.contains("HEARTBEATOK")
                     };
-                    if has_heartbeat_tag && cleaned.is_empty() {
-                        // Response was just HEARTBEAT_OK + narration filler — all clear
+                    if has_heartbeat_tag {
+                        // Response contained HEARTBEAT_OK — all clear, discard any
+                        // surrounding narration (e.g. "I'll check... [HEARTBEAT_OK]")
                         tracing::debug!("Heartbeat: {} reports all clear", main_name);
                     } else if cleaned.is_empty() {
                         tracing::debug!("Heartbeat: {} response was empty after cleaning", main_name);
