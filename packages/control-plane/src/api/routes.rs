@@ -233,6 +233,17 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = clean_spurious_newlines(&text);
     // Fix spacing artifacts: space before punctuation/contractions from token boundaries
     text = fix_punctuation_spacing(&text);
+    // Final defense: if the entire remaining text (ignoring whitespace and brackets)
+    // is just a fragmented system tag (e.g. "HE ARTBEAT_OK"), treat as empty.
+    // This catches all streaming-fragmentation variants in one shot.
+    let compact: String = text.chars()
+        .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+        .collect();
+    if matches!(compact.as_str(),
+        "HEARTBEAT_OK" | "HEARTBEATOK" | "ENDCONVERSATION" | "END_CONVERSATION" |
+        "NO_ACTION_NEEDED" | "NOACTIONNEEDED") {
+        text = String::new();
+    }
     (text.trim().to_string(), end_conv)
 }
 

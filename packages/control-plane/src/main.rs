@@ -229,8 +229,10 @@ async fn main() -> anyhow::Result<()> {
                     // the model narrates before the tag, pushing length past any fixed guard.
                     let (cleaned, _) = api::routes::strip_agent_tags(trimmed);
                     let has_heartbeat_tag = {
-                        let normalized = trimmed.replace('[', "").replace(']', "").replace('\n', " ");
-                        normalized.contains("HEARTBEAT_OK")
+                        let normalized: String = trimmed.chars()
+                            .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+                            .collect();
+                        normalized.contains("HEARTBEAT_OK") || normalized.contains("HEARTBEATOK")
                     };
                     if has_heartbeat_tag && cleaned.is_empty() {
                         // Response was just HEARTBEAT_OK + narration filler — all clear
