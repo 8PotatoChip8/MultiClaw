@@ -21,7 +21,7 @@ const MAX_THREAD_REPLY_DEPTH: i32 = 5;
 /// Safety ceiling for agent-to-agent DM conversations.
 /// Conversations should end naturally via [END_CONVERSATION] signal, but this
 /// hard limit prevents truly runaway loops if the signal is never produced.
-const DM_SAFETY_LIMIT: i32 = 50;
+const DM_SAFETY_LIMIT: i32 = 20;
 
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
