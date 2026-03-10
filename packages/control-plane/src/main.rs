@@ -283,7 +283,7 @@ async fn main() -> anyhow::Result<()> {
                 let pool = pool_rp.clone();
                 let openclaw = openclaw_rp.clone();
                 let tx = tx_rp.clone();
-                let agent_id = **agent_id;
+                let agent_id = *agent_id;
                 let agent_name = (*agent_name).clone();
                 let role = (*role).clone();
                 let restart_ts = restart_ts.clone();

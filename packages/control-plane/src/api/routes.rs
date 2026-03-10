@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, patch, put, delete},
+    routing::{get, post, put, delete},
     Json, Router,
 };
 use serde::Deserialize;
@@ -4184,7 +4184,7 @@ async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, 
 }
 
 /// Read OpenClaw's internal files (sessions, agent config) from the host filesystem.
-async fn get_openclaw_files(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn get_openclaw_files(State(_state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let agent_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
 
     let data_root = std::env::var("MULTICLAW_OPENCLAW_DATA").unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
