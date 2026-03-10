@@ -171,18 +171,24 @@ fn fix_broken_words(s: &str) -> String {
         ("under stood", "understood"),
         ("H ire", "Hire"),
         ("h ire", "hire"),
-        ("Ac knowledged", "Acknowledged"),
-        ("ac knowledged", "acknowledged"),
+        ("Ac knowledg", "Acknowledg"),  // catches Acknowledged, Acknowledging, etc.
+        ("ac knowledg", "acknowledg"),
         ("Con firmed", "Confirmed"),
         ("con firmed", "confirmed"),
         ("Ap proved", "Approved"),
         ("ap proved", "approved"),
+        ("App reciate", "Appreciate"),  // catches Appreciate, Appreciated, etc.
+        ("app reciate", "appreciate"),
         ("Re ceived", "Received"),
         ("re ceived", "received"),
         ("Pro ceeding", "Proceeding"),
         ("pro ceeding", "proceeding"),
         ("Ex cellent", "Excellent"),
         ("ex cellent", "excellent"),
+        ("Cer tainly", "Certainly"),
+        ("cer tainly", "certainly"),
+        ("Im mediately", "Immediately"),
+        ("im mediately", "immediately"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -241,6 +247,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("HEARTBEAT_OK", "");
     text = text.replace("[NO_ACTION_NEEDED]", "");
     text = text.replace("NO_ACTION_NEEDED", "");
+    // Strip internal sentinel from send_message() retry failures
+    text = text.replace("[Agent produced no text output]", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
     text = text.replace("[ ]", "");
@@ -2531,6 +2539,9 @@ async fn agent_dm(
                          NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
                          When the conversation has reached a natural conclusion and you have nothing more to add, \
                          end your final message with the exact tag [END_CONVERSATION] on its own line. \
+                         If the conversation has devolved into mutual acknowledgments or pleasantries with no new information \
+                         being exchanged (e.g., 'Understood', 'Got it', 'Sounds good', 'Will do'), that IS a natural conclusion — \
+                         use [END_CONVERSATION]. Do not keep exchanging acknowledgments back and forth. \
                          Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
                         responder_name, role_label(&responder_role), company_label,
                         partner_name, role_label(&partner_role), relationship,
