@@ -50,6 +50,9 @@ pub struct AppState {
     /// Maps agent_id → thread_id. Suppresses duplicate dm-user messages
     /// while a thread response is in flight.
     pub responding_to_user: Arc<RwLock<HashMap<Uuid, Uuid>>>,
+    /// Cooldown for post-DM action prompts. Maps agent_id → last action time.
+    /// Prevents triplicate directives when an agent receives multiple DMs in rapid succession.
+    pub action_prompt_cooldowns: Arc<RwLock<HashMap<Uuid, tokio::time::Instant>>>,
 }
 
 impl AppState {

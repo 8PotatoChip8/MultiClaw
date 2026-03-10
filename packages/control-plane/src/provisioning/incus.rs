@@ -309,6 +309,35 @@ impl VmProvider for IncusProvider {
             sleep(Duration::from_secs(1)).await;
         }
 
+        // 7. Wait for cloud-init to finish (creates agent user, installs packages, sets up services).
+        // Without this, vm/exec fails because /home/agent and UID 1000 don't exist yet.
+        if ip.is_some() {
+            let mut cloud_ready = false;
+            for attempt in 0..90 {
+                let check = timeout(
+                    Duration::from_secs(5),
+                    Command::new("incus")
+                        .args(&["exec", name, "--", "cloud-init", "status"])
+                        .output(),
+                ).await;
+                match check {
+                    Ok(Ok(output)) if output.status.success() => {
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        if stdout.contains("done") || stdout.contains("disabled") {
+                            tracing::info!("Cloud-init finished for VM '{}' after ~{}s", name, attempt * 2);
+                            cloud_ready = true;
+                            break;
+                        }
+                    }
+                    _ => {} // VM guest agent not ready yet, or timed out
+                }
+                sleep(Duration::from_secs(2)).await;
+            }
+            if !cloud_ready {
+                tracing::warn!("Cloud-init did not complete for VM '{}' within timeout", name);
+            }
+        }
+
         let _ = tokio::fs::remove_file(tmp_path).await;
 
         Ok(VmDetails {

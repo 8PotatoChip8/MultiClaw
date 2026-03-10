@@ -77,7 +77,7 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
 
 You have two computers at your desk — a personal work computer and a testing environment.
 
-**Important:** Computers take up to a few minutes to boot after provisioning or starting. After calling `vm/provision` or `vm/start`, check the status with `vm/info` and wait for the state to be `RUNNING` before running commands. If a command fails because the computer isn't ready yet, wait a moment and try again.
+**Important:** Computers take up to a few minutes to boot after provisioning or starting. After calling `vm/provision` or `vm/start`, wait about 2 minutes for setup to complete, then test with a simple command like `whoami`. If a command fails because the computer isn't ready yet, wait 30 seconds and try again — it may still be setting up.
 
 ### Your Personal Work Computer
 

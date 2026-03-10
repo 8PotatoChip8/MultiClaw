@@ -242,6 +242,8 @@ fn fix_broken_words(s: &str) -> String {
         ("proceed ing", "proceeding"),
         ("Sit uation", "Situation"),
         ("sit uation", "situation"),
+        ("Histor ical", "Historical"),
+        ("histor ical", "historical"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -2048,6 +2050,41 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
     (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING", "approver_type": approver_type})))
 }
 
+/// Post-approval hook: if this is a REQUEST_TOOL, instruct MAIN to create and deliver the tool.
+async fn trigger_tool_creation(state: &AppState, request_id: Uuid) {
+    let request_type: Option<String> = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
+        .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+
+    if request_type.as_deref() == Some("REQUEST_TOOL") {
+        let row: Option<(Uuid, Value)> = sqlx::query_as(
+            "SELECT created_by_agent_id, payload FROM requests WHERE id = $1"
+        ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+
+        if let Some((requester_id, payload)) = row {
+            let tool_name = payload.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+            let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let use_case = payload.get("use_case").and_then(|v| v.as_str()).unwrap_or("");
+            let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(requester_id).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| requester_id.to_string());
+            let msg = format!(
+                "Tool request {} has been approved. \
+                 Create tool '{}' for agent {} (ID: {}). \
+                 Description: {}. Use case: {}. \
+                 Use create_tool_for_agent to generate a complete SKILL.md with usage instructions and deliver it.",
+                request_id, tool_name, requester_name, requester_id, description, use_case
+            );
+            let state_clone = state.clone();
+            tokio::spawn(async move {
+                match state_clone.main_agent.handle_message(&state_clone.db, &msg).await {
+                    Ok(response) => tracing::info!("MAIN agent tool creation response for request {}: {}", request_id, response),
+                    Err(e) => tracing::error!("Failed to instruct MAIN to create tool for request {}: {}", request_id, e),
+                }
+            });
+        }
+    }
+}
+
 async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, body: Option<Json<ApprovalAction>>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     // Only allow user approval on requests targeting the user
@@ -2065,38 +2102,7 @@ async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, 
     // Notify the requester agent
     notify_requester(&state, uid, "APPROVED", note.as_deref()).await;
 
-    // Post-approval hook: if this is a REQUEST_TOOL, instruct MAIN to create and deliver the tool
-    let request_type: Option<String> = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
-        .bind(uid).fetch_optional(&state.db).await.ok().flatten();
-    if request_type.as_deref() == Some("REQUEST_TOOL") {
-        let req_data: Option<(Uuid, Value)> = sqlx::query_as(
-            "SELECT requester_id, payload FROM requests WHERE id = $1"
-        ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
-        if let Some((requester_id, payload)) = req_data {
-            let tool_name = payload.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unnamed-tool").to_string();
-            let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("No description").to_string();
-            let use_case = payload.get("use_case").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                .bind(requester_id).fetch_optional(&state.db).await.ok().flatten()
-                .unwrap_or_else(|| requester_id.to_string());
-            let msg = format!(
-                "The human operator has approved tool request {}. \
-                 Create tool '{}' for agent {} (ID: {}). \
-                 Description: {}. Use case: {}. \
-                 Use create_tool_for_agent to generate a complete SKILL.md with usage instructions and deliver it.",
-                uid, tool_name, requester_name, requester_id, description, use_case
-            );
-            let state_clone = state.clone();
-            let request_id = uid;
-            tokio::spawn(async move {
-                // Use in-process MainAgent handle_message (has create_tool_for_agent tool)
-                match state_clone.main_agent.handle_message(&state_clone.db, &msg).await {
-                    Ok(response) => tracing::info!("MAIN agent tool creation response for request {}: {}", request_id, response),
-                    Err(e) => tracing::error!("Failed to instruct MAIN to create tool for request {}: {}", request_id, e),
-                }
-            });
-        }
-    }
+    trigger_tool_creation(&state, uid).await;
 
     (StatusCode::OK, Json(json!({"status":"approved"})))
 }
@@ -2195,6 +2201,7 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                 .bind(request_id).execute(&state.db).await;
             let _ = state.tx.send(json!({"type":"request_approved","request_id": request_id}).to_string());
             notify_requester(&state, request_id, "APPROVED", p.note.as_deref()).await;
+            trigger_tool_creation(&state, request_id).await;
             (StatusCode::OK, Json(json!({"status":"approved"})))
         }
     } else {
@@ -2896,6 +2903,18 @@ async fn agent_dm(
                 ).bind(target_id).fetch_optional(&state_clone.db).await.ok().flatten();
 
                 if matches!(target_role.as_deref(), Some("CEO") | Some("MANAGER")) {
+                    // Skip action prompt if agent already acted on a briefing recently
+                    // (prevents triplicate directives when multiple DMs arrive in quick succession)
+                    let should_skip = {
+                        let cooldowns = state_clone.action_prompt_cooldowns.read().await;
+                        cooldowns.get(&target_id)
+                            .map(|t| t.elapsed() < std::time::Duration::from_secs(120))
+                            .unwrap_or(false)
+                    };
+
+                    if should_skip {
+                        tracing::info!("Skipping post-DM action prompt for {} — acted recently", target_id);
+                    } else {
                     let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
                         .bind(sender_id).fetch_optional(&state_clone.db).await.ok().flatten()
                         .unwrap_or_else(|| "your colleague".into());
@@ -2916,6 +2935,10 @@ async fn agent_dm(
                         Do not repeat hiring, briefing, or tasks you have already completed. \
                         Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
+                    // Record cooldown before executing (so concurrent DMs see it immediately)
+                    state_clone.action_prompt_cooldowns.write().await
+                        .insert(target_id, tokio::time::Instant::now());
+
                     tracing::info!("Post-DM action prompt for {} ({})", target_id, target_role.as_deref().unwrap_or("?"));
                     state_clone.mark_agent_working(target_id, "Acting on briefing").await;
                     match state_clone.openclaw.send_message(target_id, &action_prompt, Some(action_instructions)).await {
@@ -2933,6 +2956,7 @@ async fn agent_dm(
                         }
                     }
                     state_clone.mark_agent_done(target_id).await;
+                    } // end else (not skipped)
                 }
 
                 // Record cooldown for this agent pair to prevent infinite re-initiation
