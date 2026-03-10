@@ -235,6 +235,9 @@ fn fix_broken_words(s: &str) -> String {
         ("im mediately", "immediately"),
         ("Not ed", "Noted"),
         ("not ed", "noted"),
+        ("E lena", "Elena"),
+        ("S andbox", "Sandbox"),
+        ("s andbox", "sandbox"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -305,6 +308,9 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = strip_fragmented_tag(&text, "NO_ACTION_NEEDED");
     // Strip internal sentinel from send_message() retry failures
     text = text.replace("[Agent produced no text output]", "");
+    // Strip model-narrated OpenClaw failures (model itself says this when a tool call fails)
+    text = text.replace("No response from OpenClaw.", "");
+    text = text.replace("No response from OpenClaw", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
     text = text.replace("[ ]", "");
@@ -2668,11 +2674,15 @@ async fn agent_dm(
         tid
     };
 
-    // Insert message (scrub secrets before storing)
+    // Insert message (strip tags + scrub secrets before storing)
     let msg_id = Uuid::new_v4();
+    let (tag_cleaned, _) = strip_agent_tags(&p.message);
     let scrubbed_msg = if let Some(ref crypto) = state.crypto {
-        scrub_secrets(&state.db, crypto, sender_id, &p.message).await
-    } else { p.message.clone() };
+        scrub_secrets(&state.db, crypto, sender_id, &tag_cleaned).await
+    } else { tag_cleaned };
+    if scrubbed_msg.trim().is_empty() {
+        return (StatusCode::OK, Json(json!({"thread_id": thread_id, "message_id": msg_id, "status": "empty_after_cleaning"})));
+    }
     let content = json!({"text": scrubbed_msg});
     match sqlx::query_as::<_, Message>(
         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
@@ -2799,9 +2809,9 @@ async fn agent_dm(
                             std::mem::swap(&mut responder_id, &mut other_id);
                             current_text = clean_response;
                         }
-                        Err(e) if current_depth == 0 && dm_retries < 2 => {
-                            // First message failed (likely container still starting from recent hire).
-                            // Retry after a delay instead of immediately giving up.
+                        Err(e) if current_depth <= 1 && dm_retries < 2 => {
+                            // First message or first reply failed (likely container still starting
+                            // from recent hire). Retry after a delay instead of immediately giving up.
                             dm_retries += 1;
                             tracing::warn!(
                                 "OpenClaw unavailable for {} on first message (attempt {}/3), retrying in 30s: {}",
@@ -2974,13 +2984,17 @@ async fn agent_dm_user(
         tid
     };
 
-    // Scrub secrets from agent message before storing
+    // Strip tags + scrub secrets from agent message before storing
+    let (tag_cleaned, _) = strip_agent_tags(&p.message);
     let scrubbed_message = if let Some(ref crypto) = state.crypto {
-        scrub_secrets(&state.db, crypto, agent_id, &p.message).await
-    } else { p.message.clone() };
+        scrub_secrets(&state.db, crypto, agent_id, &tag_cleaned).await
+    } else { tag_cleaned };
 
     // Insert the agent's message
     let msg_id = Uuid::new_v4();
+    if scrubbed_message.trim().is_empty() {
+        return (StatusCode::OK, Json(json!({"thread_id": thread_id, "message_id": msg_id, "status": "empty_after_cleaning"})));
+    }
     let content = json!({"text": scrubbed_message});
     match sqlx::query_as::<_, Message>(
         "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
