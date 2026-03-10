@@ -238,6 +238,10 @@ fn fix_broken_words(s: &str) -> String {
         ("E lena", "Elena"),
         ("S andbox", "Sandbox"),
         ("s andbox", "sandbox"),
+        ("Proceed ing", "Proceeding"),
+        ("proceed ing", "proceeding"),
+        ("Sit uation", "Situation"),
+        ("sit uation", "situation"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -314,8 +318,10 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
     text = text.replace("[ ]", "");
-    // Strip known model artifacts
+    // Strip known model artifacts (double-bracket and single-bracket variants)
     text = text.replace("[[reply_to_current]]", "");
+    text = text.replace("[reply_to_current]", "");
+    text = strip_fragmented_tag(&text, "reply_to_current");
     // Strip any remaining [[word_word]] artifacts (model-generated tags)
     while let Some(start) = text.find("[[") {
         if let Some(end) = text[start..].find("]]") {
@@ -1604,7 +1610,7 @@ async fn send_message(
 ) -> impl IntoResponse {
     let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let msg_id = Uuid::new_v4();
-    let sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
+    let mut sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
     // Auto-detect sender_type: if sender_id matches a known agent, force "AGENT".
     // Models sometimes omit sender_type from their curl commands, causing agent
     // messages to be mislabeled as "USER".
@@ -1628,7 +1634,25 @@ async fn send_message(
                 "SELECT EXISTS(SELECT 1 FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT')"
             ).bind(thread_id).fetch_one(&state.db).await.unwrap_or(false);
             if has_agent_members && p.sender_id.is_none() {
-                tracing::warn!("Message on thread {} missing sender_id and sender_type — defaulting to AGENT (thread has agent members)", thread_id);
+                // Try to resolve actual agent ID from thread members so the UI
+                // can display the agent's name instead of generic "Agent".
+                let agent_ids: Vec<Uuid> = sqlx::query_scalar(
+                    "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
+                ).bind(thread_id).fetch_all(&state.db).await.unwrap_or_default();
+                if agent_ids.len() == 1 {
+                    sender_id = agent_ids[0];
+                } else if !agent_ids.is_empty() {
+                    // Multi-agent thread — pick the agent currently marked as working
+                    let activities = state.agent_activities.read().await;
+                    if let Some(ref map) = *activities {
+                        if let Some(&aid) = agent_ids.iter().find(|id| {
+                            map.get(id).map(|a| a.status == "WORKING").unwrap_or(false)
+                        }) {
+                            sender_id = aid;
+                        }
+                    }
+                }
+                tracing::warn!("Message on thread {} missing sender_id and sender_type — defaulting to AGENT (resolved: {})", thread_id, sender_id);
                 "AGENT".to_string()
             } else {
                 "USER".to_string()
