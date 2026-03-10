@@ -324,6 +324,7 @@ impl OpenClawManager {
         let max_429_retries = 6u32;
         let mut attempts_429 = 0u32;
         let mut attempt = 0u32;
+        let mut empty_retries = 0u32;
 
         loop {
             // Wait for rate limiter permit before each request
@@ -382,6 +383,19 @@ impl OpenClawManager {
                         instance.agent_name,
                         text.len()
                     );
+
+                    // Retry once if model returned no text (cold-start transient)
+                    let is_empty = text.trim().is_empty()
+                        || text == "[Agent produced no text output]";
+                    if is_empty && empty_retries == 0 {
+                        empty_retries += 1;
+                        tracing::warn!(
+                            "{} returned empty response, retrying once in 2s (cold-start?)",
+                            instance.agent_name
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        continue;
+                    }
 
                     return Ok(text);
                 }
