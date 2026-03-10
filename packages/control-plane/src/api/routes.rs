@@ -1457,8 +1457,20 @@ async fn send_message(
 ) -> impl IntoResponse {
     let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let msg_id = Uuid::new_v4();
-    let sender_type = p.sender_type.unwrap_or_else(|| "USER".into());
     let sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
+    // Auto-detect sender_type: if sender_id matches a known agent, force "AGENT".
+    // Models sometimes omit sender_type from their curl commands, causing agent
+    // messages to be mislabeled as "USER".
+    let sender_type = if p.sender_type.as_deref() == Some("AGENT") {
+        "AGENT".to_string()
+    } else {
+        let is_agent: bool = sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM agents WHERE id = $1)"
+        ).bind(sender_id).fetch_one(&state.db).await.unwrap_or(false);
+        if is_agent { "AGENT".to_string() } else {
+            p.sender_type.unwrap_or_else(|| "USER".into())
+        }
+    };
     let reply_depth = p.reply_depth.unwrap_or(0);
 
     // Scrub secrets from agent-sent messages before storing
@@ -1914,7 +1926,16 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
         let req_type: String = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
             .bind(request_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
         let note_text = note.map(|n| format!(" Note: {}", n)).unwrap_or_default();
-        let msg = format!("Your request \"{}\" (ID: {}) has been {}.{}", req_type.replace('_', " "), request_id, decision, note_text);
+        let availability_caveat = if decision == "APPROVED" {
+            " IMPORTANT: Approval does NOT mean credentials or resources are available yet. \
+             The operator must still provision them via the Secrets page. Do NOT tell your team \
+             credentials are active until you verify via the secrets API \
+             (GET /v1/agents/{your-id}/secrets)."
+        } else { "" };
+        let msg = format!(
+            "Your request \"{}\" (ID: {}) has been {}.{}{}",
+            req_type.replace('_', " "), request_id, decision, note_text, availability_caveat
+        );
         let state_clone = state.clone();
         tokio::spawn(async move {
             state_clone.mark_agent_working(agent_id, "Processing approval decision").await;
