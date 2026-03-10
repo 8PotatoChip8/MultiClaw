@@ -1463,12 +1463,29 @@ async fn send_message(
     // messages to be mislabeled as "USER".
     let sender_type = if p.sender_type.as_deref() == Some("AGENT") {
         "AGENT".to_string()
+    } else if p.sender_type.as_deref() == Some("USER") || p.sender_type.as_deref() == Some("SYSTEM") {
+        // Explicitly set to USER or SYSTEM — respect it
+        p.sender_type.unwrap()
     } else {
+        // sender_type was omitted — auto-detect from sender_id
         let is_agent: bool = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(SELECT 1 FROM agents WHERE id = $1)"
         ).bind(sender_id).fetch_one(&state.db).await.unwrap_or(false);
-        if is_agent { "AGENT".to_string() } else {
-            p.sender_type.unwrap_or_else(|| "USER".into())
+        if is_agent {
+            "AGENT".to_string()
+        } else {
+            // sender_id didn't match an agent either — check if this thread has agent
+            // members. If so, this is likely an agent that omitted both fields.
+            // Human operators posting via the UI always have sender_type explicitly set.
+            let has_agent_members: bool = sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT')"
+            ).bind(thread_id).fetch_one(&state.db).await.unwrap_or(false);
+            if has_agent_members && p.sender_id.is_none() {
+                tracing::warn!("Message on thread {} missing sender_id and sender_type — defaulting to AGENT (thread has agent members)", thread_id);
+                "AGENT".to_string()
+            } else {
+                "USER".to_string()
+            }
         }
     };
     let reply_depth = p.reply_depth.unwrap_or(0);
