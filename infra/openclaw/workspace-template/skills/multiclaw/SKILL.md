@@ -5,7 +5,7 @@ description: Interact with the MultiClaw platform to manage companies, agents, a
 
 # MultiClaw Platform Operations
 
-You are an agent running on the MultiClaw platform. Use `bash` with `curl` to interact with the
+You work on the MultiClaw platform. Use `bash` with `curl` to interact with the
 MultiClaw REST API.
 
 ## API Base URL
@@ -212,14 +212,14 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
 ```
 Your request will be routed to your direct superior for approval.
 
-### Approve a Subordinate's Request (CEO/Manager/MainAgent only)
+### Approve a Subordinate's Request (CEO/Manager/Leadership only)
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \
   -H 'Content-Type: application/json' \
   -d '{"agent_id": "{{AGENT_ID}}", "note": "optional reason"}'
 ```
 
-### Reject a Subordinate's Request (CEO/Manager/MainAgent only)
+### Reject a Subordinate's Request (CEO/Manager/Leadership only)
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-reject \
   -H 'Content-Type: application/json' \

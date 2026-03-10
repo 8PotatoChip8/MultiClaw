@@ -254,9 +254,9 @@ curl -s {{MULTICLAW_API_URL}}/v1/threads/THREAD_ID/messages
 
 **Rules:**
 - You can send files **down to your managers**.
-- You can send files **up to MAIN (KonnerBot)**.
-- You **cannot** send files directly to another CEO or their company. Cross-company file sharing must go via MAIN, who decides whether to forward it.
-- MAIN can send files down to you.
+- You can send files **up to your superior**.
+- You **cannot** send files directly to another CEO or their company. Cross-company file sharing must go via your superior, who decides whether to forward it.
+- Your superior can send files down to you.
 
 ### Send a File
 ```bash
@@ -290,6 +290,6 @@ Returns `{"name": "...", "value": "..."}`. Use this for API keys, passwords, and
 
 1. Replace `COMPANY_ID`, `MANAGER_NAME`, etc. with actual values.
 2. Your agent ID is: `{{AGENT_ID}}`
-3. You **cannot** create companies or hire CEOs — those are MainAgent-only operations.
+3. You **cannot** create companies or hire CEOs — those are leadership-only operations.
 4. Always check the response status. A 2xx status means success.
 5. All API responses are JSON.

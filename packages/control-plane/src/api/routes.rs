@@ -2768,7 +2768,7 @@ async fn agent_dm(
 
                     let role_label = |r: &Option<String>| match r.as_deref() {
                         Some("CEO") => "CEO", Some("MANAGER") => "Manager",
-                        Some("WORKER") => "Worker", Some("MAIN") => "Main Agent", _ => "colleague",
+                        Some("WORKER") => "Worker", Some("MAIN") => "Head of Holdings", _ => "colleague",
                     };
                     let relationship = if responder_parent == Some(other_id) {
                         "They are your superior — you report to them."
