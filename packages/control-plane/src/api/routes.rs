@@ -1744,7 +1744,10 @@ async fn send_message(
                                 };
                                 let text = content.get("text").and_then(|v| v.as_str()).unwrap_or("");
                                 // Truncate long messages to keep context compact
-                                let truncated = if text.len() > 200 { format!("{}...", &text[..200]) } else { text.to_string() };
+                                let truncated = if text.len() > 200 {
+                                    let end = text.char_indices().take_while(|(i, _)| *i < 200).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(200);
+                                    format!("{}...", &text[..end])
+                                } else { text.to_string() };
                                 transcript.push_str(&format!("{}: {}\n", name, truncated));
                             }
                             transcript.push_str("---\n");
