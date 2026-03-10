@@ -32,6 +32,8 @@ MultiClaw enforces a strict hierarchical corporate structure for its autonomous 
 When a new agent is hired, the `multiclawd` control plane looks in `infra/openclaw/workspace-template/` to render their workspace.
 Since the `feat: role-specific agent brain files` update, it checks for `<ROLE>` specific subdirectories first (e.g., `CEO/SOUL.md` or `WORKER/skills/multiclaw/SKILL.md`) before falling back to generic templates. This ensures agents do not see API capabilities or instructions that exceed their authority.
 
+Agents also receive a `MEMORY.md` template (seeded with agent identity on first creation, preserved on respawn) and a `TOOLS.md` describing available tools including `memory_search` and `memory_get` for semantic recall.
+
 ## Onboarding
 When an agent hires a new employee, they brief the new hire via DM — explaining the company context, role expectations, and immediate tasks. This behavior is defined in the SOUL.md operating principles for MAIN, CEO, and MANAGER roles.
 

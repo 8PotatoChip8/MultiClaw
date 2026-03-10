@@ -90,7 +90,7 @@ Types: `CAPITAL_INJECTION`, `REVENUE`, `EXPENSE`, `INTERNAL_TRANSFER`. Currency 
   "message": "text content"
 }
 ```
-DM conversations auto-loop until agents naturally conclude the discussion. A safety ceiling of 50 turns prevents runaway loops, and a 2-minute cooldown between the same pair prevents re-initiation. Both agents' quarantine status is checked before each message.
+DM conversations auto-loop until agents naturally conclude the discussion. A safety ceiling of 20 turns prevents runaway loops, and a 2-minute cooldown between the same pair prevents re-initiation. Both agents' quarantine status is checked before each message.
 
 **Send File body:**
 ```json

@@ -63,7 +63,35 @@ Default: `600` (10 minutes). Set to `0` to disable the heartbeat entirely.
 
 If KonnerBot has nothing to report, the heartbeat costs very little (a short prompt + a `[HEARTBEAT_OK]` response that is not stored). Reports are only generated and posted to the DM thread when something needs attention.
 
-The heartbeat loop starts 3 minutes after the control plane boots (to allow OpenClaw containers to recover).
+The heartbeat loop waits for OpenClaw container recovery to complete (signaled via a watch channel), then waits an additional 5 minutes for post-restart recovery prompts to settle before starting.
+
+## Post-Restart Recovery Prompts
+After a restart, multiclawd sends role-appropriate recovery prompts to all active agents in hierarchical order (MAIN → CEO → MANAGER → WORKER, 30s between tiers). This tells agents the system restarted and asks them to check memory and resume work.
+
+### Disable recovery prompts
+```sql
+INSERT INTO system_meta (key, value) VALUES ('recovery_prompts_enabled', 'false')
+  ON CONFLICT (key) DO UPDATE SET value = 'false';
+```
+
+### Check recovery prompt status in logs
+```bash
+docker compose logs multiclawd | grep -i "recovery prompt"
+```
+
+## Ollama Concurrency
+multiclawd gates concurrent LLM requests through a semaphore. On startup it probes Ollama with 10 test requests to auto-discover the limit.
+
+### Check current concurrency config
+```bash
+docker compose exec multiclawd env | grep CONCURRENT
+# or check logs:
+docker compose logs multiclawd | grep -i "concurrency"
+```
+
+### Adjust concurrency
+Set `OLLAMA_NUM_PARALLEL` on the Ollama service and `MULTICLAW_MAX_CONCURRENT_OLLAMA` in the multiclawd environment. They should match.
+Default: 4. Set in `/etc/systemd/system/ollama.service.d/concurrency.conf` and `/opt/multiclaw/.env`.
 
 ## Provisioning Secrets for Agents
 Store API keys, credentials, and other sensitive values using the Secrets API. **Never paste secrets into chat messages or DMs** — use the secrets store instead.

@@ -52,6 +52,11 @@ Agents communicate through direct messages (DMs) and group threads. DMs support 
 
 Agents can also DM the human operator directly. See `docs/security.md` for DM safety details.
 
+## Agent Memory
+Agents have two complementary memory systems:
+- **OpenClaw Native Memory**: Agents use `memory_search` (semantic search) and `memory_get` to recall past decisions and context. Long-term facts go in `MEMORY.md` (loaded every session); daily logs are auto-saved to `memory/`. Before context truncation, agents get a silent turn to persist notes (compaction flush). Sessions reset after 2 hours idle, triggering automatic memory archival.
+- **DB-Backed Memory**: The control plane stores structured memories queryable via SQL, injected into agent prompts at session start.
+
 ## Secrets Management
 Store API keys, credentials, and other secrets for your agents using the Secrets API. Secrets can be scoped to an individual agent, an entire company, or the whole holding. Values are encrypted at rest with AES-GCM and automatically scrubbed from all stored messages.
 
@@ -61,8 +66,14 @@ Agents retrieve secrets by name with hierarchical lookup (agent → company → 
 To add models, use the `multiclaw` CLI or the Dashboard.
 Under the hood, this pulls the model to the host Ollama context and adjusts the agent's allowlist.
 
+## Concurrent Model Requests
+MultiClaw sends multiple agent requests to Ollama in parallel. The install script configures `OLLAMA_NUM_PARALLEL` (default: 4) and passes `MULTICLAW_MAX_CONCURRENT_OLLAMA` to the control plane. On startup, multiclawd probes Ollama with 10 concurrent test requests to auto-discover the actual concurrency limit and adjusts its internal semaphore accordingly.
+
 ## Security Warning
 This software enables autonomous agents to execute code and use web browsers. Running agents in strict mode and preserving approvals boundaries for structural changes is strongly recommended.
 
 ## Troubleshooting
 See `docs/runbook.md` for daily operational checklists.
+
+## Post-Restart Recovery
+When multiclawd restarts, it automatically sends recovery prompts to all active agents in hierarchical order (MAIN first, then CEOs, then managers, then workers) with 30-second delays between tiers. Each prompt tells the agent the system restarted, reminds them of their role, and asks them to check their memory and resume work. Recovery prompts can be disabled via `system_meta` setting `recovery_prompts_enabled = false`.
