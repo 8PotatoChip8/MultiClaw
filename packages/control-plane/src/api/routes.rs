@@ -779,54 +779,81 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     match can_hire_manager(new_count, Role::Ceo) {
         Decision::AllowedImmediate => {},
         Decision::RequiresRequest { request_type, approver_chain } => {
-            let first_approver = approver_chain.first().unwrap_or(&ApproverType::User);
-            let (approver_type_str, approver_id) = match first_approver {
-                ApproverType::MainAgent => {
-                    let main_id: Option<Uuid> = sqlx::query_scalar(
-                        "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
-                    ).fetch_optional(&state.db).await.ok().flatten();
-                    ("AGENT".to_string(), main_id)
-                },
-                ApproverType::User => ("USER".to_string(), None),
-                ApproverType::Ceo => ("AGENT".to_string(), Some(ceo_id)),
-            };
-            let chain_json = serde_json::to_value(&approver_chain).unwrap_or(json!([]));
-            let req_id = Uuid::new_v4();
-            let _ = sqlx::query(
-                "INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type, current_approver_id) \
-                 VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
-            ).bind(req_id).bind(&request_type).bind(ceo_id).bind(company_id)
-             .bind(json!({"name": payload.name, "count": new_count, "approver_chain": chain_json}))
-             .bind(&approver_type_str).bind(approver_id)
-             .execute(&state.db).await;
+            // Check for an existing APPROVED request that can be consumed to allow this hire
+            let approved_req: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'APPROVED' ORDER BY updated_at DESC LIMIT 1"
+            ).bind(&request_type).bind(ceo_id).fetch_optional(&state.db).await.ok().flatten();
 
-            // DM the approver agent about the pending request
-            if approver_type_str == "AGENT" {
-                if let Some(aid) = approver_id {
-                    let ceo_name = ceo.name.clone();
-                    let req_type_clone = request_type.clone();
-                    let hire_name = payload.name.clone();
-                    let state_clone = state.clone();
-                    tokio::spawn(async move {
-                        let dm_text = format!(
-                            "APPROVAL REQUEST from {}: Hire manager #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                            ceo_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
-                        );
-                        state_clone.mark_agent_working(aid, "Processing approval request").await;
-                        let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
-                        state_clone.mark_agent_done(aid).await;
-                    });
-                }
+            if let Some(approved_id) = approved_req {
+                // Consume the approval so it can't be reused for future limit increases
+                let _ = sqlx::query("UPDATE requests SET status = 'CONSUMED', updated_at = NOW() WHERE id = $1")
+                    .bind(approved_id).execute(&state.db).await;
+                tracing::info!("Consumed approved request {} for {} hire by CEO {}", approved_id, request_type, ceo_id);
+                // Fall through to the hire logic below
             } else {
-                // User-targeted: notify UI
-                let _ = state.tx.send(json!({"type":"new_request","request_id": req_id}).to_string());
-            }
+                // Check for an existing PENDING request (deduplication)
+                let existing_pending: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'PENDING' LIMIT 1"
+                ).bind(&request_type).bind(ceo_id).fetch_optional(&state.db).await.ok().flatten();
 
-            return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id,"approver": approver_type_str})));
+                if let Some(existing_id) = existing_pending {
+                    // Already have a pending request — don't create a duplicate
+                    return (StatusCode::ACCEPTED, Json(json!({
+                        "status": "requires_approval",
+                        "request_id": existing_id,
+                        "message": "A request for this has already been submitted and is awaiting approval. Please wait for the approval notification."
+                    })));
+                }
+
+                let first_approver = approver_chain.first().unwrap_or(&ApproverType::User);
+                let (approver_type_str, approver_id) = match first_approver {
+                    ApproverType::MainAgent => {
+                        let main_id: Option<Uuid> = sqlx::query_scalar(
+                            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                        ).fetch_optional(&state.db).await.ok().flatten();
+                        ("AGENT".to_string(), main_id)
+                    },
+                    ApproverType::User => ("USER".to_string(), None),
+                    ApproverType::Ceo => ("AGENT".to_string(), Some(ceo_id)),
+                };
+                let chain_json = serde_json::to_value(&approver_chain).unwrap_or(json!([]));
+                let req_id = Uuid::new_v4();
+                let _ = sqlx::query(
+                    "INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type, current_approver_id) \
+                     VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
+                ).bind(req_id).bind(&request_type).bind(ceo_id).bind(company_id)
+                 .bind(json!({"name": payload.name, "count": new_count, "approver_chain": chain_json}))
+                 .bind(&approver_type_str).bind(approver_id)
+                 .execute(&state.db).await;
+
+                // DM the approver agent about the pending request
+                if approver_type_str == "AGENT" {
+                    if let Some(aid) = approver_id {
+                        let ceo_name = ceo.name.clone();
+                        let req_type_clone = request_type.clone();
+                        let hire_name = payload.name.clone();
+                        let state_clone = state.clone();
+                        tokio::spawn(async move {
+                            let dm_text = format!(
+                                "APPROVAL REQUEST from {}: Hire manager #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
+                                 To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+                                 To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+                                ceo_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
+                            );
+                            state_clone.mark_agent_working(aid, "Processing approval request").await;
+                            let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
+                            state_clone.mark_agent_done(aid).await;
+                        });
+                    }
+                } else {
+                    // User-targeted: notify UI
+                    let _ = state.tx.send(json!({"type":"new_request","request_id": req_id}).to_string());
+                }
+
+                return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id,"approver": approver_type_str})));
+            }
         },
         Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
     }
@@ -883,57 +910,84 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     match can_hire_worker(new_count, Role::Manager) {
         Decision::AllowedImmediate => {},
         Decision::RequiresRequest { request_type, approver_chain } => {
-            let first_approver = approver_chain.first().unwrap_or(&ApproverType::User);
-            let (approver_type_str, approver_id) = match first_approver {
-                ApproverType::Ceo => {
-                    // Manager's parent is the CEO
-                    ("AGENT".to_string(), mgr.parent_agent_id)
-                },
-                ApproverType::MainAgent => {
-                    let main_id: Option<Uuid> = sqlx::query_scalar(
-                        "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
-                    ).fetch_optional(&state.db).await.ok().flatten();
-                    ("AGENT".to_string(), main_id)
-                },
-                ApproverType::User => ("USER".to_string(), None),
-            };
-            let chain_json = serde_json::to_value(&approver_chain).unwrap_or(json!([]));
-            let req_id = Uuid::new_v4();
-            let _ = sqlx::query(
-                "INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type, current_approver_id) \
-                 VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
-            ).bind(req_id).bind(&request_type).bind(mgr_id).bind(company_id)
-             .bind(json!({"name": payload.name, "count": new_count, "approver_chain": chain_json}))
-             .bind(&approver_type_str).bind(approver_id)
-             .execute(&state.db).await;
+            // Check for an existing APPROVED request that can be consumed to allow this hire
+            let approved_req: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'APPROVED' ORDER BY updated_at DESC LIMIT 1"
+            ).bind(&request_type).bind(mgr_id).fetch_optional(&state.db).await.ok().flatten();
 
-            // DM the approver agent about the pending request
-            if approver_type_str == "AGENT" {
-                if let Some(aid) = approver_id {
-                    let mgr_name = mgr.name.clone();
-                    let req_type_clone = request_type.clone();
-                    let hire_name = payload.name.clone();
-                    let state_clone = state.clone();
-                    tokio::spawn(async move {
-                        let dm_text = format!(
-                            "APPROVAL REQUEST from {}: Hire worker #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                            mgr_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
-                        );
-                        state_clone.mark_agent_working(aid, "Processing approval request").await;
-                        let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
-                        state_clone.mark_agent_done(aid).await;
-                    });
-                }
+            if let Some(approved_id) = approved_req {
+                // Consume the approval so it can't be reused for future limit increases
+                let _ = sqlx::query("UPDATE requests SET status = 'CONSUMED', updated_at = NOW() WHERE id = $1")
+                    .bind(approved_id).execute(&state.db).await;
+                tracing::info!("Consumed approved request {} for {} hire by Manager {}", approved_id, request_type, mgr_id);
+                // Fall through to the hire logic below
             } else {
-                // User-targeted: notify UI
-                let _ = state.tx.send(json!({"type":"new_request","request_id": req_id}).to_string());
-            }
+                // Check for an existing PENDING request (deduplication)
+                let existing_pending: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'PENDING' LIMIT 1"
+                ).bind(&request_type).bind(mgr_id).fetch_optional(&state.db).await.ok().flatten();
 
-            return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id,"approver": approver_type_str})));
+                if let Some(existing_id) = existing_pending {
+                    // Already have a pending request — don't create a duplicate
+                    return (StatusCode::ACCEPTED, Json(json!({
+                        "status": "requires_approval",
+                        "request_id": existing_id,
+                        "message": "A request for this has already been submitted and is awaiting approval. Please wait for the approval notification."
+                    })));
+                }
+
+                let first_approver = approver_chain.first().unwrap_or(&ApproverType::User);
+                let (approver_type_str, approver_id) = match first_approver {
+                    ApproverType::Ceo => {
+                        // Manager's parent is the CEO
+                        ("AGENT".to_string(), mgr.parent_agent_id)
+                    },
+                    ApproverType::MainAgent => {
+                        let main_id: Option<Uuid> = sqlx::query_scalar(
+                            "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                        ).fetch_optional(&state.db).await.ok().flatten();
+                        ("AGENT".to_string(), main_id)
+                    },
+                    ApproverType::User => ("USER".to_string(), None),
+                };
+                let chain_json = serde_json::to_value(&approver_chain).unwrap_or(json!([]));
+                let req_id = Uuid::new_v4();
+                let _ = sqlx::query(
+                    "INSERT INTO requests (id, type, created_by_agent_id, company_id, payload, status, current_approver_type, current_approver_id) \
+                     VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
+                ).bind(req_id).bind(&request_type).bind(mgr_id).bind(company_id)
+                 .bind(json!({"name": payload.name, "count": new_count, "approver_chain": chain_json}))
+                 .bind(&approver_type_str).bind(approver_id)
+                 .execute(&state.db).await;
+
+                // DM the approver agent about the pending request
+                if approver_type_str == "AGENT" {
+                    if let Some(aid) = approver_id {
+                        let mgr_name = mgr.name.clone();
+                        let req_type_clone = request_type.clone();
+                        let hire_name = payload.name.clone();
+                        let state_clone = state.clone();
+                        tokio::spawn(async move {
+                            let dm_text = format!(
+                                "APPROVAL REQUEST from {}: Hire worker #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
+                                 To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+                                 To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+                                mgr_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
+                            );
+                            state_clone.mark_agent_working(aid, "Processing approval request").await;
+                            let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
+                            state_clone.mark_agent_done(aid).await;
+                        });
+                    }
+                } else {
+                    // User-targeted: notify UI
+                    let _ = state.tx.send(json!({"type":"new_request","request_id": req_id}).to_string());
+                }
+
+                return (StatusCode::ACCEPTED, Json(json!({"status":"requires_approval","request_id": req_id,"approver": approver_type_str})));
+            }
         },
         Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
     }
@@ -2135,10 +2189,16 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
             .bind(request_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
         let note_text = note.map(|n| format!(" Note: {}", n)).unwrap_or_default();
         let availability_caveat = if decision == "APPROVED" {
-            " IMPORTANT: Approval does NOT mean credentials or resources are available yet. \
-             The operator must still provision them via the Secrets page. Do NOT tell your team \
-             credentials are active until you verify via the secrets API \
-             (GET /v1/agents/{your-id}/secrets)."
+            match req_type.as_str() {
+                "INCREASE_MANAGER_LIMIT" => " Your manager hiring limit has been increased. \
+                    You can now retry the hire-manager command to complete the hire.",
+                "INCREASE_WORKER_LIMIT" => " Your worker hiring limit has been increased. \
+                    You can now retry the hire-worker command to complete the hire.",
+                _ => " IMPORTANT: Approval does NOT mean credentials or resources are available yet. \
+                    The operator must still provision them via the Secrets page. Do NOT tell your team \
+                    credentials are active until you verify via the secrets API \
+                    (GET /v1/agents/{your-id}/secrets).",
+            }
         } else { "" };
         let msg = format!(
             "Your request \"{}\" (ID: {}) has been {}.{}{}",

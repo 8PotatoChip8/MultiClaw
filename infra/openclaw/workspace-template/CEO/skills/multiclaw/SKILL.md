@@ -45,6 +45,8 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-manager \
 ```
 The `preferred_model` field is optional. If omitted, the manager inherits your model. Use a different model when the manager's specialty would benefit from it (e.g., a coding-focused manager might use a code-specialized model).
 
+**Note:** If you've reached your manager limit (3rd+ manager), the API returns `{"status": "requires_approval", ...}`. Your request is automatically submitted to your chain of command. Wait for the approval notification, then call this endpoint again with the same parameters to complete the hire. Do not resubmit while waiting.
+
 ### Hire a Worker
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
