@@ -46,6 +46,10 @@ pub struct AppState {
     /// In-memory agent activity tracker for the world view.
     /// Maps agent_id → current activity state. Resets on server restart.
     pub agent_activities: Arc<RwLock<Option<HashMap<Uuid, AgentActivityState>>>>,
+    /// Tracks which user-DM thread each agent is currently responding in.
+    /// Maps agent_id → thread_id. Suppresses duplicate dm-user messages
+    /// while a thread response is in flight.
+    pub responding_to_user: Arc<RwLock<HashMap<Uuid, Uuid>>>,
 }
 
 impl AppState {

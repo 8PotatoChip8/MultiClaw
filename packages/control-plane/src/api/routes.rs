@@ -1834,6 +1834,12 @@ async fn send_message(
                             };
                             let agent_context = format!("You are {} ({}). {}", agent_name_ctx, role_str, thread_context);
 
+                            // Track that this agent is responding to a user in this DM thread,
+                            // so dm-user calls during processing are suppressed (they'd be duplicates).
+                            if !is_agent_sender && thread_type == "DM" {
+                                state_clone.responding_to_user.write().await.insert(*responding_agent_id, tid);
+                            }
+
                             state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
                                 *responding_agent_id, &user_text,
@@ -1909,6 +1915,11 @@ async fn send_message(
                                     .execute(&state_clone.db)
                                     .await;
                                 }
+                            }
+
+                            // Clear the responding-to-user tracking now that the response is stored
+                            if !is_agent_sender && thread_type == "DM" {
+                                state_clone.responding_to_user.write().await.remove(responding_agent_id);
                             }
                         }
                     });
@@ -2983,6 +2994,22 @@ async fn agent_dm_user(
             .bind(tid).bind(user_id).execute(&state.db).await;
         tid
     };
+
+    // If this agent is already responding to the user in this same thread via
+    // the thread-message path, skip — it would create a duplicate with wrong ordering.
+    if let Some(&responding_tid) = state.responding_to_user.read().await.get(&agent_id) {
+        if responding_tid == thread_id {
+            tracing::info!(
+                "Skipping dm-user from agent {} — already responding in thread {}",
+                agent_id, thread_id
+            );
+            return (StatusCode::OK, Json(json!({
+                "thread_id": thread_id,
+                "message_id": Uuid::new_v4(),
+                "status": "skipped_already_responding"
+            })));
+        }
+    }
 
     // Strip tags + scrub secrets from agent message before storing
     let (tag_cleaned, _) = strip_agent_tags(&p.message);
