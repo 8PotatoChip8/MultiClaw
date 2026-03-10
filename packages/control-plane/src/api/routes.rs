@@ -160,6 +160,37 @@ fn fix_punctuation_spacing(s: &str) -> String {
     result
 }
 
+/// Fix mid-word spaces from streaming token assembly.
+/// The tokenizer sometimes splits words across tokens, producing "Under stood",
+/// "H ire", etc. We fix this by replacing known broken fragments.
+fn fix_broken_words(s: &str) -> String {
+    // Pairs of (broken, fixed). Order matters: longer patterns first to avoid
+    // partial replacements. Only add confirmed patterns seen in production.
+    const FIXES: &[(&str, &str)] = &[
+        ("Under stood", "Understood"),
+        ("under stood", "understood"),
+        ("H ire", "Hire"),
+        ("h ire", "hire"),
+        ("Ac knowledged", "Acknowledged"),
+        ("ac knowledged", "acknowledged"),
+        ("Con firmed", "Confirmed"),
+        ("con firmed", "confirmed"),
+        ("Ap proved", "Approved"),
+        ("ap proved", "approved"),
+        ("Re ceived", "Received"),
+        ("re ceived", "received"),
+        ("Pro ceeding", "Proceeding"),
+        ("pro ceeding", "proceeding"),
+        ("Ex cellent", "Excellent"),
+        ("ex cellent", "excellent"),
+    ];
+    let mut result = s.to_string();
+    for (broken, fixed) in FIXES {
+        result = result.replace(broken, fixed);
+    }
+    result
+}
+
 /// Remove lines that are pure narration filler (defense-in-depth for model ignoring instructions).
 /// Only strips lines where the ENTIRE content is a narration phrase + optional trailing punctuation.
 fn strip_narration_lines(text: &str) -> String {
@@ -212,6 +243,7 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("NO_ACTION_NEEDED", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
+    text = text.replace("[ ]", "");
     // Strip known model artifacts
     text = text.replace("[[reply_to_current]]", "");
     // Strip any remaining [[word_word]] artifacts (model-generated tags)
@@ -233,6 +265,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = clean_spurious_newlines(&text);
     // Fix spacing artifacts: space before punctuation/contractions from token boundaries
     text = fix_punctuation_spacing(&text);
+    // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
+    text = fix_broken_words(&text);
     // Final defense: if the entire remaining text (ignoring whitespace and brackets)
     // is just a fragmented system tag (e.g. "HE ARTBEAT_OK"), treat as empty.
     // This catches all streaming-fragmentation variants in one shot.
@@ -1650,6 +1684,10 @@ async fn send_message(
                                     let scrubbed = if let Some(ref crypto) = state_clone.crypto {
                                         scrub_secrets(&state_clone.db, crypto, *responding_agent_id, &cleaned).await
                                     } else { cleaned };
+                                    // Skip storing empty messages (all content was tags/narration)
+                                    if scrubbed.trim().is_empty() {
+                                        continue;
+                                    }
                                     let resp_id = Uuid::new_v4();
                                     let content = json!({"text": scrubbed});
                                     if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
@@ -2513,14 +2551,20 @@ async fn agent_dm(
                             let scrubbed = if let Some(ref crypto) = state_clone.crypto {
                                 scrub_secrets(&state_clone.db, crypto, responder_id, &clean_response).await
                             } else { clean_response.clone() };
-                            let resp_id = Uuid::new_v4();
-                            let resp_content = json!({"text": scrubbed});
-                            if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
-                                 RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-                            ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
-                            .fetch_one(&state_clone.db).await {
-                                let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+
+                            // Only store the message if there's actual content after cleaning.
+                            // Empty messages (all tags/narration stripped) create ghost entries
+                            // that show as invisible messages in the UI.
+                            if !scrubbed.trim().is_empty() {
+                                let resp_id = Uuid::new_v4();
+                                let resp_content = json!({"text": scrubbed});
+                                if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
+                                     RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+                                ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
+                                .fetch_one(&state_clone.db).await {
+                                    let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                                }
                             }
 
                             // End if the agent signaled conversation is complete
