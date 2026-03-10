@@ -81,6 +81,15 @@ EOF
 systemctl daemon-reload
 systemctl restart ollama
 
+# Wait for Ollama to be ready after restart (socket may not be open yet)
+log "Waiting for Ollama to be ready..."
+for i in {1..30}; do
+  if ollama list >/dev/null 2>&1; then
+    break
+  fi
+  sleep 1
+done
+
 # ── Ollama Login for cloud models ──
 log "Ollama Login (required for cloud models)..."
 echo ""
