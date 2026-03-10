@@ -2631,6 +2631,7 @@ async fn agent_dm(
                 let mut responder_id = target_id;
                 let mut other_id = sender_id;
                 let mut current_text = text;
+                let mut dm_retries: u32 = 0;
 
                 loop {
                     // Check if either agent was quarantined during conversation
@@ -2737,6 +2738,17 @@ async fn agent_dm(
                             // Swap roles: the other agent now responds to this one's message
                             std::mem::swap(&mut responder_id, &mut other_id);
                             current_text = clean_response;
+                        }
+                        Err(e) if current_depth == 0 && dm_retries < 2 => {
+                            // First message failed (likely container still starting from recent hire).
+                            // Retry after a delay instead of immediately giving up.
+                            dm_retries += 1;
+                            tracing::warn!(
+                                "OpenClaw unavailable for {} on first message (attempt {}/3), retrying in 30s: {}",
+                                responder_id, dm_retries, e
+                            );
+                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                            continue;
                         }
                         Err(e) => {
                             tracing::warn!("OpenClaw unavailable for agent {}: {}", responder_id, e);
