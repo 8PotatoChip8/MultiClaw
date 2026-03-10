@@ -242,13 +242,20 @@ mod tests {
             }
         );
         assert_eq!(
+            can_hire_manager(4, Role::Ceo),
+            Decision::RequiresRequest {
+                request_type: "INCREASE_MANAGER_LIMIT".into(),
+                approver_chain: vec![ApproverType::MainAgent, ApproverType::User]
+            }
+        );
+        assert_eq!(
             can_hire_manager(5, Role::Ceo),
             Decision::RequiresRequest {
                 request_type: "INCREASE_MANAGER_LIMIT".into(),
                 approver_chain: vec![ApproverType::MainAgent, ApproverType::User]
             }
         );
-        
+
         // Non-CEO trying to hire manager
         assert!(matches!(can_hire_manager(1, Role::Manager), Decision::Denied(_)));
     }
