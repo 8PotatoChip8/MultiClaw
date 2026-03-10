@@ -6,6 +6,13 @@
 - **write** — Write to files.
 - **edit** — Edit existing files.
 
+## Memory Tools
+- **memory_search** — Search your memory files semantically. Use this to recall past decisions, notes, and context.
+- **memory_get** — Read a specific memory file (e.g., `memory/2026-03-10.md` or `MEMORY.md`).
+
+Your `MEMORY.md` is loaded every session — put important long-term facts there.
+Daily logs are saved automatically to `memory/YYYY-MM-DD.md`.
+
 ## MultiClaw Skill
 The `multiclaw` skill provides instructions for interacting with the MultiClaw platform API.
 Use `curl` via bash to call the REST API. See the skill for details.

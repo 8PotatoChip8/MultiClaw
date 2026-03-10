@@ -27,6 +27,27 @@
       workspace: "/workspace",
       // Skip onboarding bootstrap since we provide workspace files
       skipBootstrap: true,
+
+      // Memory search: local embeddings (built-in GGUF, no external deps)
+      memorySearch: {
+        enabled: true,
+        provider: "local",
+      },
+
+      // Compaction: flush durable notes before context truncation
+      compaction: {
+        memoryFlush: {
+          enabled: true,
+        },
+      },
+    },
+  },
+
+  // Session configuration
+  session: {
+    reset: {
+      // Idle sessions reset after 2 hours (triggers session-memory hook → saves context)
+      idleMinutes: 120,
     },
   },
 
@@ -53,7 +74,7 @@
   },
 
   tools: {
-    // Allow core tools that agents need
+    // Allow core tools + memory tools
     allow: [
       "bash",
       "read",
@@ -63,10 +84,12 @@
       "sessions_list",
       "sessions_history",
       "sessions_send",
+      "memory_search",
+      "memory_get",
     ],
   },
 
-  // Enable OpenClaw hooks for session memory and command auditing
+  // Enable OpenClaw hooks
   hooks: {
     internal: {
       enabled: true,
@@ -75,6 +98,8 @@
         "session-memory": { enabled: true },
         // Logs all command events to ~/.openclaw/logs/commands.log (JSONL)
         "command-logger": { enabled: true },
+        // Runs BOOT.md instructions on gateway start
+        "boot-md": { enabled: true },
       },
     },
   },

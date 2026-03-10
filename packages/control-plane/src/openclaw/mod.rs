@@ -927,6 +927,19 @@ impl OpenClawManager {
             "# Tools\nUse bash and curl to interact with the MultiClaw API.".into()).await;
         tokio::fs::write(workspace_dir.join("TOOLS.md"), &tools_template).await?;
 
+        // Ensure memory/ directory exists for session-memory hook
+        tokio::fs::create_dir_all(workspace_dir.join("memory")).await?;
+
+        // Render MEMORY.md only on first creation — preserve agent's edits on respawn
+        let memory_path = workspace_dir.join("MEMORY.md");
+        if !memory_path.exists() {
+            let memory_template = read_template(&role_dir, &template_dir, "MEMORY.md",
+                format!("# {} - Long-Term Memory\n\n## Identity\n- Role: {}\n",
+                    config.agent_name, config.role)).await;
+            let memory = self.replace_vars(&memory_template, config);
+            tokio::fs::write(&memory_path, &memory).await?;
+        }
+
         // Render skill
         let skill_dir = workspace_dir.join("skills").join("multiclaw");
         tokio::fs::create_dir_all(&skill_dir).await?;
