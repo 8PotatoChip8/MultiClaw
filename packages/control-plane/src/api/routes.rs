@@ -2897,6 +2897,17 @@ async fn agent_dm(
                                 }
                             }
 
+                            // If the response was entirely system tags/narration with no actual
+                            // conversational content, treat it as conversation over — sending an
+                            // empty string to the other agent would cause a 400 Bad Request.
+                            if clean_response.trim().is_empty() {
+                                tracing::info!(
+                                    "DM conversation on thread {} ended: agent response was empty after tag stripping (depth {})",
+                                    thread_id, current_depth
+                                );
+                                break;
+                            }
+
                             current_depth += 1;
 
                             // End if the agent signaled conversation is complete
@@ -2915,9 +2926,10 @@ async fn agent_dm(
                             std::mem::swap(&mut responder_id, &mut other_id);
                             current_text = clean_response;
                         }
-                        Err(e) if current_depth <= 1 && dm_retries < 2 => {
+                        Err(e) if current_depth <= 1 && dm_retries < 2 && !format!("{e}").contains("HTTP 400") => {
                             // First message or first reply failed (likely container still starting
                             // from recent hire). Retry after a delay instead of immediately giving up.
+                            // Excludes 400 Bad Request — that's a bad-input problem, not transient.
                             dm_retries += 1;
                             tracing::warn!(
                                 "OpenClaw unavailable for {} on first message (attempt {}/3), retrying in 30s: {}",
