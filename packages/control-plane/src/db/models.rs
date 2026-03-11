@@ -70,14 +70,6 @@ pub struct Agent {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CreateAgentRequest {
-    pub company_id: Uuid,
-    pub role: String,
-    pub name: String,
-    pub specialty: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 pub struct PatchAgentRequest {
     pub preferred_model: Option<String>,
     pub specialty: Option<String>,
@@ -93,6 +85,7 @@ pub struct HireRequest {
 
 // ─── VMs ───────────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Vm {
     pub id: Uuid,
@@ -144,12 +137,11 @@ pub struct CreateMessageRequest {
     pub sender_id: Option<Uuid>,
     pub content: JsonValue,
     pub reply_depth: Option<i32>,
-    pub targets: Option<Vec<Uuid>>,
-    pub mode: Option<String>,
 }
 
 // ─── Dispatches ────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Dispatch {
     pub id: Uuid,
@@ -193,6 +185,7 @@ pub struct AgentApprovalAction {
     pub note: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Approval {
     pub id: Uuid,
@@ -235,6 +228,7 @@ pub struct CreateServiceRequest {
 
 // ─── Service Engagements ───────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct ServiceEngagement {
     pub id: Uuid,
@@ -274,6 +268,7 @@ pub struct LedgerEntry {
 
 // ─── Secrets ───────────────────────────────────────────────────
 
+#[allow(dead_code)]
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct Secret {
     pub id: Uuid,
@@ -315,6 +310,4 @@ pub struct InitRequest {
     pub holding_name: Option<String>,
     pub main_agent_name: Option<String>,
     pub default_model: Option<String>,
-    pub strict_mode: Option<bool>,
-    pub vm_provider: Option<String>,
 }

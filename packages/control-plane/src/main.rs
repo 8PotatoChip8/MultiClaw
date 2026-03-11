@@ -20,7 +20,6 @@ pub mod ledger;
 pub mod observability;
 
 use agents::main_agent::MainAgent;
-use agents::sub_agent::SubAgent;
 use crypto::CryptoMaster;
 use openclaw::OpenClawManager;
 use provisioning::incus::IncusProvider;
@@ -109,8 +108,6 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let sub_agent = SubAgent::new(cfg.ollama_url.clone());
-
     // Initialize CryptoMaster for secrets management
     let crypto = match CryptoMaster::new(&cfg.master_key_path) {
         Ok(c) => {
@@ -139,7 +136,6 @@ async fn main() -> anyhow::Result<()> {
         tx: tx_arc,
         config: cfg.clone(),
         main_agent: std::sync::Arc::new(main_agent),
-        sub_agent: std::sync::Arc::new(sub_agent),
         openclaw: std::sync::Arc::new(openclaw_mgr.clone()),
         vm_provider,
         crypto,

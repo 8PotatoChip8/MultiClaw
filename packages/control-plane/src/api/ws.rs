@@ -12,7 +12,6 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::crypto::CryptoMaster;
 use crate::agents::main_agent::MainAgent;
-use crate::agents::sub_agent::SubAgent;
 use crate::openclaw::OpenClawManager;
 use crate::provisioning::incus::IncusProvider;
 
@@ -32,7 +31,6 @@ pub struct AppState {
     pub tx: Arc<broadcast::Sender<String>>,
     pub config: Config,
     pub main_agent: Arc<MainAgent>,
-    pub sub_agent: Arc<SubAgent>,
     pub openclaw: Arc<OpenClawManager>,
     pub vm_provider: Option<Arc<IncusProvider>>,
     pub crypto: Option<Arc<CryptoMaster>>,
