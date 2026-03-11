@@ -452,8 +452,6 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     }
     // Collapse duplicate content blocks (model occasionally emits same text twice)
     text = dedup_content_blocks(&text);
-    // Strip pure narration lines (defense-in-depth for model ignoring instructions)
-    text = strip_narration_lines(&text);
     // Clean spurious newlines from streaming token assembly
     text = clean_spurious_newlines(&text);
     // Strip any remaining [[word_word]] artifacts (model-generated tags)
@@ -478,6 +476,9 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = fix_punctuation_spacing(&text);
     // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
     text = fix_broken_words(&text);
+    // Strip pure narration lines (runs AFTER newline/word fixes so streaming fragments
+    // like "Let\nme check my memory..." are cleaned to "Let me check my memory..." first)
+    text = strip_narration_lines(&text);
     // Final defense: if the entire remaining text (ignoring whitespace and brackets)
     // is just a fragmented system tag (e.g. "HE ARTBEAT_OK"), treat as empty.
     // This catches all streaming-fragmentation variants in one shot.
