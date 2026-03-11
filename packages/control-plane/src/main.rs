@@ -154,8 +154,20 @@ async fn main() -> anyhow::Result<()> {
     let pool_clone = pool.clone();
     let openclaw_clone = openclaw_mgr.clone();
     tokio::spawn(async move {
-        // Probe concurrency before spawning agents (minimises interference)
-        openclaw_clone.probe_concurrency(&probe_model).await;
+        // Only probe concurrency when there are active agents to recover.
+        // On fresh install, no agents exist yet and the model hasn't been pulled —
+        // the install script only runs `ollama pull` after the user completes init.
+        // The configured default (MULTICLAW_MAX_CONCURRENT_OLLAMA) is correct for this case.
+        let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agents WHERE status = 'ACTIVE'")
+            .fetch_one(&pool_clone)
+            .await
+            .unwrap_or(0);
+
+        if agent_count > 0 {
+            openclaw_clone.probe_concurrency(&probe_model).await;
+        } else {
+            tracing::info!("No active agents — skipping concurrency probe (using configured default)");
+        }
 
         tracing::info!("Recovering OpenClaw instances from DB...");
         match openclaw_clone.recover_instances(&pool_clone).await {
