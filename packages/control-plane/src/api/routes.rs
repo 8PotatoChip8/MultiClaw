@@ -217,6 +217,8 @@ fn fix_broken_words(s: &str) -> String {
         ("h ire", "hire"),
         ("Ac knowledg", "Acknowledg"),  // catches Acknowledged, Acknowledging, etc.
         ("ac knowledg", "acknowledg"),
+        ("Acknowled ged", "Acknowledged"),  // alternate split position
+        ("acknowled ged", "acknowledged"),
         ("Con firmed", "Confirmed"),
         ("con firmed", "confirmed"),
         ("Ap proved", "Approved"),
@@ -336,6 +338,18 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
             }
         }
         break;
+    }
+    // Strip OpenClaw tool-failure feedback lines the model leaks into output
+    // e.g. "⚠️ 📝 Edit: `in /workspace/MEMORY.md (315 chars)` failed"
+    {
+        let lines: Vec<&str> = text.lines().collect();
+        text = lines.into_iter()
+            .filter(|line| {
+                let trimmed = line.trim();
+                !(trimmed.contains('\u{26A0}') && trimmed.contains("failed"))
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
     }
     // Strip pure narration lines (defense-in-depth for model ignoring instructions)
     text = strip_narration_lines(&text);
