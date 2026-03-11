@@ -535,6 +535,10 @@ async fn handle_init(
     let model_clone = model.clone();
     let holding_name_clone = holding_name.clone();
     tokio::spawn(async move {
+        // Probe concurrency now that the model has been pulled by the install script.
+        // Startup skipped the probe because no agents existed yet.
+        openclaw.probe_concurrency(&model_clone).await;
+
         let config = crate::openclaw::AgentConfig {
             agent_id,
             agent_name: agent_name_clone,
