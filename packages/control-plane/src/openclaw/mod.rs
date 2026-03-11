@@ -100,6 +100,65 @@ impl OpenClawManager {
         let probe_count: usize = 10; // test up to 10 concurrent
         let ollama_url = self.ollama_url.clone();
 
+        // Wait for Ollama to be reachable and the model to be available.
+        // On fresh install / cold boot, Ollama may not have loaded the model yet.
+        tracing::info!("Waiting for Ollama model '{}' to be available at {}...", model, ollama_url);
+        let client = reqwest::Client::new();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
+        loop {
+            match client.get(format!("{}/api/tags", ollama_url))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        // Check if our model appears in the list
+                        let found = body["models"].as_array()
+                            .map(|models| models.iter().any(|m| {
+                                m["name"].as_str()
+                                    .map(|n| n == model || n.starts_with(&format!("{}:", model.split(':').next().unwrap_or(model))))
+                                    .unwrap_or(false)
+                            }))
+                            .unwrap_or(false);
+                        if found {
+                            tracing::info!("Ollama model '{}' is available", model);
+                            break;
+                        }
+                        // Model not in list — could be a cloud model that doesn't appear in /api/tags.
+                        // Try a single lightweight request to see if it works.
+                        let test = client.post(format!("{}/api/chat", ollama_url))
+                            .json(&serde_json::json!({
+                                "model": model,
+                                "messages": [{"role": "user", "content": "Hi"}],
+                                "stream": false,
+                                "options": {"num_predict": 1},
+                            }))
+                            .timeout(std::time::Duration::from_secs(30))
+                            .send()
+                            .await;
+                        match test {
+                            Ok(r) if r.status().is_success() || r.status().as_u16() == 429 => {
+                                tracing::info!("Ollama model '{}' responds (cloud/unlisted model)", model);
+                                break;
+                            }
+                            _ => {} // Not ready yet
+                        }
+                    }
+                }
+                _ => {} // Ollama not reachable yet
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "Timed out waiting for Ollama model '{}' after 120s — proceeding with probe anyway",
+                    model
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+
         tracing::info!(
             "Probing Ollama concurrency limit (sending {} concurrent requests to {})...",
             probe_count, ollama_url
