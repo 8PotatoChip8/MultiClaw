@@ -206,24 +206,27 @@ fn fix_punctuation_spacing(s: &str) -> String {
 
 /// Fix mid-word spaces from streaming token assembly.
 /// The tokenizer sometimes splits words across tokens, producing "Under stood",
-/// "H ire", etc. We fix this by replacing known broken fragments.
+/// "H ire", etc.  Two-tier approach:
+///  - Tier 0: hardcoded known patterns (fast, exact, zero false-positives).
+///  - Tier 1: single uppercase letter (not A/I) + space + lowercase 3+ chars.
+///  - Tier 2: short capitalized fragment (2-4 chars, not a common English word)
+///            + space + lowercase 3+ chars.
 fn fix_broken_words(s: &str) -> String {
-    // Pairs of (broken, fixed). Order matters: longer patterns first to avoid
-    // partial replacements. Only add confirmed patterns seen in production.
+    // Tier 0 — exact patterns confirmed in production (longest first).
     const FIXES: &[(&str, &str)] = &[
         ("Under stood", "Understood"),
         ("under stood", "understood"),
         ("H ire", "Hire"),
         ("h ire", "hire"),
-        ("Ac knowledg", "Acknowledg"),  // catches Acknowledged, Acknowledging, etc.
+        ("Ac knowledg", "Acknowledg"),
         ("ac knowledg", "acknowledg"),
-        ("Acknowled ged", "Acknowledged"),  // alternate split position
+        ("Acknowled ged", "Acknowledged"),
         ("acknowled ged", "acknowledged"),
         ("Con firmed", "Confirmed"),
         ("con firmed", "confirmed"),
         ("Ap proved", "Approved"),
         ("ap proved", "approved"),
-        ("App reciate", "Appreciate"),  // catches Appreciate, Appreciated, etc.
+        ("App reciate", "Appreciate"),
         ("app reciate", "appreciate"),
         ("Re ceived", "Received"),
         ("re ceived", "received"),
@@ -246,11 +249,106 @@ fn fix_broken_words(s: &str) -> String {
         ("sit uation", "situation"),
         ("Histor ical", "Historical"),
         ("histor ical", "historical"),
+        ("Escal ated", "Escalated"),
+        ("escal ated", "escalated"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
         result = result.replace(broken, fixed);
     }
+
+    // Tier 1 + 2 — heuristic merging for novel broken words.
+    result = fix_broken_words_heuristic(&result);
+    result
+}
+
+/// Common English words (2-4 chars) that appear capitalized at sentence starts.
+/// If a short capitalized fragment matches one of these, do NOT merge it with
+/// the following word — it's a real word, not a streaming fragment.
+const COMMON_SHORT_WORDS: &[&str] = &[
+    "Am", "An", "As", "At", "Be", "By", "Do", "Go", "He", "If", "In", "Is", "It",
+    "Me", "My", "No", "Of", "Ok", "On", "Or", "So", "To", "Up", "Us", "We",
+    "The", "And", "For", "Are", "But", "Not", "You", "All", "Can", "Had", "Her",
+    "Was", "One", "Our", "Out", "Has", "His", "How", "Its", "Let", "May", "New",
+    "Now", "Old", "See", "Way", "Who", "Did", "Got", "Get", "Say", "She", "Too",
+    "Use", "Yet", "Any", "Big", "Day", "End", "Far", "Few", "Man", "Men", "Own",
+    "Put", "Run", "Set", "Top", "Try", "Two", "Why", "Yes",
+    "Also", "Back", "Been", "Call", "Come", "Each", "Even", "Find", "From",
+    "Give", "Good", "Have", "Here", "High", "Into", "Just", "Keep", "Know",
+    "Last", "Like", "Long", "Look", "Made", "Make", "Many", "More", "Most",
+    "Much", "Must", "Name", "Need", "Next", "Only", "Over", "Part", "Real",
+    "Said", "Same", "Show", "Side", "Some", "Such", "Sure", "Take", "Tell",
+    "Than", "That", "Them", "Then", "They", "This", "Time", "Turn", "Very",
+    "Want", "Well", "Were", "What", "When", "Will", "With", "Word", "Work",
+    "Year", "Your",
+];
+
+fn is_common_short_word(word: &str) -> bool {
+    COMMON_SHORT_WORDS.iter().any(|w| w.eq_ignore_ascii_case(word))
+}
+
+/// Heuristic pass: merge [UpperFragment] [lowercase continuation] when the
+/// fragment is clearly a streaming-split artifact, not a real word.
+fn fix_broken_words_heuristic(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+
+    while i < len {
+        // Only act at word boundaries
+        let at_boundary = i == 0
+            || chars[i - 1].is_whitespace()
+            || chars[i - 1].is_ascii_punctuation();
+
+        if at_boundary && chars[i].is_ascii_uppercase() {
+            // Scan the capitalized fragment: one uppercase + zero or more lowercase
+            let frag_start = i;
+            let mut j = i + 1;
+            while j < len && chars[j].is_ascii_lowercase() {
+                j += 1;
+            }
+            let frag_len = j - frag_start; // 1 = single letter, 2-4 = short word
+
+            // Check: fragment followed by exactly one space, then lowercase 3+ chars
+            if j < len && chars[j] == ' '
+                && j + 1 < len && chars[j + 1].is_ascii_lowercase()
+            {
+                let cont_start = j + 1;
+                let mut k = cont_start;
+                while k < len && chars[k].is_ascii_lowercase() {
+                    k += 1;
+                }
+                let cont_len = k - cont_start;
+
+                if cont_len >= 3 {
+                    let should_merge = if frag_len == 1 {
+                        // Tier 1: single uppercase letter — merge unless A or I
+                        chars[frag_start] != 'A' && chars[frag_start] != 'I'
+                    } else if frag_len >= 2 && frag_len <= 4 {
+                        // Tier 2: short fragment — merge unless it's a common word
+                        let fragment: String = chars[frag_start..j].iter().collect();
+                        !is_common_short_word(&fragment)
+                    } else {
+                        false // 5+ char fragments: leave to the hardcoded list
+                    };
+
+                    if should_merge {
+                        // Emit fragment chars, skip the space
+                        for idx in frag_start..j {
+                            result.push(chars[idx]);
+                        }
+                        i = j + 1; // skip the space, continue with lowercase part
+                        continue;
+                    }
+                }
+            }
+        }
+
+        result.push(chars[i]);
+        i += 1;
+    }
+
     result
 }
 
@@ -983,6 +1081,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
                                  -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                                 ceo_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
                             );
+                            let _agent_guard = state_clone.acquire_agent_turn(aid).await;
                             state_clone.mark_agent_working(aid, "Processing approval request").await;
                             let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
                             state_clone.mark_agent_done(aid).await;
@@ -1120,6 +1219,7 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
                                  -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                                 mgr_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
                             );
+                            let _agent_guard = state_clone.acquire_agent_turn(aid).await;
                             state_clone.mark_agent_working(aid, "Processing approval request").await;
                             let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
                             state_clone.mark_agent_done(aid).await;
@@ -2073,6 +2173,7 @@ async fn send_message(
                                 state_clone.responding_to_user.write().await.insert(*responding_agent_id, tid);
                             }
 
+                            let _agent_guard = state_clone.acquire_agent_turn(*responding_agent_id).await;
                             state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
                             let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
                                 *responding_agent_id, &user_text,
@@ -2253,6 +2354,7 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
         );
         let state_clone = state.clone();
         tokio::spawn(async move {
+            let _agent_guard = state_clone.acquire_agent_turn(superior_id).await;
             state_clone.mark_agent_working(superior_id, "Processing approval request").await;
             let _ = state_clone.openclaw.send_message(superior_id, &dm_text, None).await;
             state_clone.mark_agent_done(superior_id).await;
@@ -2364,6 +2466,7 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
         );
         let state_clone = state.clone();
         tokio::spawn(async move {
+            let _agent_guard = state_clone.acquire_agent_turn(agent_id).await;
             state_clone.mark_agent_working(agent_id, "Processing approval decision").await;
             let _ = state_clone.openclaw.send_message(agent_id, &msg, None).await;
             state_clone.mark_agent_done(agent_id).await;
@@ -2448,6 +2551,7 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                 );
                 let state_clone = state.clone();
                 tokio::spawn(async move {
+                    let _agent_guard = state_clone.acquire_agent_turn(next_superior_id).await;
                     state_clone.mark_agent_working(next_superior_id, "Processing escalated approval").await;
                     let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text, None).await;
                     state_clone.mark_agent_done(next_superior_id).await;
@@ -3023,6 +3127,7 @@ async fn agent_dm(
                         partner_name, partner_name, partner_name, partner_name
                     );
 
+                    let _agent_guard = state_clone.acquire_agent_turn(responder_id).await;
                     state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
                     let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(&dm_ctx)).await;
                     state_clone.mark_agent_done(responder_id).await;
@@ -3100,6 +3205,8 @@ async fn agent_dm(
                                 break;
                             }
 
+                            // Release agent turn before swapping roles
+                            drop(_agent_guard);
                             // Swap roles: the other agent now responds to this one's message
                             std::mem::swap(&mut responder_id, &mut other_id);
                             current_text = clean_response;
@@ -3136,9 +3243,12 @@ async fn agent_dm(
                                  You should retry sending this message later when they come back online.",
                                 agent_name
                             );
+                            drop(_agent_guard); // release responder lock before messaging other agent
+                            let _other_guard = state_clone.acquire_agent_turn(other_id).await;
                             state_clone.mark_agent_working(other_id, "Processing delivery failure").await;
                             let _ = state_clone.openclaw.send_message(other_id, &failure_notice, None).await;
                             state_clone.mark_agent_done(other_id).await;
+                            drop(_other_guard);
                             break;
                         }
                     }
@@ -3194,6 +3304,7 @@ async fn agent_dm(
                         .insert(target_id, tokio::time::Instant::now());
 
                     tracing::info!("Post-DM action prompt for {} ({})", target_id, target_role.as_deref().unwrap_or("?"));
+                    let _agent_guard = state_clone.acquire_agent_turn(target_id).await;
                     state_clone.mark_agent_working(target_id, "Acting on briefing").await;
                     match state_clone.openclaw.send_message(target_id, &action_prompt, Some(action_instructions)).await {
                         Ok(response) => {
@@ -3533,6 +3644,7 @@ async fn agent_send_file(
             "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
             sender_name, notify_filename, notify_dest, notify_size
         );
+        let _agent_guard = state_clone.acquire_agent_turn(receiver_id).await;
         state_clone.mark_agent_working(receiver_id, "Processing received file").await;
         let _ = state_clone.openclaw.send_message(receiver_id, &msg, None).await;
         state_clone.mark_agent_done(receiver_id).await;
@@ -4877,6 +4989,65 @@ mod tests {
         let ratio = word_overlap_ratio(a, b);
         assert!(ratio < 0.3, "Expected <30% overlap, got {:.0}%", ratio * 100.0);
     }
+
+    // ── fix_broken_words (heuristic) ─────────────────────────────
+
+    #[test]
+    fn broken_words_tier0_known_patterns() {
+        assert_eq!(fix_broken_words("Under stood"), "Understood");
+        assert_eq!(fix_broken_words("H ire a manager"), "Hire a manager");
+        assert_eq!(fix_broken_words("Escal ated to CEO"), "Escalated to CEO");
+    }
+
+    #[test]
+    fn broken_words_tier1_single_letter() {
+        assert_eq!(fix_broken_words("D erek said hello"), "Derek said hello");
+        assert_eq!(fix_broken_words("E lena reported"), "Elena reported");
+        assert_eq!(fix_broken_words("S andbox ready"), "Sandbox ready");
+        assert_eq!(fix_broken_words("R eview the plan"), "Review the plan");
+        assert_eq!(fix_broken_words("M arcus approved"), "Marcus approved");
+    }
+
+    #[test]
+    fn broken_words_tier1_preserves_a_and_i() {
+        assert_eq!(fix_broken_words("A review is needed"), "A review is needed");
+        assert_eq!(fix_broken_words("I mentioned earlier"), "I mentioned earlier");
+    }
+
+    #[test]
+    fn broken_words_tier2_short_fragment() {
+        assert_eq!(fix_broken_words("Ap proved the request"), "Approved the request");
+        assert_eq!(fix_broken_words("Ex cellent work today"), "Excellent work today");
+        assert_eq!(fix_broken_words("Im mediately after"), "Immediately after");
+        assert_eq!(fix_broken_words("Cer tainly we can"), "Certainly we can");
+    }
+
+    #[test]
+    fn broken_words_tier2_preserves_common_words() {
+        assert_eq!(fix_broken_words("The meeting starts"), "The meeting starts");
+        assert_eq!(fix_broken_words("His report was good"), "His report was good");
+        assert_eq!(fix_broken_words("New orders arrived"), "New orders arrived");
+        assert_eq!(fix_broken_words("Our team delivered"), "Our team delivered");
+        assert_eq!(fix_broken_words("For example here"), "For example here");
+        assert_eq!(fix_broken_words("She mentioned that"), "She mentioned that");
+    }
+
+    #[test]
+    fn broken_words_multiple_in_one_string() {
+        assert_eq!(
+            fix_broken_words("D erek Ap proved the H ire request"),
+            "Derek Approved the Hire request"
+        );
+    }
+
+    #[test]
+    fn broken_words_no_false_merges() {
+        assert_eq!(fix_broken_words("Go ahead and start"), "Go ahead and start");
+        assert_eq!(fix_broken_words("Set everything up"), "Set everything up");
+        assert_eq!(fix_broken_words("All systems ready"), "All systems ready");
+    }
+
+    // ── word_overlap_ratio ─────────────────────────────────────────
 
     #[test]
     fn overlap_empty() {

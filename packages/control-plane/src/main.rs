@@ -24,6 +24,26 @@ use crypto::CryptoMaster;
 use openclaw::OpenClawManager;
 use provisioning::incus::IncusProvider;
 
+/// Acquire a per-agent turn lock (standalone version for tasks without AppState).
+async fn acquire_agent_turn(
+    locks: &tokio::sync::RwLock<std::collections::HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    agent_id: Uuid,
+) -> tokio::sync::OwnedMutexGuard<()> {
+    let mutex = {
+        let map = locks.read().await;
+        if let Some(m) = map.get(&agent_id) {
+            m.clone()
+        } else {
+            drop(map);
+            let mut map = locks.write().await;
+            map.entry(agent_id)
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
+                .clone()
+        }
+    };
+    mutex.lock_owned().await
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::registry()
@@ -144,6 +164,7 @@ async fn main() -> anyhow::Result<()> {
         agent_activities: std::sync::Arc::new(tokio::sync::RwLock::new(Some(std::collections::HashMap::new()))),
         responding_to_user: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         action_prompt_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        agent_message_locks: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Watch channel: signals when OpenClaw instance recovery is complete and all containers are ready.
@@ -227,6 +248,7 @@ async fn main() -> anyhow::Result<()> {
     let pool_rp = pool.clone();
     let openclaw_rp = openclaw_mgr.clone();
     let tx_rp = app_state.tx.clone();
+    let agent_locks_rp = app_state.agent_message_locks.clone();
     let mut rp_rx = recovery_rx.clone();
     tokio::spawn(async move {
         // Wait for all containers to be ready
@@ -291,6 +313,7 @@ async fn main() -> anyhow::Result<()> {
                 let pool = pool_rp.clone();
                 let openclaw = openclaw_rp.clone();
                 let tx = tx_rp.clone();
+                let locks = agent_locks_rp.clone();
                 let agent_id = *agent_id;
                 let agent_name = (*agent_name).clone();
                 let role = (*role).clone();
@@ -298,7 +321,7 @@ async fn main() -> anyhow::Result<()> {
 
                 handles.push(tokio::spawn(async move {
                     send_recovery_prompt(
-                        &pool, &openclaw, &tx,
+                        &pool, &openclaw, &tx, &locks,
                         agent_id, &agent_name, &role, &restart_ts,
                     ).await;
                 }));
@@ -321,6 +344,7 @@ async fn main() -> anyhow::Result<()> {
     let pool_hb = pool.clone();
     let openclaw_hb = openclaw_mgr.clone();
     let tx_hb = app_state.tx.clone();
+    let agent_locks_hb = app_state.agent_message_locks.clone();
     let mut hb_rx = recovery_rx.clone();
     tokio::spawn(async move {
         // Wait for recovery + recovery prompts to finish before starting heartbeat.
@@ -372,6 +396,7 @@ async fn main() -> anyhow::Result<()> {
                 If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else. \
                 Do not generate filler or repeat known information.";
 
+            let _agent_guard = acquire_agent_turn(&agent_locks_hb, main_id).await;
             match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
                 Ok(response) => {
                     let trimmed = response.trim();
@@ -442,6 +467,7 @@ async fn send_recovery_prompt(
     db: &PgPool,
     openclaw: &OpenClawManager,
     tx: &Arc<broadcast::Sender<String>>,
+    agent_locks: &tokio::sync::RwLock<std::collections::HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     agent_id: Uuid,
     agent_name: &str,
     role: &str,
@@ -506,6 +532,7 @@ async fn send_recovery_prompt(
 
     tracing::info!("Sending recovery prompt to {} ({})", agent_name, role);
 
+    let _agent_guard = acquire_agent_turn(agent_locks, agent_id).await;
     match openclaw.send_message(agent_id, &prompt, Some(instructions)).await {
         Ok(response) => {
             let (cleaned, _) = api::routes::strip_agent_tags(&response);

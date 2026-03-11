@@ -51,6 +51,9 @@ pub struct AppState {
     /// Cooldown for post-DM action prompts. Maps agent_id → last action time.
     /// Prevents triplicate directives when an agent receives multiple DMs in rapid succession.
     pub action_prompt_cooldowns: Arc<RwLock<HashMap<Uuid, tokio::time::Instant>>>,
+    /// Per-agent message serialization. Ensures each agent processes one message
+    /// at a time so concurrent senders don't confuse the LLM context.
+    pub agent_message_locks: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl AppState {
@@ -77,6 +80,24 @@ impl AppState {
             "status": "WORKING",
             "task": task,
         }).to_string());
+    }
+
+    /// Acquire a per-agent turn lock. Returns an owned guard that serializes
+    /// message processing for the given agent. Drop the guard when the turn is done.
+    pub async fn acquire_agent_turn(&self, agent_id: Uuid) -> tokio::sync::OwnedMutexGuard<()> {
+        let mutex = {
+            let locks = self.agent_message_locks.read().await;
+            if let Some(m) = locks.get(&agent_id) {
+                m.clone()
+            } else {
+                drop(locks);
+                let mut locks = self.agent_message_locks.write().await;
+                locks.entry(agent_id)
+                    .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+                    .clone()
+            }
+        };
+        mutex.lock_owned().await
     }
 
     /// Mark an agent as done with a request. Decrements pending_requests; if 0, sets IDLE.
