@@ -271,33 +271,12 @@ fn fix_broken_words(s: &str) -> String {
     result
 }
 
-/// Common English words (2-4 chars) that appear capitalized at sentence starts.
-/// If a short capitalized fragment matches one of these, do NOT merge it with
-/// the following word — it's a real word, not a streaming fragment.
-const COMMON_SHORT_WORDS: &[&str] = &[
-    "Am", "An", "As", "At", "Be", "By", "Do", "Go", "He", "If", "In", "Is", "It",
-    "Me", "My", "No", "Of", "Ok", "On", "Or", "So", "To", "Up", "Us", "We",
-    "The", "And", "For", "Are", "But", "Not", "You", "All", "Can", "Had", "Her",
-    "Was", "One", "Our", "Out", "Has", "His", "How", "Its", "Let", "May", "New",
-    "Now", "Old", "See", "Way", "Who", "Did", "Got", "Get", "Say", "She", "Too",
-    "Use", "Yet", "Any", "Big", "Day", "End", "Far", "Few", "Man", "Men", "Own",
-    "Put", "Run", "Set", "Top", "Try", "Two", "Why", "Yes",
-    "Also", "Back", "Been", "Call", "Come", "Each", "Even", "Find", "From",
-    "Give", "Good", "Have", "Here", "High", "Into", "Just", "Keep", "Know",
-    "Last", "Like", "Long", "Look", "Made", "Make", "Many", "More", "Most",
-    "Much", "Must", "Name", "Need", "Next", "Only", "Over", "Part", "Real",
-    "Said", "Same", "Show", "Side", "Some", "Such", "Sure", "Take", "Tell",
-    "Than", "That", "Them", "Then", "They", "This", "Time", "Turn", "Very",
-    "Want", "Well", "Were", "What", "When", "Will", "With", "Word", "Work",
-    "Year", "Your",
-];
-
-fn is_common_short_word(word: &str) -> bool {
-    COMMON_SHORT_WORDS.iter().any(|w| w.eq_ignore_ascii_case(word))
-}
-
 /// Heuristic pass: merge [UpperFragment] [lowercase continuation] when the
 /// fragment is clearly a streaming-split artifact, not a real word.
+/// Only Tier 1 (single uppercase letter, not A/I) is active.
+/// Tier 2 (2-4 char fragments) is disabled — too many false positives
+/// with common words (Grow capital, Add these, Once you, Risk framework, etc.).
+/// Use Tier 0 hardcoded patterns in `fix_broken_words()` for known multi-char breaks.
 fn fix_broken_words_heuristic(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
@@ -334,12 +313,9 @@ fn fix_broken_words_heuristic(s: &str) -> String {
                     let should_merge = if frag_len == 1 {
                         // Tier 1: single uppercase letter — merge unless A or I
                         chars[frag_start] != 'A' && chars[frag_start] != 'I'
-                    } else if frag_len >= 2 && frag_len <= 4 {
-                        // Tier 2: short fragment — merge unless it's a common word
-                        let fragment: String = chars[frag_start..j].iter().collect();
-                        !is_common_short_word(&fragment)
                     } else {
-                        false // 5+ char fragments: leave to the hardcoded list
+                        // Tier 2+ disabled: 2+ char fragments left to Tier 0 hardcoded list
+                        false
                     };
 
                     if should_merge {
@@ -511,6 +487,32 @@ fn word_overlap_ratio(a: &str, b: &str) -> f64 {
     intersection as f64 / smaller as f64
 }
 
+/// Decode common HTML entities that glm-5 occasionally outputs.
+/// Also handles the partial variant where &#NNN; loses its &# prefix.
+fn decode_html_entities(s: &str) -> String {
+    let mut result = s.to_string();
+    // Numeric HTML entities (3-digit padded first, then short forms)
+    result = result.replace("&#039;", "'");
+    result = result.replace("&#39;", "'");
+    result = result.replace("&#034;", "\"");
+    result = result.replace("&#34;", "\"");
+    result = result.replace("&#038;", "&");
+    result = result.replace("&#38;", "&");
+    result = result.replace("&#060;", "<");
+    result = result.replace("&#60;", "<");
+    result = result.replace("&#062;", ">");
+    result = result.replace("&#62;", ">");
+    // Named HTML entities
+    result = result.replace("&amp;", "&");
+    result = result.replace("&lt;", "<");
+    result = result.replace("&gt;", ">");
+    result = result.replace("&quot;", "\"");
+    result = result.replace("&apos;", "'");
+    // Partial variant: model outputs '039; (the &# prefix was lost)
+    result = result.replace("'039;", "'");
+    result
+}
+
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = {
         let normalized: String = response.chars()
@@ -519,6 +521,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
         normalized.contains("END_CONVERSATION") || normalized.contains("ENDCONVERSATION")
     };
     let mut text = response.to_string();
+    // Decode HTML entities that glm-5 occasionally outputs (e.g. &#039; -> ')
+    text = decode_html_entities(&text);
     // Strip known system tags (including variants where streaming splits brackets/text across lines)
     text = text.replace("[END_CONVERSATION]", "");
     text = text.replace("[HEARTBEAT_OK]", "");
@@ -975,6 +979,18 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     let holding: Option<Holding> = sqlx::query_as("SELECT id, owner_user_id, name, main_agent_name, created_at FROM holdings LIMIT 1")
         .fetch_optional(&state.db).await.unwrap_or(None);
     let holding_id = holding.map(|h| h.id).unwrap_or(Uuid::from_u128(0));
+
+    // Reject duplicate first names within the holding to avoid confusion
+    let first_name = payload.name.split_whitespace().next().unwrap_or(&payload.name);
+    let name_conflict: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM agents WHERE holding_id = $1 AND status = 'ACTIVE' AND SPLIT_PART(name, ' ', 1) ILIKE $2"
+    ).bind(holding_id).bind(first_name).fetch_one(&state.db).await.unwrap_or((0,));
+    if name_conflict.0 > 0 {
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": format!("An agent with first name '{}' already exists. Choose a different first name to avoid confusion.", first_name)
+        })));
+    }
+
     let ceo_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'ceo_policy' LIMIT 1")
         .fetch_optional(&state.db).await.unwrap_or(None);
     let policy_id = ceo_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
@@ -1116,6 +1132,17 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
         Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
     }
 
+    // Reject duplicate first names within the holding to avoid confusion
+    let first_name = payload.name.split_whitespace().next().unwrap_or(&payload.name);
+    let name_conflict: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM agents WHERE holding_id = $1 AND status = 'ACTIVE' AND SPLIT_PART(name, ' ', 1) ILIKE $2"
+    ).bind(ceo.holding_id).bind(first_name).fetch_one(&state.db).await.unwrap_or((0,));
+    if name_conflict.0 > 0 {
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": format!("An agent with first name '{}' already exists. Choose a different first name to avoid confusion.", first_name)
+        })));
+    }
+
     let mgr_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'manager_policy' LIMIT 1")
         .fetch_optional(&state.db).await.unwrap_or(None);
     let policy_id = mgr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
@@ -1252,6 +1279,17 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
             }
         },
         Decision::Denied(reason) => return (StatusCode::FORBIDDEN, Json(json!({"error": reason}))),
+    }
+
+    // Reject duplicate first names within the holding to avoid confusion
+    let first_name = payload.name.split_whitespace().next().unwrap_or(&payload.name);
+    let name_conflict: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM agents WHERE holding_id = $1 AND status = 'ACTIVE' AND SPLIT_PART(name, ' ', 1) ILIKE $2"
+    ).bind(mgr.holding_id).bind(first_name).fetch_one(&state.db).await.unwrap_or((0,));
+    if name_conflict.0 > 0 {
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": format!("An agent with first name '{}' already exists. Choose a different first name to avoid confusion.", first_name)
+        })));
     }
 
     let wkr_policy: Option<ToolPolicy> = sqlx::query_as("SELECT id, name, allowlist, denylist, notes FROM tool_policies WHERE name = 'worker_policy' LIMIT 1")
@@ -3350,6 +3388,9 @@ async fn agent_dm(
                     let action_instructions = "You just finished receiving a briefing or directive. \
                         Execute on it immediately using your available tools — but only NEW actions. \
                         Do not repeat hiring, briefing, or tasks you have already completed. \
+                        IMPORTANT: When messaging other agents (workers, managers, etc.), use the `dm` endpoint \
+                        (POST /v1/agents/{YOUR_ID}/dm with {\"target\": \"AGENT_ID_OR_HANDLE\", \"message\": \"...\"}). \
+                        The `dm-user` endpoint is ONLY for contacting the human operator — never use it to message agents. \
                         Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
                     // Record cooldown before executing (so concurrent DMs see it immediately)
@@ -3423,6 +3464,11 @@ async fn agent_dm_user(
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))),
     };
 
+    let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(agent_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Unknown".into());
+    let preview: String = p.message.chars().take(100).collect();
+    tracing::info!("dm-user from {} ({}): '{}'", agent_name, agent_id, preview);
+
     // Rate limit: max 5 user-directed messages per minute per agent
     let recent_count: Option<i64> = sqlx::query_scalar(
         "SELECT COUNT(*) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT' AND created_at > NOW() - INTERVAL '1 minute' \
@@ -3430,6 +3476,40 @@ async fn agent_dm_user(
     ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
     if recent_count.unwrap_or(0) >= 5 {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 5 user messages per minute"})));
+    }
+
+    // Misrouting guard: detect when an agent mistakenly uses dm-user to message
+    // another agent instead of the human operator. Check if the message's first line
+    // directly addresses a known agent name in the same holding.
+    {
+        let holding_id: Option<Uuid> = sqlx::query_scalar("SELECT holding_id FROM agents WHERE id = $1")
+            .bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+        if let Some(hid) = holding_id {
+            let peer_names: Vec<String> = sqlx::query_scalar(
+                "SELECT name FROM agents WHERE holding_id = $1 AND id != $2 AND status = 'ACTIVE'"
+            ).bind(hid).bind(agent_id).fetch_all(&state.db).await.unwrap_or_default();
+
+            let msg_lower = p.message.to_lowercase();
+            // Check first ~200 chars for an agent name (greeting/address pattern)
+            let first_chunk: String = msg_lower.chars().take(200).collect();
+            for peer in &peer_names {
+                let first_name = peer.split_whitespace().next().unwrap_or(peer).to_lowercase();
+                if first_chunk.contains(&first_name) {
+                    tracing::warn!(
+                        "Misrouted dm-user from agent {}: message addresses '{}' — should use /dm endpoint",
+                        agent_id, peer
+                    );
+                    return (StatusCode::BAD_REQUEST, Json(json!({
+                        "error": format!(
+                            "This message appears to be addressed to {}, not the human operator. \
+                             Use the /dm endpoint (POST /v1/agents/YOUR_ID/dm) with {{\"target\": \"AGENT_ID_OR_HANDLE\", \"message\": \"...\"}} \
+                             to message other agents. The /dm-user endpoint is only for contacting the human operator.",
+                            peer
+                        )
+                    })));
+                }
+            }
+        }
     }
 
     // Find existing user-agent DM thread

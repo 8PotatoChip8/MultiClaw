@@ -367,6 +367,8 @@ impl OpenClawManager {
         let env_token = format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token);
         let vol_config = format!("{}:/home/node/.openclaw:rw", config_dir.display());
         let vol_workspace = format!("{}:/workspace:rw", workspace_dir.display());
+        // OpenClaw looks for skills at /app/skills/ by default; map workspace skills there too
+        let vol_skills = format!("{}:/app/skills:rw", workspace_dir.join("skills").display());
         let port_str = port.to_string();
 
         // Mount the shared embeddings model (pre-downloaded during install) into
@@ -390,6 +392,7 @@ impl OpenClawManager {
             "-e", &env_token,
             "-v", &vol_config,
             "-v", &vol_workspace,
+            "-v", &vol_skills,
         ];
         if let Some(ref vol) = vol_models {
             docker_args.extend(["-v", vol.as_str()]);
@@ -1042,6 +1045,15 @@ impl OpenClawManager {
 
         // Ensure memory/ directory exists for session-memory hook
         tokio::fs::create_dir_all(workspace_dir.join("memory")).await?;
+
+        // Pre-create today's daily log so agents don't hit ENOENT on first read.
+        // The session-memory hook populates these over time, but agents often try
+        // to read today's file before the hook has fired.
+        let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        let today_log = workspace_dir.join("memory").join(format!("{}.md", today));
+        if !today_log.exists() {
+            tokio::fs::write(&today_log, format!("# Daily Log — {}\n", today)).await?;
+        }
 
         // Render MEMORY.md only on first creation — preserve agent's edits on respawn
         let memory_path = workspace_dir.join("MEMORY.md");
