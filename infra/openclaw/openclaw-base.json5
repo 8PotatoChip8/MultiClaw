@@ -28,6 +28,9 @@
       // Skip onboarding bootstrap since we provide workspace files
       skipBootstrap: true,
 
+      // Disable OpenClaw's built-in heartbeat — MultiClaw control plane runs its own
+      heartbeat: { every: "0m" },
+
       // Memory search: local embeddings (built-in GGUF, no external deps)
       memorySearch: {
         enabled: true,
