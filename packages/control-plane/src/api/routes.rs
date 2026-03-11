@@ -326,19 +326,6 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("[[reply_to_current]]", "");
     text = text.replace("[reply_to_current]", "");
     text = strip_fragmented_tag(&text, "reply_to_current");
-    // Strip any remaining [[word_word]] artifacts (model-generated tags)
-    while let Some(start) = text.find("[[") {
-        if let Some(end) = text[start..].find("]]") {
-            let tag = &text[start..start + end + 2];
-            // Only strip if it looks like a simple tag (letters, underscores, hyphens)
-            let inner = &tag[2..tag.len() - 2];
-            if inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                text = text.replacen(tag, "", 1);
-                continue;
-            }
-        }
-        break;
-    }
     // Strip OpenClaw tool-failure feedback lines the model leaks into output
     // e.g. "⚠️ 📝 Edit: `in /workspace/MEMORY.md (315 chars)` failed"
     {
@@ -355,6 +342,24 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = strip_narration_lines(&text);
     // Clean spurious newlines from streaming token assembly
     text = clean_spurious_newlines(&text);
+    // Strip any remaining [[word_word]] artifacts (model-generated tags)
+    // This runs AFTER clean_spurious_newlines so that streaming-fragmented tags
+    // like "[[reply\n_to_current]]" have their newlines collapsed first.
+    while let Some(start) = text.find("[[") {
+        if let Some(end) = text[start..].find("]]") {
+            let tag = &text[start..start + end + 2];
+            // Only strip if it looks like a simple tag (letters, underscores, hyphens, whitespace)
+            let inner = &tag[2..tag.len() - 2];
+            if inner.chars().all(|c| c.is_whitespace() || c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+                text = text.replacen(tag, "", 1);
+                continue;
+            }
+        }
+        break;
+    }
+    // Second pass: clean up any empty brackets left after tag stripping
+    text = text.replace("[]", "");
+    text = text.replace("[ ]", "");
     // Fix spacing artifacts: space before punctuation/contractions from token boundaries
     text = fix_punctuation_spacing(&text);
     // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
