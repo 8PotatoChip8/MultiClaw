@@ -1,5 +1,5 @@
 // OpenClaw base config template for MultiClaw agents
-// Template variables: {{AGENT_NAME}}, {{AGENT_PORT}}, {{OLLAMA_URL}}, {{MODEL}}, {{GATEWAY_TOKEN}}
+// Template variables: {{AGENT_NAME}}, {{AGENT_PORT}}, {{OLLAMA_URL}}, {{MODEL}}, {{GATEWAY_TOKEN}}, {{MEMORY_SEARCH_LOCAL}}
 {
   gateway: {
     mode: "local",
@@ -31,10 +31,13 @@
       // Disable OpenClaw's built-in heartbeat — MultiClaw control plane runs its own
       heartbeat: { every: "0m" },
 
-      // Memory search: local embeddings (built-in GGUF, no external deps)
+      // Memory search: local embeddings
+      // When the pre-downloaded GGUF is available, render_config injects modelPath
+      // to skip the 328 MB download on first use. Otherwise OpenClaw downloads it.
       memorySearch: {
         enabled: true,
         provider: "local",
+        {{MEMORY_SEARCH_LOCAL}}
       },
 
       // Compaction: flush durable notes before context truncation

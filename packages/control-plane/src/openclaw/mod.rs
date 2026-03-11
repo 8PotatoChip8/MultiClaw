@@ -349,20 +349,46 @@ impl OpenClawManager {
             config.agent_name, port, container_name
         );
 
+        let env_token = format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token);
+        let vol_config = format!("{}:/home/node/.openclaw:rw", config_dir.display());
+        let vol_workspace = format!("{}:/workspace:rw", workspace_dir.display());
+        let port_str = port.to_string();
+
+        // Mount the shared embeddings model (pre-downloaded during install) into
+        // every container so memory_search works immediately without downloading.
+        let gguf_path = self.data_dir.join("shared/models/embeddinggemma-300m-qat-Q8_0.gguf");
+        let vol_models = if gguf_path.exists() {
+            Some(format!("{}:/opt/multiclaw/shared/models:ro",
+                self.data_dir.join("shared/models").display()))
+        } else {
+            tracing::warn!(
+                "Embeddings model not found at {}; agents will download on first memory_search",
+                gguf_path.display()
+            );
+            None
+        };
+
+        let mut docker_args: Vec<&str> = vec![
+            "run", "-d",
+            "--name", &container_name,
+            "--network", "host",
+            "-e", &env_token,
+            "-v", &vol_config,
+            "-v", &vol_workspace,
+        ];
+        if let Some(ref vol) = vol_models {
+            docker_args.extend(["-v", vol.as_str()]);
+        }
+        docker_args.extend([
+            "--restart", "unless-stopped",
+            &self.image,
+            "openclaw", "gateway",
+            "--port", &port_str,
+            "--verbose",
+        ]);
+
         let output = tokio::process::Command::new("docker")
-            .args([
-                "run", "-d",
-                "--name", &container_name,
-                "--network", "host",
-                "-e", &format!("OPENCLAW_GATEWAY_TOKEN={}", gateway_token),
-                "-v", &format!("{}:/home/node/.openclaw:rw", config_dir.display()),
-                "-v", &format!("{}:/workspace:rw", workspace_dir.display()),
-                "--restart", "unless-stopped",
-                &self.image,
-                "openclaw", "gateway",
-                "--port", &port.to_string(),
-                "--verbose",
-            ])
+            .args(&docker_args)
             .output()
             .await?;
 
@@ -942,12 +968,22 @@ impl OpenClawManager {
         let template = std::fs::read_to_string(&template_path)
             .unwrap_or_else(|_| self.default_config_template());
 
+        // If the pre-downloaded embeddings GGUF exists, inject a modelPath so
+        // OpenClaw uses the local file instead of downloading 328 MB on first use.
+        let gguf_path = self.data_dir.join("shared/models/embeddinggemma-300m-qat-Q8_0.gguf");
+        let memory_search_local = if gguf_path.exists() {
+            r#"local: { modelPath: "/opt/multiclaw/shared/models/embeddinggemma-300m-qat-Q8_0.gguf" },"#.to_string()
+        } else {
+            String::new()
+        };
+
         let rendered = template
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_PORT}}", &port.to_string())
             .replace("{{OLLAMA_URL}}", &self.ollama_url)
             .replace("{{MODEL}}", &config.model)
-            .replace("{{GATEWAY_TOKEN}}", token);
+            .replace("{{GATEWAY_TOKEN}}", token)
+            .replace("{{MEMORY_SEARCH_LOCAL}}", &memory_search_local);
 
         Ok(rendered)
     }

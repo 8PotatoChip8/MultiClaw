@@ -164,6 +164,19 @@ log "Setting up OpenClaw data directories..."
 mkdir -p /opt/multiclaw/openclaw-data
 cp -r /opt/multiclaw/infra/openclaw/* /opt/multiclaw/openclaw-data/ 2>/dev/null || true
 
+log "Downloading OpenClaw embeddings model (328 MB, one-time)..."
+GGUF_DIR="/opt/multiclaw/openclaw-data/shared/models"
+GGUF_FILE="$GGUF_DIR/embeddinggemma-300m-qat-Q8_0.gguf"
+mkdir -p "$GGUF_DIR"
+if [ ! -f "$GGUF_FILE" ]; then
+  curl -fL --progress-bar \
+    "https://huggingface.co/ggml-org/embeddinggemma-300m-qat-q8_0-GGUF/resolve/main/embeddinggemma-300m-qat-Q8_0.gguf" \
+    -o "$GGUF_FILE" \
+    || log "Warning: Could not download embeddings model (agents will download on first use)"
+else
+  log "Embeddings model already present, skipping download."
+fi
+
 log "Installing systemd service for auto-start on boot..."
 cp /opt/multiclaw/infra/systemd/multiclaw-stack.service /etc/systemd/system/
 systemctl daemon-reload
