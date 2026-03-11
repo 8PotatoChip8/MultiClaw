@@ -110,7 +110,7 @@ impl OpenClawManager {
 
         for i in 0..probe_count {
             let client = client.clone();
-            let url = format!("{}/v1/chat/completions", ollama_url);
+            let url = format!("{}/api/chat", ollama_url);
             let model = model.to_string();
             handles.push(tokio::spawn(async move {
                 let resp = client
@@ -119,7 +119,8 @@ impl OpenClawManager {
                     .json(&serde_json::json!({
                         "model": model,
                         "messages": [{"role": "user", "content": "Hi"}],
-                        "max_tokens": 1,
+                        "stream": false,
+                        "options": {"num_predict": 1},
                     }))
                     .timeout(std::time::Duration::from_secs(60))
                     .send()
