@@ -897,6 +897,9 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
         }
     });
 
+    // Auto-provision desktop VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "ceo_policy").await;
+
     let _ = state.tx.send(json!({"type":"ceo_hired","agent_id": agent_id,"company_id": company_id}).to_string());
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
@@ -1028,6 +1031,9 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
             tracing::error!("Failed to spawn OpenClaw for Manager {}: {}", config.agent_name, e);
         }
     });
+
+    // Auto-provision desktop VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "manager_policy").await;
 
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
@@ -1162,6 +1168,9 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
             tracing::error!("Failed to spawn OpenClaw for Worker {}: {}", config.agent_name, e);
         }
     });
+
+    // Auto-provision desktop VM in background
+    provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "worker_policy").await;
 
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }

@@ -112,7 +112,7 @@ impl IncusProvider {
             args.extend(&["--cwd", wd]);
         }
 
-        args.extend(&["--", "bash", "-lc", command]);
+        args.extend(&["--", "/bin/bash", "-lc", command]);
 
         let secs = timeout_secs.unwrap_or(30).min(120);
         let output = timeout(
