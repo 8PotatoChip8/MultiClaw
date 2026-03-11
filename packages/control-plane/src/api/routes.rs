@@ -1855,10 +1855,16 @@ async fn send_message(
     };
     let reply_depth = p.reply_depth.unwrap_or(0);
 
-    // Scrub secrets from agent-sent messages before storing
+    // Strip system tags and scrub secrets from agent-sent messages before storing
     let content = if sender_type == "AGENT" {
-        if let (Some(ref crypto), Some(text)) = (&state.crypto, p.content.get("text").and_then(|v| v.as_str())) {
-            let scrubbed = scrub_secrets(&state.db, crypto, sender_id, text).await;
+        if let Some(text) = p.content.get("text").and_then(|v| v.as_str()) {
+            let (tag_cleaned, _) = strip_agent_tags(text);
+            let scrubbed = if let Some(ref crypto) = state.crypto {
+                scrub_secrets(&state.db, crypto, sender_id, &tag_cleaned).await
+            } else { tag_cleaned };
+            if scrubbed.trim().is_empty() {
+                return (StatusCode::OK, Json(json!({"status": "empty_after_cleaning"})));
+            }
             json!({"text": scrubbed})
         } else { p.content.clone() }
     } else { p.content.clone() };
@@ -3022,23 +3028,23 @@ async fn agent_dm(
                                 scrub_secrets(&state_clone.db, crypto, responder_id, &clean_response).await
                             } else { clean_response.clone() };
 
-                            // Suppress sender's redundant re-statement: if the DM initiator
-                            // is speaking again and their response mostly repeats what they
-                            // already said, skip storing and end the loop.
-                            if responder_id == sender_id && !scrubbed.trim().is_empty() {
+                            // Suppress redundant re-statements: if this agent's response
+                            // mostly repeats what they already said earlier in this DM,
+                            // skip storing and end the loop (prevents double-answers).
+                            if !scrubbed.trim().is_empty() {
                                 let prev_text: Option<String> = sqlx::query_scalar(
                                     "SELECT content->>'text' FROM messages \
                                      WHERE thread_id = $1 AND sender_id = $2 \
                                      ORDER BY created_at DESC LIMIT 1"
-                                ).bind(thread_id).bind(sender_id)
+                                ).bind(thread_id).bind(responder_id)
                                 .fetch_optional(&state_clone.db).await.ok().flatten();
 
                                 if let Some(prev) = prev_text {
                                     let overlap = word_overlap_ratio(&prev, &scrubbed);
                                     if overlap > 0.6 {
                                         tracing::info!(
-                                            "DM thread {}: suppressed sender's redundant re-statement (overlap {:.0}%)",
-                                            thread_id, overlap * 100.0
+                                            "DM thread {}: suppressed {}'s redundant re-statement (overlap {:.0}%)",
+                                            thread_id, responder_id, overlap * 100.0
                                         );
                                         break;
                                     }
