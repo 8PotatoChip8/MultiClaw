@@ -1053,6 +1053,12 @@ impl OpenClawManager {
             tokio::fs::write(&memory_path, &memory).await?;
         }
 
+        // Render HEARTBEAT.md (overwrite on respawn — checklist should match latest template)
+        let heartbeat_template = read_template(&role_dir, &template_dir, "HEARTBEAT.md",
+            "# Heartbeat Checklist\n\nRespond with [HEARTBEAT_OK] if nothing needs attention.\n".into()).await;
+        let heartbeat = self.replace_vars(&heartbeat_template, config);
+        tokio::fs::write(workspace_dir.join("HEARTBEAT.md"), &heartbeat).await?;
+
         // Render skill
         let skill_dir = workspace_dir.join("skills").join("multiclaw");
         tokio::fs::create_dir_all(&skill_dir).await?;

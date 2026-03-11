@@ -412,17 +412,12 @@ async fn main() -> anyhow::Result<()> {
 
             // Send heartbeat prompt via OpenClaw
             let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
-                Review the current state of things — check for any pending approvals, \
-                see if your CEOs need anything, and note any issues. \
-                If everything is running smoothly and there is nothing to report, \
-                respond with just: [HEARTBEAT_OK] \
-                If there IS something to report or act on, handle it and then \
-                briefly summarize what you did.";
+                Read HEARTBEAT.md and follow the checklist. \
+                If everything is running smoothly, respond with just: [HEARTBEAT_OK]";
 
             let instructions = "This is an automated periodic check-in. Be extremely concise. \
-                Only take action or report if something actually needs attention. \
-                If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else. \
-                Do not generate filler or repeat known information.";
+                Follow the HEARTBEAT.md checklist. Do not narrate — just check and report. \
+                If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else.";
 
             let _agent_guard = acquire_agent_turn(&agent_locks_hb, main_id).await;
             match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
