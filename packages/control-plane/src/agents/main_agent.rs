@@ -349,7 +349,7 @@ impl MainAgent {
                 "type": "function",
                 "function": {
                     "name": "create_tool_for_agent",
-                    "description": "Create a new tool/skill for an agent and deliver it to their workspace. Use this when approving a REQUEST_TOOL request. Write the full SKILL.md content including usage instructions and curl examples.",
+                    "description": "Create or update a tool/skill for an agent and deliver it to their workspace. Use this when approving a REQUEST_TOOL request — works for both new tools and fixing/improving existing ones. If updating, incorporate the reported issue and fix the content. Write the full SKILL.md content including usage instructions and curl examples.",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -831,6 +831,10 @@ impl MainAgent {
             .join("skills")
             .join(&sanitized_name);
 
+        // Check if this is an update (tool already exists) before creating/overwriting
+        let is_update = skill_dir.join("SKILL.md").exists();
+        let verb = if is_update { "updated" } else { "created" };
+
         // Create the directory
         if let Err(e) = tokio::fs::create_dir_all(&skill_dir).await {
             return format!("Failed to create skill directory: {}", e);
@@ -864,7 +868,7 @@ impl MainAgent {
                 .bind(approval_id)
                 .bind(req_id)
                 .bind(main_id.unwrap_or(Uuid::new_v4()))
-                .bind(format!("Tool '{}' created and delivered", sanitized_name))
+                .bind(format!("Tool '{}' {} and delivered", sanitized_name, verb))
                 .execute(db_pool).await;
 
                 let _ = sqlx::query(
@@ -881,10 +885,11 @@ impl MainAgent {
         ).bind(agent_id).fetch_optional(db_pool).await.ok().flatten();
 
         format!(
-            "Tool '{}' created and delivered to agent {} ({}). \
+            "Tool '{}' {} and delivered to agent {} ({}). \
              SKILL.md written to /workspace/skills/{}/SKILL.md — \
              it is immediately available in their workspace.",
             sanitized_name,
+            verb,
             agent_name.unwrap_or_else(|| agent_id.to_string()),
             agent_id,
             sanitized_name

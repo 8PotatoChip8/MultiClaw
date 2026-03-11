@@ -194,6 +194,25 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
 ```
 Your request will go through your chain of command. If approved, the tool will be delivered as a new skill in your `/workspace/skills/` directory.
 
+### Request a Tool Update/Fix
+
+If an existing tool in `/workspace/skills/` is broken or needs enhancement, submit the same request with an `issue` field describing the problem:
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "REQUEST_TOOL",
+    "requester_id": "{{AGENT_ID}}",
+    "payload": {
+      "tool_name": "existing-tool-name",
+      "description": "What the tool should do",
+      "use_case": "Why you need the fix or update",
+      "issue": "What is wrong or what needs to change — be specific about errors or missing features"
+    }
+  }'
+```
+The system detects the tool already exists and instructs the creator to fix/improve it rather than start from scratch.
+
 ### Approve a Subordinate's Request
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \

@@ -2364,7 +2364,7 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
     (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING", "approver_type": approver_type})))
 }
 
-/// Post-approval hook: if this is a REQUEST_TOOL, instruct MAIN to create and deliver the tool.
+/// Post-approval hook: if this is a REQUEST_TOOL, instruct MAIN to create (or update) the tool.
 async fn trigger_tool_creation(state: &AppState, request_id: Uuid) {
     let request_type: Option<String> = sqlx::query_scalar("SELECT type FROM requests WHERE id = $1")
         .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
@@ -2378,16 +2378,49 @@ async fn trigger_tool_creation(state: &AppState, request_id: Uuid) {
             let tool_name = payload.get("tool_name").and_then(|v| v.as_str()).unwrap_or("unknown");
             let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let use_case = payload.get("use_case").and_then(|v| v.as_str()).unwrap_or("");
+            let issue = payload.get("issue").and_then(|v| v.as_str()).unwrap_or("");
             let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
                 .bind(requester_id).fetch_optional(&state.db).await.ok().flatten()
                 .unwrap_or_else(|| requester_id.to_string());
-            let msg = format!(
-                "Tool request {} has been approved. \
-                 Create tool '{}' for agent {} (ID: {}). \
-                 Description: {}. Use case: {}. \
-                 Use create_tool_for_agent to generate a complete SKILL.md with usage instructions and deliver it.",
-                request_id, tool_name, requester_name, requester_id, description, use_case
-            );
+
+            // Sanitize tool_name the same way main_agent does
+            let sanitized_name: String = tool_name.chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-')
+                .collect();
+
+            // Check if the tool already exists on disk — if so, this is an update
+            let data_dir = std::env::var("MULTICLAW_OPENCLAW_DATA")
+                .unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
+            let skill_path = std::path::PathBuf::from(&data_dir)
+                .join(requester_id.to_string())
+                .join("workspace").join("skills").join(&sanitized_name).join("SKILL.md");
+
+            let msg = if skill_path.exists() {
+                let existing_content = tokio::fs::read_to_string(&skill_path).await.unwrap_or_default();
+                let issue_line = if issue.is_empty() {
+                    String::new()
+                } else {
+                    format!("Issue reported: {}. ", issue)
+                };
+                format!(
+                    "Tool request {} has been approved. \
+                     UPDATE existing tool '{}' for agent {} (ID: {}). \
+                     {}Description: {}. Use case: {}.\n\
+                     Current SKILL.md content:\n---\n{}\n---\n\
+                     Use create_tool_for_agent to write the corrected/improved SKILL.md and deliver it.",
+                    request_id, tool_name, requester_name, requester_id,
+                    issue_line, description, use_case, existing_content
+                )
+            } else {
+                format!(
+                    "Tool request {} has been approved. \
+                     Create tool '{}' for agent {} (ID: {}). \
+                     Description: {}. Use case: {}. \
+                     Use create_tool_for_agent to generate a complete SKILL.md with usage instructions and deliver it.",
+                    request_id, tool_name, requester_name, requester_id, description, use_case
+                )
+            };
+
             let state_clone = state.clone();
             tokio::spawn(async move {
                 match state_clone.main_agent.handle_message(&state_clone.db, &msg).await {
@@ -2454,6 +2487,8 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
                     You can now retry the hire-manager command to complete the hire.",
                 "INCREASE_WORKER_LIMIT" => " Your worker hiring limit has been increased. \
                     You can now retry the hire-worker command to complete the hire.",
+                "REQUEST_TOOL" => " Your tool has been created/updated and is available \
+                    in your /workspace/skills/ directory. Check your skills folder.",
                 _ => " IMPORTANT: Approval does NOT mean credentials or resources are available yet. \
                     The operator must still provision them via the Secrets page. Do NOT tell your team \
                     credentials are active until you verify via the secrets API \
