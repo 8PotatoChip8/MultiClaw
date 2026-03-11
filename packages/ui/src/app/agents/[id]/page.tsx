@@ -51,6 +51,11 @@ export default function AgentDetailPage() {
     const [showHire, setShowHire] = useState<'manager' | 'worker' | null>(null);
     const [hireName, setHireName] = useState('');
     const [hireSpecialty, setHireSpecialty] = useState('');
+    const [hireModel, setHireModel] = useState('');
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
+    const [editingModel, setEditingModel] = useState(false);
+    const [selectedModel, setSelectedModel] = useState('');
+    const [modelSaving, setModelSaving] = useState(false);
     const [tab, setTab] = useState<TabType>('details');
     const [memories, setMemories] = useState<Memory[]>([]);
     const [ocFiles, setOcFiles] = useState<OpenClawFile[]>([]);
@@ -70,8 +75,14 @@ export default function AgentDetailPage() {
     const agentList = useMemo(() => agent ? [agent] : [], [agent]);
     const presenceMap = useAgentPresence(agentList);
 
-    const load = () => { api.getAgent(id).then(d => { if (d && !d.error) setAgent(d); }); };
+    const load = () => { api.getAgent(id).then(d => { if (d && !d.error) { setAgent(d); setSelectedModel(d.effective_model); } }); };
     useEffect(() => { if (id) load(); }, [id]);
+    useEffect(() => {
+        api.getModels().then(data => {
+            if (data?.models) setAvailableModels(data.models);
+            if (data?.default && !hireModel) setHireModel(data.default);
+        });
+    }, []);
 
     const loadMemories = () => {
         api.getAgentMemories(id).then(d => setMemories(Array.isArray(d) ? d : []));
@@ -142,9 +153,11 @@ export default function AgentDetailPage() {
 
     const handleHire = async () => {
         if (!hireName) return;
-        if (showHire === 'manager') await api.hireManager(id, { name: hireName, specialty: hireSpecialty || undefined });
-        else await api.hireWorker(id, { name: hireName, specialty: hireSpecialty || undefined });
+        const data = { name: hireName, specialty: hireSpecialty || undefined, preferred_model: hireModel || undefined };
+        if (showHire === 'manager') await api.hireManager(id, data);
+        else await api.hireWorker(id, data);
         setShowHire(null); setHireName(''); setHireSpecialty('');
+        if (agent) setHireModel(agent.effective_model);
         load();
     };
 
@@ -217,8 +230,45 @@ export default function AgentDetailPage() {
                     <div className="panel" style={{ marginBottom: '16px' }}>
                         <h3 style={{ marginBottom: '16px' }}>Details</h3>
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
+                            <div>
+                                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>Model</div>
+                                {agent.role === 'CEO' ? (
+                                    editingModel ? (
+                                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                            <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)}
+                                                style={{ flex: 1, fontSize: '13px' }}>
+                                                {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                            </select>
+                                            <button className="button small" disabled={modelSaving} onClick={async () => {
+                                                setModelSaving(true);
+                                                await api.patchAgent(id, { preferred_model: selectedModel });
+                                                setModelSaving(false);
+                                                setEditingModel(false);
+                                                load();
+                                            }} style={{ fontSize: '11px', padding: '4px 10px' }}>
+                                                {modelSaving ? '...' : 'Save'}
+                                            </button>
+                                            <button onClick={() => { setEditingModel(false); setSelectedModel(agent.effective_model); }}
+                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0 }}>
+                                                <X size={14} />
+                                            </button>
+                                        </div>
+                                    ) : (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <span style={{ fontSize: '14px', fontWeight: 500 }}>{agent.effective_model}</span>
+                                            <button onClick={() => { setSelectedModel(agent.effective_model); setEditingModel(true); }}
+                                                style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '4px',
+                                                    cursor: 'pointer', color: 'var(--text-muted)', fontSize: '11px', padding: '2px 8px' }}>
+                                                Change
+                                            </button>
+                                        </div>
+                                    )
+                                ) : (
+                                    <div style={{ fontSize: '14px', fontWeight: 500 }}>{agent.effective_model}</div>
+                                )}
+                            </div>
                             {[
-                                ['Model', agent.effective_model], ['Specialty', agent.specialty || '—'],
+                                ['Specialty', agent.specialty || '—'],
                                 ['Desktop VM', agent.vm_id || 'None'], ['Sandbox VM', agent.sandbox_vm_id || 'None'],
                                 ['Created', new Date(agent.created_at).toLocaleDateString()],
                             ].map(([label, value]) => (
@@ -269,12 +319,12 @@ export default function AgentDetailPage() {
                             <h3 style={{ marginBottom: '12px' }}>Hire Staff</h3>
                             <div style={{ display: 'flex', gap: '8px' }}>
                                 {agent.role === 'CEO' && (
-                                    <button className="button small" onClick={() => setShowHire('manager')}>
+                                    <button className="button small" onClick={() => { setHireModel(agent.effective_model); setShowHire('manager'); }}>
                                         <Plus size={14} /> Hire Manager
                                     </button>
                                 )}
                                 {agent.role === 'MANAGER' && (
-                                    <button className="button small" onClick={() => setShowHire('worker')}>
+                                    <button className="button small" onClick={() => { setHireModel(agent.effective_model); setShowHire('worker'); }}>
                                         <Plus size={14} /> Hire Worker
                                     </button>
                                 )}
@@ -570,6 +620,15 @@ export default function AgentDetailPage() {
                             <div>
                                 <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>Specialty</label>
                                 <input value={hireSpecialty} onChange={e => setHireSpecialty(e.target.value)} placeholder="e.g. Sales, Engineering" />
+                            </div>
+                            <div>
+                                <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>Model</label>
+                                <select value={hireModel} onChange={e => setHireModel(e.target.value)}>
+                                    {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                </select>
+                                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '4px' }}>
+                                    Defaults to your model ({agent?.effective_model}) if unchanged
+                                </p>
                             </div>
                             <button className="button" onClick={handleHire} disabled={!hireName}>Hire</button>
                         </div>

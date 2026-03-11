@@ -23,6 +23,15 @@ const MAX_THREAD_REPLY_DEPTH: i32 = 5;
 /// hard limit prevents truly runaway loops if the signal is never produced.
 const DM_SAFETY_LIMIT: i32 = 20;
 
+/// Default available models for agent selection.
+const DEFAULT_MODELS: &[&str] = &[
+    "glm-5:cloud",
+    "minimax-m2.5:cloud",
+    "kimi-k2.5:cloud",
+    "qwen3.5:397b-cloud",
+    "qwen3-coder-next:cloud",
+];
+
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
 
 /// Remove a tag from text even when streaming tokenization has inserted spaces
@@ -660,6 +669,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agentd/heartbeat", post(agentd_heartbeat))
         // Scripts (served to VMs during cloud-init)
         .route("/v1/scripts/install-openclaw.sh", get(serve_install_script))
+        // Models
+        .route("/v1/models", get(list_models))
         // System
         .route("/v1/system/settings", get(get_system_settings))
         .route("/v1/system/settings", put(update_system_settings))
@@ -790,6 +801,11 @@ async fn handle_init(
     // Store default model in system_meta for use by hire endpoints
     let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('default_model', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
         .bind(&model).execute(&state.db).await;
+
+    // Seed available models list (don't overwrite if user already customized)
+    let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('available_models', $1) ON CONFLICT (key) DO NOTHING")
+        .bind(serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default())
+        .execute(&state.db).await;
 
     tracing::info!("Initialized holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({"status": "success", "holding_id": holding_id, "main_agent_id": agent_id})))
@@ -923,7 +939,7 @@ async fn get_agent(State(state): State<AppState>, Path(id): Path<String>) -> imp
 
 async fn patch_agent(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<PatchAgentRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
-    let _ = sqlx::query("UPDATE agents SET preferred_model = COALESCE($1, preferred_model), specialty = COALESCE($2, specialty), system_prompt = COALESCE($3, system_prompt) WHERE id = $4")
+    let _ = sqlx::query("UPDATE agents SET preferred_model = COALESCE($1, preferred_model), effective_model = COALESCE($1, effective_model), specialty = COALESCE($2, specialty), system_prompt = COALESCE($3, system_prompt) WHERE id = $4")
         .bind(&p.preferred_model).bind(&p.specialty).bind(&p.system_prompt).bind(uid)
         .execute(&state.db).await;
     (StatusCode::OK, Json(json!({"status":"updated"})))
@@ -4713,6 +4729,19 @@ async fn remove_thread_participant(State(state): State<AppState>, Path((id, memb
     (StatusCode::OK, Json(json!({"status":"removed"})))
 }
 
+/// List available models and the current default.
+async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
+    let raw: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'available_models'")
+        .fetch_optional(&state.db).await.ok().flatten()
+        .unwrap_or_else(|| serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default());
+    let default_model: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'default_model'")
+        .fetch_optional(&state.db).await.ok().flatten()
+        .unwrap_or_else(|| "glm-5:cloud".to_string());
+    let models: Vec<String> = serde_json::from_str(&raw)
+        .unwrap_or_else(|_| DEFAULT_MODELS.iter().map(|s| s.to_string()).collect());
+    (StatusCode::OK, Json(json!({"models": models, "default": default_model})))
+}
+
 /// Get all system settings from system_meta.
 async fn get_system_settings(State(state): State<AppState>) -> impl IntoResponse {
     let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM system_meta")
@@ -4726,13 +4755,19 @@ async fn get_system_settings(State(state): State<AppState>) -> impl IntoResponse
 
 /// Update system settings (upsert key-value pairs in system_meta).
 async fn update_system_settings(State(state): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
+    let mut models_changed = false;
     if let Some(obj) = body.as_object() {
         for (key, val) in obj {
             let v = val.as_str().unwrap_or(&val.to_string()).to_string();
             let _ = sqlx::query(
                 "INSERT INTO system_meta (key, value, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()"
             ).bind(key).bind(&v).execute(&state.db).await;
+            if key == "available_models" { models_changed = true; }
         }
+    }
+    // Refresh the OpenClaw cached models list so new agent spawns use updated models
+    if models_changed {
+        state.openclaw.refresh_available_models(&state.db).await;
     }
     (StatusCode::OK, Json(json!({"status":"updated"})))
 }

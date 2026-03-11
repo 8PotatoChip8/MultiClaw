@@ -35,6 +35,8 @@ pub struct OpenClawManager {
     next_port_offset: Arc<AtomicU16>,
     /// Agent IDs with a spawn in flight — watchdog must skip these to avoid duplicate containers.
     pending_spawns: Arc<RwLock<HashSet<Uuid>>>,
+    /// Comma-separated list of available models for SKILL.md template rendering.
+    available_models_csv: Arc<std::sync::RwLock<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -85,6 +87,9 @@ impl OpenClawManager {
             rate_limiter: ConcurrentRateLimiter::new(max_concurrent_ollama),
             next_port_offset: Arc::new(AtomicU16::new(0)),
             pending_spawns: Arc::new(RwLock::new(HashSet::new())),
+            available_models_csv: Arc::new(std::sync::RwLock::new(
+                "glm-5:cloud, minimax-m2.5:cloud, kimi-k2.5:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
+            )),
         }
     }
 
@@ -1056,7 +1061,24 @@ impl OpenClawManager {
         Ok(())
     }
 
+    /// Update the cached available models list from the database.
+    pub async fn refresh_available_models(&self, db: &sqlx::PgPool) {
+        let raw: Option<String> = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'available_models'")
+            .fetch_optional(db).await.ok().flatten();
+        if let Some(json_str) = raw {
+            if let Ok(models) = serde_json::from_str::<Vec<String>>(&json_str) {
+                let csv = models.join(", ");
+                if let Ok(mut guard) = self.available_models_csv.write() {
+                    *guard = csv;
+                }
+            }
+        }
+    }
+
     fn replace_vars(&self, template: &str, config: &AgentConfig) -> String {
+        let models_csv = self.available_models_csv.read()
+            .map(|g| g.clone())
+            .unwrap_or_else(|_| "glm-5:cloud".to_string());
         template
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_ROLE}}", &config.role)
@@ -1066,6 +1088,7 @@ impl OpenClawManager {
             .replace("{{MULTICLAW_API_URL}}", &self.multiclaw_api_url)
             .replace("{{AGENT_ID}}", &config.agent_id.to_string())
             .replace("{{MODEL}}", &config.model)
+            .replace("{{AVAILABLE_MODELS}}", &models_csv)
             // Handle conditional blocks (simple approach)
             .replace("{{#if SPECIALTY}}", "")
             .replace("{{/if}}", "")

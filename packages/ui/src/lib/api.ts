@@ -132,6 +132,9 @@ export const api = {
     removeParticipant: (threadId: string, memberId: string) =>
         request(`/threads/${threadId}/participants/${memberId}`, { method: 'DELETE' }),
 
+    // Models
+    getModels: () => request('/models') as Promise<{ models: string[]; default: string }>,
+
     // System Settings
     getSettings: () => request('/system/settings'),
     updateSettings: (data: Record<string, string>) =>

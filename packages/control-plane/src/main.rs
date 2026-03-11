@@ -150,6 +150,7 @@ async fn main() -> anyhow::Result<()> {
     let multiclaw_api_url = format!("http://127.0.0.1:{}", cfg.port);
     tracing::info!("Ollama concurrency: max_concurrent_ollama={}", cfg.max_concurrent_ollama);
     let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url, cfg.max_concurrent_ollama);
+    openclaw_mgr.refresh_available_models(&pool).await;
 
     let app_state = api::ws::AppState {
         db: pool.clone(),

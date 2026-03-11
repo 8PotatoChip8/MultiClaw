@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart } from 'lucide-react';
+import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart, Cpu, X, Star, Plus } from 'lucide-react';
 
 type Channel = 'stable' | 'beta' | 'dev';
 
@@ -21,6 +21,11 @@ export default function SettingsPage() {
     const [heartbeatSecs, setHeartbeatSecs] = useState('600');
     const [heartbeatSaving, setHeartbeatSaving] = useState(false);
     const [heartbeatSaved, setHeartbeatSaved] = useState(false);
+    const [models, setModels] = useState<string[]>([]);
+    const [defaultModel, setDefaultModel] = useState('glm-5:cloud');
+    const [newModelName, setNewModelName] = useState('');
+    const [modelsSaving, setModelsSaving] = useState(false);
+    const [modelsSaved, setModelsSaved] = useState(false);
 
     useEffect(() => {
         api.getSettings().then(data => {
@@ -29,6 +34,10 @@ export default function SettingsPage() {
                 if (data.update_channel) setSelectedChannel(data.update_channel as Channel);
                 if (data.heartbeat_interval_secs) setHeartbeatSecs(data.heartbeat_interval_secs);
             }
+        });
+        api.getModels().then(data => {
+            if (data?.models) setModels(data.models);
+            if (data?.default) setDefaultModel(data.default);
         });
     }, []);
 
@@ -284,6 +293,103 @@ export default function SettingsPage() {
                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '12px' }}>
                     Set to 0 to disable. When nothing needs attention, each heartbeat costs very little (a short prompt + a silent OK response).
                     Takes effect on the next cycle — no restart required.
+                </p>
+            </div>
+
+            {/* Available Models */}
+            <div className="panel" style={{ maxWidth: '700px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                            <Cpu size={18} style={{ color: 'var(--primary)' }} />
+                            <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Available Models</h2>
+                        </div>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                            Models available for agent selection. CEOs choose manager models; managers choose worker models.
+                        </p>
+                    </div>
+                    {modelsSaved && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--success)', fontWeight: 600 }}>
+                            <Check size={14} /> Saved
+                        </span>
+                    )}
+                </div>
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
+                    {models.map(m => (
+                        <div key={m} style={{
+                            display: 'flex', alignItems: 'center', gap: '6px',
+                            padding: '6px 12px', borderRadius: '8px',
+                            background: m === defaultModel ? 'rgba(59,130,246,0.15)' : 'rgba(255,255,255,0.05)',
+                            border: m === defaultModel ? '1px solid var(--primary)' : '1px solid var(--border)',
+                            fontSize: '13px', fontFamily: 'monospace',
+                        }}>
+                            <button onClick={() => {
+                                setDefaultModel(m);
+                            }} title="Set as default" style={{
+                                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                                color: m === defaultModel ? '#f59e0b' : 'var(--text-muted)',
+                                display: 'flex', alignItems: 'center',
+                            }}>
+                                <Star size={14} fill={m === defaultModel ? '#f59e0b' : 'none'} />
+                            </button>
+                            <span>{m}</span>
+                            <button onClick={() => {
+                                const updated = models.filter(x => x !== m);
+                                setModels(updated);
+                                if (defaultModel === m && updated.length > 0) setDefaultModel(updated[0]);
+                            }} style={{
+                                background: 'none', border: 'none', cursor: 'pointer', padding: 0,
+                                color: 'var(--text-muted)', display: 'flex', alignItems: 'center',
+                            }}>
+                                <X size={14} />
+                            </button>
+                        </div>
+                    ))}
+                </div>
+
+                <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>
+                    <input
+                        value={newModelName}
+                        onChange={e => setNewModelName(e.target.value)}
+                        onKeyDown={e => {
+                            if (e.key === 'Enter' && newModelName.trim() && !models.includes(newModelName.trim())) {
+                                setModels([...models, newModelName.trim()]);
+                                setNewModelName('');
+                            }
+                        }}
+                        placeholder="Add model name (e.g. llama-4:cloud)"
+                        style={{
+                            flex: 1, padding: '8px 12px', borderRadius: '8px',
+                            background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                            color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
+                        }}
+                    />
+                    <button className="button small" onClick={() => {
+                        if (newModelName.trim() && !models.includes(newModelName.trim())) {
+                            setModels([...models, newModelName.trim()]);
+                            setNewModelName('');
+                        }
+                    }} style={{ fontSize: '12px', display: 'flex', alignItems: 'center', gap: '4px' }}>
+                        <Plus size={14} /> Add
+                    </button>
+                </div>
+
+                <button className="button small" onClick={async () => {
+                    setModelsSaving(true);
+                    await api.updateSettings({
+                        available_models: JSON.stringify(models),
+                        default_model: defaultModel,
+                    });
+                    setModelsSaving(false);
+                    setModelsSaved(true);
+                    setTimeout(() => setModelsSaved(false), 2000);
+                }} disabled={modelsSaving} style={{ fontSize: '12px' }}>
+                    {modelsSaving ? 'Saving...' : 'Save Models'}
+                </button>
+
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '12px' }}>
+                    Click the star to set the default model. New agents inherit their parent&apos;s model unless explicitly changed.
                 </p>
             </div>
 

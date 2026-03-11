@@ -14,6 +14,8 @@ export default function CompanyDetailPage() {
     const [showHireCeo, setShowHireCeo] = useState(false);
     const [showEdit, setShowEdit] = useState(false);
     const [ceoName, setCeoName] = useState('');
+    const [ceoModel, setCeoModel] = useState('');
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
     const [editForm, setEditForm] = useState({ name: '', type: '', description: '' });
     const [saving, setSaving] = useState(false);
 
@@ -21,11 +23,15 @@ export default function CompanyDetailPage() {
         if (!id) return;
         api.getCompany(id).then(d => { if (d && !d.error) setCompany(d); });
         api.getOrgTree(id).then(d => { if (d?.tree) setAgents(d.tree); });
+        api.getModels().then(data => {
+            if (data?.models) setAvailableModels(data.models);
+            if (data?.default) setCeoModel(data.default);
+        });
     }, [id]);
 
     const handleHireCeo = async () => {
         if (!ceoName) return;
-        await api.hireCeo(id, { name: ceoName });
+        await api.hireCeo(id, { name: ceoName, preferred_model: ceoModel || undefined });
         setCeoName('');
         setShowHireCeo(false);
         api.getOrgTree(id).then(d => { if (d?.tree) setAgents(d.tree); });
@@ -129,11 +135,19 @@ export default function CompanyDetailPage() {
                 <div className="modal-overlay" onClick={() => setShowHireCeo(false)}>
                     <div className="modal" onClick={e => e.stopPropagation()}>
                         <h2 style={{ fontSize: '20px', fontWeight: 700, marginBottom: '20px' }}>Hire CEO</h2>
-                        <div style={{ marginBottom: '16px' }}>
-                            <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>CEO Name</label>
-                            <input value={ceoName} onChange={e => setCeoName(e.target.value)} placeholder="Agent name" />
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                            <div>
+                                <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>CEO Name</label>
+                                <input value={ceoName} onChange={e => setCeoName(e.target.value)} placeholder="Agent name" />
+                            </div>
+                            <div>
+                                <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>Model</label>
+                                <select value={ceoModel} onChange={e => setCeoModel(e.target.value)}>
+                                    {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                </select>
+                            </div>
+                            <button className="button" onClick={handleHireCeo} disabled={!ceoName}>Hire CEO</button>
                         </div>
-                        <button className="button" onClick={handleHireCeo} disabled={!ceoName}>Hire CEO</button>
                     </div>
                 </div>
             )}

@@ -33,7 +33,7 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
   -H 'Content-Type: application/json' \
   -d '{"name": "WORKER_NAME", "specialty": "DESCRIPTION", "preferred_model": "MODEL_NAME"}'
 ```
-The `preferred_model` field is optional. If omitted, the worker inherits your model. Use a different model when the worker's specialty would benefit from it.
+The `preferred_model` field is optional. If omitted, the worker inherits your model ({{MODEL}}). Available models: {{AVAILABLE_MODELS}}. Choose a different model when the worker's specialty would benefit from it.
 
 **Note:** If you've reached your worker limit (4th+ worker), the API returns `{"status": "requires_approval", ...}`. Your request is automatically submitted to your chain of command. Wait for the approval notification, then call this endpoint again with the same parameters to complete the hire. Do not resubmit while waiting.
 
