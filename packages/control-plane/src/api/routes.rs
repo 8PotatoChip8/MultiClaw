@@ -1977,6 +1977,11 @@ async fn send_message(
                                     } else { cleaned };
                                     // Skip storing empty messages (all content was tags/narration)
                                     if scrubbed.trim().is_empty() {
+                                        tracing::warn!(
+                                            "Agent {} response on thread {} stripped to empty (original {} chars): {:?}",
+                                            responding_agent_id, tid, response.len(),
+                                            &response[..response.len().min(200)]
+                                        );
                                         continue;
                                     }
                                     let resp_id = Uuid::new_v4();
