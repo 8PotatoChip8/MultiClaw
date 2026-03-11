@@ -4773,8 +4773,9 @@ async fn pull_model(State(state): State<AppState>, Json(body): Json<Value>) -> i
     };
 
     let openclaw = state.openclaw.clone();
+    let model_clone = model.clone();
     tokio::spawn(async move {
-        openclaw.pull_model(&model).await;
+        openclaw.pull_model(&model_clone).await;
     });
 
     (StatusCode::ACCEPTED, Json(json!({"status": "pulling", "model": model})))
