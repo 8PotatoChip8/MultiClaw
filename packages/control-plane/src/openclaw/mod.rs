@@ -188,7 +188,7 @@ impl OpenClawManager {
                     Ok(r) => {
                         let status = r.status().as_u16();
                         tracing::debug!("Concurrency probe #{}: HTTP {}", i, status);
-                        status != 429
+                        r.status().is_success()
                     }
                     Err(e) => {
                         tracing::debug!("Concurrency probe #{}: error {}", i, e);
