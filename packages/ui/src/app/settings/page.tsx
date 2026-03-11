@@ -26,6 +26,7 @@ export default function SettingsPage() {
     const [newModelName, setNewModelName] = useState('');
     const [modelsSaving, setModelsSaving] = useState(false);
     const [modelsSaved, setModelsSaved] = useState(false);
+    const [pullStatus, setPullStatus] = useState<Record<string, { status: string; error?: string }>>({});
 
     useEffect(() => {
         api.getSettings().then(data => {
@@ -39,6 +40,18 @@ export default function SettingsPage() {
             if (data?.models) setModels(data.models);
             if (data?.default) setDefaultModel(data.default);
         });
+    }, []);
+
+    // Poll model pull status
+    useEffect(() => {
+        const fetchStatus = () => {
+            api.getModelPullStatus().then(data => {
+                if (data && typeof data === 'object') setPullStatus(data);
+            });
+        };
+        fetchStatus();
+        const interval = setInterval(fetchStatus, 3000);
+        return () => clearInterval(interval);
     }, []);
 
     const handleSaveChannel = async (channel: Channel) => {
@@ -316,7 +329,12 @@ export default function SettingsPage() {
                 </div>
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', marginBottom: '16px' }}>
-                    {models.map(m => (
+                    {models.map(m => {
+                        const ps = pullStatus[m];
+                        const isPulling = ps?.status === 'pulling';
+                        const isFailed = ps?.status === 'failed';
+                        const isReady = ps?.status === 'ready';
+                        return (
                         <div key={m} style={{
                             display: 'flex', alignItems: 'center', gap: '6px',
                             padding: '6px 12px', borderRadius: '8px',
@@ -334,6 +352,25 @@ export default function SettingsPage() {
                                 <Star size={14} fill={m === defaultModel ? '#f59e0b' : 'none'} />
                             </button>
                             <span>{m}</span>
+                            {isPulling && (
+                                <span title="Pulling model..." style={{
+                                    fontSize: '10px', padding: '1px 6px', borderRadius: '10px',
+                                    background: 'rgba(59,130,246,0.2)', color: 'var(--primary)',
+                                    fontWeight: 600, fontFamily: 'sans-serif',
+                                    animation: 'pulse 1.5s infinite',
+                                }}>PULLING</span>
+                            )}
+                            {isFailed && (
+                                <span title={ps?.error || 'Pull failed — click to retry'} onClick={() => api.pullModel(m)}
+                                    style={{
+                                        fontSize: '10px', padding: '1px 6px', borderRadius: '10px',
+                                        background: 'rgba(239,68,68,0.2)', color: '#ef4444',
+                                        fontWeight: 600, fontFamily: 'sans-serif', cursor: 'pointer',
+                                    }}>RETRY</span>
+                            )}
+                            {isReady && (
+                                <Check size={12} style={{ color: 'var(--success)' }} />
+                            )}
                             <button onClick={() => {
                                 const updated = models.filter(x => x !== m);
                                 setModels(updated);
@@ -345,7 +382,8 @@ export default function SettingsPage() {
                                 <X size={14} />
                             </button>
                         </div>
-                    ))}
+                        );
+                    })}
                 </div>
 
                 <div style={{ display: 'flex', gap: '8px', marginBottom: '12px' }}>

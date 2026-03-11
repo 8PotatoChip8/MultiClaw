@@ -152,6 +152,33 @@ async fn main() -> anyhow::Result<()> {
     let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url, cfg.max_concurrent_ollama);
     openclaw_mgr.refresh_available_models(&pool).await;
 
+    // Background: ensure all available models are pulled in Ollama
+    {
+        let pool_pull = pool.clone();
+        let openclaw_pull = openclaw_mgr.clone();
+        tokio::spawn(async move {
+            // Small delay to let Ollama finish starting if it's booting alongside us
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            let raw: Option<String> = sqlx::query_scalar(
+                "SELECT value FROM system_meta WHERE key = 'available_models'"
+            ).fetch_optional(&pool_pull).await.ok().flatten();
+
+            let models: Vec<String> = raw.as_deref()
+                .and_then(|s| serde_json::from_str(s).ok())
+                .unwrap_or_else(|| vec!["glm-5:cloud".to_string()]);
+
+            if models.is_empty() {
+                tracing::info!("No models configured — skipping startup pull");
+                return;
+            }
+
+            tracing::info!("Startup model pull: ensuring {} model(s) are available...", models.len());
+            openclaw_pull.pull_all_models(models).await;
+            tracing::info!("Startup model pull complete");
+        });
+    }
+
     let app_state = api::ws::AppState {
         db: pool.clone(),
         tx: tx_arc,

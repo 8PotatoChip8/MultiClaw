@@ -214,9 +214,21 @@ if [[ -n "$USER_MODEL" ]]; then DEFAULT_MODEL="$USER_MODEL"; fi
 read -r -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT </dev/tty
 if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
-# ── Pull the chosen model ──
-log "Pulling model '$DEFAULT_MODEL' via Ollama..."
-ollama pull "$DEFAULT_MODEL" || echo "WARNING: Failed to pull model '$DEFAULT_MODEL'. You can pull it manually with: ollama pull $DEFAULT_MODEL"
+# ── Pull all default models ──
+BUILTIN_MODELS=("glm-5:cloud" "minimax-m2.5:cloud" "kimi-k2.5:cloud" "qwen3.5:397b-cloud" "qwen3-coder-next:cloud")
+
+log "Pulling ${#BUILTIN_MODELS[@]} default models via Ollama..."
+for m in "${BUILTIN_MODELS[@]}"; do
+    log "  Pulling '$m'..."
+    ollama pull "$m" || echo "WARNING: Failed to pull '$m'. The control plane will retry on startup."
+done
+
+# Also pull the user's chosen default if it's not in the built-in list
+if ! printf '%s\n' "${BUILTIN_MODELS[@]}" | grep -qx "$DEFAULT_MODEL"; then
+    log "  Pulling custom model '$DEFAULT_MODEL'..."
+    ollama pull "$DEFAULT_MODEL" || echo "WARNING: Failed to pull '$DEFAULT_MODEL'. You can pull it manually with: ollama pull $DEFAULT_MODEL"
+fi
+log "Model pulls complete."
 
 # Call Init
 log "Calling /v1/install/init"

@@ -134,6 +134,8 @@ export const api = {
 
     // Models
     getModels: () => request('/models') as Promise<{ models: string[]; default: string }>,
+    getModelPullStatus: () => request('/models/pull-status') as Promise<Record<string, { status: string; error?: string }>>,
+    pullModel: (model: string) => request('/models/pull', { method: 'POST', body: JSON.stringify({ model }) }),
 
     // System Settings
     getSettings: () => request('/system/settings'),

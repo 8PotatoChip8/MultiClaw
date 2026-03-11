@@ -671,6 +671,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/scripts/install-openclaw.sh", get(serve_install_script))
         // Models
         .route("/v1/models", get(list_models))
+        .route("/v1/models/pull-status", get(model_pull_status))
+        .route("/v1/models/pull", post(pull_model))
         // System
         .route("/v1/system/settings", get(get_system_settings))
         .route("/v1/system/settings", put(update_system_settings))
@@ -4742,6 +4744,42 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::OK, Json(json!({"models": models, "default": default_model})))
 }
 
+/// Get the pull status of all known models.
+async fn model_pull_status(State(state): State<AppState>) -> impl IntoResponse {
+    use crate::openclaw::ModelPullStatus;
+    let status = state.openclaw.get_pull_status();
+    let mut result = serde_json::Map::new();
+    for (model, st) in status {
+        let (status_str, error) = match st {
+            ModelPullStatus::Pulling => ("pulling", None),
+            ModelPullStatus::Ready => ("ready", None),
+            ModelPullStatus::Failed(msg) => ("failed", Some(msg)),
+        };
+        let mut entry = serde_json::Map::new();
+        entry.insert("status".to_string(), json!(status_str));
+        if let Some(err) = error {
+            entry.insert("error".to_string(), json!(err));
+        }
+        result.insert(model, json!(entry));
+    }
+    (StatusCode::OK, Json(json!(result)))
+}
+
+/// Trigger a pull for a specific model.
+async fn pull_model(State(state): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
+    let model = match body["model"].as_str() {
+        Some(m) => m.to_string(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing 'model' field"}))),
+    };
+
+    let openclaw = state.openclaw.clone();
+    tokio::spawn(async move {
+        openclaw.pull_model(&model).await;
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({"status": "pulling", "model": model})))
+}
+
 /// Get all system settings from system_meta.
 async fn get_system_settings(State(state): State<AppState>) -> impl IntoResponse {
     let rows: Vec<(String, String)> = sqlx::query_as("SELECT key, value FROM system_meta")
@@ -4756,6 +4794,17 @@ async fn get_system_settings(State(state): State<AppState>) -> impl IntoResponse
 /// Update system settings (upsert key-value pairs in system_meta).
 async fn update_system_settings(State(state): State<AppState>, Json(body): Json<Value>) -> impl IntoResponse {
     let mut models_changed = false;
+
+    // Capture old model list BEFORE updating so we can diff for new additions
+    let old_models: Vec<String> = if body.as_object().map(|o| o.contains_key("available_models")).unwrap_or(false) {
+        sqlx::query_scalar::<_, String>("SELECT value FROM system_meta WHERE key = 'available_models'")
+            .fetch_optional(&state.db).await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
     if let Some(obj) = body.as_object() {
         for (key, val) in obj {
             let v = val.as_str().unwrap_or(&val.to_string()).to_string();
@@ -4768,6 +4817,26 @@ async fn update_system_settings(State(state): State<AppState>, Json(body): Json<
     // Refresh the OpenClaw cached models list so new agent spawns use updated models
     if models_changed {
         state.openclaw.refresh_available_models(&state.db).await;
+
+        // Diff: pull only newly added models in the background
+        let new_models: Vec<String> = sqlx::query_scalar::<_, String>(
+            "SELECT value FROM system_meta WHERE key = 'available_models'"
+        ).fetch_optional(&state.db).await.ok().flatten()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        let old_set: std::collections::HashSet<&str> = old_models.iter().map(|s| s.as_str()).collect();
+        let added: Vec<String> = new_models.into_iter()
+            .filter(|m| !old_set.contains(m.as_str()))
+            .collect();
+
+        if !added.is_empty() {
+            tracing::info!("New models added via settings: {:?} — triggering pull", added);
+            let openclaw = state.openclaw.clone();
+            tokio::spawn(async move {
+                openclaw.pull_all_models(added).await;
+            });
+        }
     }
     (StatusCode::OK, Json(json!({"status":"updated"})))
 }

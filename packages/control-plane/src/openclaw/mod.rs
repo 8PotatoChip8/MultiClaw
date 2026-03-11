@@ -37,6 +37,8 @@ pub struct OpenClawManager {
     pending_spawns: Arc<RwLock<HashSet<Uuid>>>,
     /// Comma-separated list of available models for SKILL.md template rendering.
     available_models_csv: Arc<std::sync::RwLock<String>>,
+    /// In-memory pull status for each model (transient, not persisted).
+    model_pull_status: Arc<std::sync::RwLock<HashMap<String, ModelPullStatus>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,6 +58,13 @@ pub enum InstanceStatus {
     Running,
     Stopped,
     Failed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum ModelPullStatus {
+    Pulling,
+    Ready,
+    Failed(String),
 }
 
 #[derive(Debug, Clone)]
@@ -90,6 +99,7 @@ impl OpenClawManager {
             available_models_csv: Arc::new(std::sync::RwLock::new(
                 "glm-5:cloud, minimax-m2.5:cloud, kimi-k2.5:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
             )),
+            model_pull_status: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
     }
 
@@ -1073,6 +1083,80 @@ impl OpenClawManager {
                 }
             }
         }
+    }
+
+    /// Pull a single model via Ollama HTTP API. Updates in-memory status.
+    pub async fn pull_model(&self, model: &str) {
+        // Skip if already pulling
+        if let Ok(guard) = self.model_pull_status.read() {
+            if guard.get(model) == Some(&ModelPullStatus::Pulling) {
+                tracing::debug!("Model '{}' already pulling, skipping", model);
+                return;
+            }
+        }
+
+        if let Ok(mut guard) = self.model_pull_status.write() {
+            guard.insert(model.to_string(), ModelPullStatus::Pulling);
+        }
+
+        tracing::info!("Pulling Ollama model '{}'...", model);
+        let client = reqwest::Client::new();
+        let result = client.post(format!("{}/api/pull", self.ollama_url))
+            .json(&serde_json::json!({"name": model, "stream": false}))
+            .timeout(std::time::Duration::from_secs(600))
+            .send()
+            .await;
+
+        match result {
+            Ok(resp) if resp.status().is_success() => {
+                tracing::info!("Model '{}' pulled successfully", model);
+                if let Ok(mut guard) = self.model_pull_status.write() {
+                    guard.insert(model.to_string(), ModelPullStatus::Ready);
+                }
+            }
+            Ok(resp) => {
+                let status = resp.status();
+                let body_text = resp.text().await.unwrap_or_default();
+                tracing::error!("Model '{}' pull failed: HTTP {} - {}", model, status, body_text);
+                if let Ok(mut guard) = self.model_pull_status.write() {
+                    guard.insert(model.to_string(), ModelPullStatus::Failed(
+                        format!("HTTP {}: {}", status, body_text.chars().take(200).collect::<String>())
+                    ));
+                }
+            }
+            Err(e) => {
+                tracing::error!("Model '{}' pull request failed: {}", model, e);
+                if let Ok(mut guard) = self.model_pull_status.write() {
+                    guard.insert(model.to_string(), ModelPullStatus::Failed(e.to_string()));
+                }
+            }
+        }
+    }
+
+    /// Pull multiple models concurrently (up to 3 at a time).
+    pub async fn pull_all_models(&self, models: Vec<String>) {
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(3));
+        let mut handles = Vec::new();
+
+        for model in models {
+            let this = self.clone();
+            let sem = semaphore.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = sem.acquire().await;
+                this.pull_model(&model).await;
+            }));
+        }
+
+        for handle in handles {
+            let _ = handle.await;
+        }
+    }
+
+    /// Get current pull status for all tracked models.
+    pub fn get_pull_status(&self) -> HashMap<String, ModelPullStatus> {
+        self.model_pull_status.read()
+            .map(|guard| guard.clone())
+            .unwrap_or_default()
     }
 
     fn replace_vars(&self, template: &str, config: &AgentConfig) -> String {
