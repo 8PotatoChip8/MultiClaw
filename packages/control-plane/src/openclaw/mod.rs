@@ -557,8 +557,10 @@ impl OpenClawManager {
                     );
 
                     // Retry once if model returned no text (cold-start transient)
+                    // Also retry on OpenClaw internal timeout messages (agent ran out of time)
                     let is_empty = text.trim().is_empty()
-                        || text == "[Agent produced no text output]";
+                        || text == "[Agent produced no text output]"
+                        || text.contains("Request timed out before a response was generated");
                     if is_empty && empty_retries == 0 {
                         empty_retries += 1;
                         tracing::warn!(

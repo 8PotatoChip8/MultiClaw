@@ -260,12 +260,50 @@ fn strip_narration_lines(text: &str) -> String {
     const NARRATION_PREFIXES: &[&str] = &[
         "let me check", "let me look", "let me review", "let me send",
         "let me see", "let me find", "let me get", "let me pull", "let me search",
+        "let me read", "let me also", "let me start", "let me create",
+        "let me set", "let me prepare", "let me reach out",
         "now let me", "now i'll", "now i will",
         "i'll check", "i'll review", "i'll look", "i'll send",
         "i'll search", "i'll find", "i'll get",
+        "i'll read", "i'll prepare", "i'll create", "i'll start", "i'll set up",
         "i will check", "i will review", "i will look",
+        "i will send", "i will read",
         "sending now", "checking now", "looking now", "reviewing now", "searching now",
     ];
+
+    // Short filler phrases that can precede narration (e.g. "Good. Let me check...")
+    const FILLER_PREFIXES: &[&str] = &[
+        "good.", "ok.", "okay.", "sure.", "understood.", "alright.",
+        "right.", "great.", "perfect.", "absolutely.", "done.", "noted.",
+    ];
+
+    /// Check whether `remainder` (text after narration prefix) contains markers
+    /// indicating the line is conversational (addressing someone) rather than
+    /// pure internal narration.  Lines with these markers are kept.
+    fn has_direct_address(remainder: &str) -> bool {
+        remainder.starts_with("you ") || remainder.starts_with("your ")
+            || remainder.contains(" you ") || remainder.contains(" your ")
+            || remainder.contains(" you.") || remainder.contains(" you,")
+            || remainder.ends_with(" you")
+            || remainder.contains('?')
+    }
+
+    /// Returns true if the line (lowercased) matches a narration prefix and
+    /// should be stripped.
+    fn is_narration(lower: &str, prefixes: &[&str]) -> bool {
+        prefixes.iter().any(|prefix| {
+            if !lower.starts_with(prefix) {
+                return false;
+            }
+            let remainder = lower[prefix.len()..].trim();
+            // Tier 1: pure narration — prefix + optional punctuation
+            if remainder.is_empty() || remainder.chars().all(|c| ".,;:!?…".contains(c)) {
+                return true;
+            }
+            // Tier 2: extended narration — prefix + content that doesn't address anyone
+            !has_direct_address(remainder)
+        })
+    }
 
     let lines: Vec<&str> = text.split('\n').collect();
     let mut result: Vec<&str> = Vec::with_capacity(lines.len());
@@ -278,21 +316,92 @@ fn strip_narration_lines(text: &str) -> String {
         }
         let lower = trimmed.to_lowercase();
 
-        // Check if the line is JUST a narration prefix + optional punctuation
-        let is_pure_narration = NARRATION_PREFIXES.iter().any(|prefix| {
-            if !lower.starts_with(prefix) {
-                return false;
+        // Check the line as-is against narration prefixes
+        if is_narration(&lower, NARRATION_PREFIXES) {
+            continue;
+        }
+
+        // Also check after stripping a leading filler phrase
+        // (e.g. "Good. Let me check if the trade credentials...")
+        let filler_narration = FILLER_PREFIXES.iter().any(|filler| {
+            if let Some(after) = lower.strip_prefix(filler) {
+                let after = after.trim_start();
+                !after.is_empty() && is_narration(after, NARRATION_PREFIXES)
+            } else {
+                false
             }
-            let remainder = lower[prefix.len()..].trim();
-            remainder.is_empty() || remainder.chars().all(|c| ".,;:!?…".contains(c))
         });
 
-        if !is_pure_narration {
+        if !filler_narration {
             result.push(line);
         }
     }
 
     result.join("\n")
+}
+
+/// Detect and collapse duplicate content blocks in model output.
+/// glm-5 occasionally emits the same message body twice in a single response.
+fn dedup_content_blocks(text: &str) -> String {
+    let trimmed = text.trim();
+    if trimmed.len() < 40 {
+        return text.to_string(); // too short to have meaningful duplicates
+    }
+
+    // Strategy 1: check if the text is two identical halves split at a \n\n boundary
+    // Scan \n\n positions in the middle third of the text
+    let len = trimmed.len();
+    let scan_start = len / 3;
+    let scan_end = (2 * len) / 3;
+    let bytes = trimmed.as_bytes();
+    let mut pos = scan_start;
+    while pos + 1 < scan_end {
+        if bytes[pos] == b'\n' && bytes[pos + 1] == b'\n' {
+            let first = trimmed[..pos].trim();
+            let second = trimmed[pos + 2..].trim();
+            if first == second && !first.is_empty() {
+                return first.to_string();
+            }
+        }
+        pos += 1;
+    }
+
+    // Strategy 2: remove consecutive duplicate paragraphs
+    let paragraphs: Vec<&str> = trimmed.split("\n\n").collect();
+    if paragraphs.len() <= 1 {
+        return text.to_string();
+    }
+    let mut deduped: Vec<&str> = vec![paragraphs[0]];
+    for i in 1..paragraphs.len() {
+        if paragraphs[i].trim() != paragraphs[i - 1].trim() || paragraphs[i].trim().is_empty() {
+            deduped.push(paragraphs[i]);
+        }
+    }
+    if deduped.len() < paragraphs.len() {
+        deduped.join("\n\n")
+    } else {
+        text.to_string()
+    }
+}
+
+/// Compute word-overlap ratio between two texts.
+/// Returns |A ∩ B| / min(|A|, |B|) on sets of words (>2 chars, punctuation-trimmed).
+/// Used to detect when a DM sender repeats/rephrases their own earlier message.
+fn word_overlap_ratio(a: &str, b: &str) -> f64 {
+    let to_words = |s: &str| -> std::collections::HashSet<String> {
+        s.split_whitespace()
+            .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()).to_lowercase())
+            .filter(|w| w.len() > 2)
+            .collect()
+    };
+    let words_a = to_words(a);
+    let words_b = to_words(b);
+    if words_a.is_empty() || words_b.is_empty() {
+        return 0.0;
+    }
+    let intersection = words_a.intersection(&words_b).count();
+    let smaller = words_a.len().min(words_b.len());
+    intersection as f64 / smaller as f64
 }
 
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
@@ -319,6 +428,9 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     // Strip model-narrated OpenClaw failures (model itself says this when a tool call fails)
     text = text.replace("No response from OpenClaw.", "");
     text = text.replace("No response from OpenClaw", "");
+    // Strip OpenClaw internal timeout messages (600s agent timeout returns this as text)
+    text = text.replace("Request timed out before a response was generated. Please try again, or increase `agents.defaults.timeoutSeconds` in your config.", "");
+    text = text.replace("Request timed out before a response was generated. Please try again, or increase agents.defaults.timeoutSeconds in your config.", "");
     // Clean up leftover empty brackets from partial stripping (e.g. "[\n" removed the tag but left "[]")
     text = text.replace("[]", "");
     text = text.replace("[ ]", "");
@@ -338,6 +450,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
             .collect::<Vec<_>>()
             .join("\n");
     }
+    // Collapse duplicate content blocks (model occasionally emits same text twice)
+    text = dedup_content_blocks(&text);
     // Strip pure narration lines (defense-in-depth for model ignoring instructions)
     text = strip_narration_lines(&text);
     // Clean spurious newlines from streaming token assembly
@@ -2878,6 +2992,7 @@ async fn agent_dm(
                         "You are {} ({} at {}). You are in a DM with {} ({}). {} \
                          Communicate naturally — ask questions, share information, and respond as needed. \
                          Send ONLY your actual message to {}. \
+                         Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
                          NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
                          NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
                          Do NOT include approval prompts, action requests, or instructions meant for the human operator — {} cannot act on those. Use the dm-user API to reach the operator separately. \
@@ -2905,6 +3020,29 @@ async fn agent_dm(
                             let scrubbed = if let Some(ref crypto) = state_clone.crypto {
                                 scrub_secrets(&state_clone.db, crypto, responder_id, &clean_response).await
                             } else { clean_response.clone() };
+
+                            // Suppress sender's redundant re-statement: if the DM initiator
+                            // is speaking again and their response mostly repeats what they
+                            // already said, skip storing and end the loop.
+                            if responder_id == sender_id && !scrubbed.trim().is_empty() {
+                                let prev_text: Option<String> = sqlx::query_scalar(
+                                    "SELECT content->>'text' FROM messages \
+                                     WHERE thread_id = $1 AND sender_id = $2 \
+                                     ORDER BY created_at DESC LIMIT 1"
+                                ).bind(thread_id).bind(sender_id)
+                                .fetch_optional(&state_clone.db).await.ok().flatten();
+
+                                if let Some(prev) = prev_text {
+                                    let overlap = word_overlap_ratio(&prev, &scrubbed);
+                                    if overlap > 0.6 {
+                                        tracing::info!(
+                                            "DM thread {}: suppressed sender's redundant re-statement (overlap {:.0}%)",
+                                            thread_id, overlap * 100.0
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
 
                             // Only store the message if there's actual content after cleaning.
                             // Empty messages (all tags/narration stripped) create ghost entries
@@ -4552,4 +4690,189 @@ async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
         "activities": activities,
         "vm_states": vm_states,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── strip_narration_lines ──────────────────────────────────────
+
+    #[test]
+    fn narration_pure_prefix() {
+        assert_eq!(strip_narration_lines("Let me check..."), "");
+        assert_eq!(strip_narration_lines("Sending now."), "");
+        assert_eq!(strip_narration_lines("I'll review."), "");
+    }
+
+    #[test]
+    fn narration_extended_prefix_stripped() {
+        // Extended narration: prefix + content that doesn't address anyone
+        assert_eq!(
+            strip_narration_lines("Let me read the multiclaw skill for the API details."),
+            ""
+        );
+        assert_eq!(
+            strip_narration_lines("I'll create a new company for crypto trading."),
+            ""
+        );
+        assert_eq!(
+            strip_narration_lines("Let me start by reviewing the credentials."),
+            ""
+        );
+    }
+
+    #[test]
+    fn narration_preserves_conversational() {
+        // Lines addressing someone should be kept
+        let line = "I'll send you the report shortly.";
+        assert_eq!(strip_narration_lines(line), line);
+
+        let line2 = "Let me check — did you receive it?";
+        assert_eq!(strip_narration_lines(line2), line2);
+
+        let line3 = "I'll review your proposal and get back to you.";
+        assert_eq!(strip_narration_lines(line3), line3);
+    }
+
+    #[test]
+    fn narration_filler_prefix() {
+        assert_eq!(
+            strip_narration_lines("Good. Let me check if the trade credentials have been provisioned."),
+            ""
+        );
+        assert_eq!(
+            strip_narration_lines("OK. I'll review the latest market data."),
+            ""
+        );
+        assert_eq!(
+            strip_narration_lines("Understood. Let me prepare the deployment."),
+            ""
+        );
+    }
+
+    #[test]
+    fn narration_multiline() {
+        let input = "Hello Marcus.\nLet me read the skill documentation.\nHere is the update.";
+        let result = strip_narration_lines(input);
+        assert_eq!(result, "Hello Marcus.\nHere is the update.");
+    }
+
+    #[test]
+    fn narration_preserves_normal_text() {
+        let input = "The market is up 5% today. We should consider increasing our position.";
+        assert_eq!(strip_narration_lines(input), input);
+    }
+
+    // ── dedup_content_blocks ───────────────────────────────────────
+
+    #[test]
+    fn dedup_identical_halves() {
+        let msg = "Hello, this is a status update with details about the project.";
+        let input = format!("{}\n\n{}", msg, msg);
+        assert_eq!(dedup_content_blocks(&input), msg);
+    }
+
+    #[test]
+    fn dedup_consecutive_paragraphs() {
+        let input = "First paragraph here.\n\nSecond paragraph here.\n\nSecond paragraph here.\n\nThird paragraph.";
+        let expected = "First paragraph here.\n\nSecond paragraph here.\n\nThird paragraph.";
+        assert_eq!(dedup_content_blocks(input), expected);
+    }
+
+    #[test]
+    fn dedup_no_false_positive() {
+        let input = "This is one paragraph.\n\nThis is a different paragraph.";
+        assert_eq!(dedup_content_blocks(input), input);
+    }
+
+    #[test]
+    fn dedup_short_text_unchanged() {
+        let input = "Short text.";
+        assert_eq!(dedup_content_blocks(input), input);
+    }
+
+    // ── strip_agent_tags ───────────────────────────────────────────
+
+    #[test]
+    fn tags_end_conversation() {
+        let (text, end) = strip_agent_tags("Thanks for the update.\n[END_CONVERSATION]");
+        assert_eq!(text, "Thanks for the update.");
+        assert!(end);
+    }
+
+    #[test]
+    fn tags_heartbeat() {
+        let (text, _) = strip_agent_tags("[HEARTBEAT_OK]");
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn tags_fragmented() {
+        // Streaming can split tags across tokens
+        let (text, end) = strip_agent_tags("END _CONVERSATION");
+        assert!(text.is_empty());
+        assert!(end);
+    }
+
+    #[test]
+    fn tags_timeout_message() {
+        let (text, _) = strip_agent_tags(
+            "Request timed out before a response was generated. Please try again, or increase `agents.defaults.timeoutSeconds` in your config."
+        );
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn tags_timeout_message_no_backticks() {
+        let (text, _) = strip_agent_tags(
+            "Request timed out before a response was generated. Please try again, or increase agents.defaults.timeoutSeconds in your config."
+        );
+        assert!(text.is_empty());
+    }
+
+    #[test]
+    fn tags_reply_to_current() {
+        let (text, _) = strip_agent_tags("[[reply_to_current]] Hello there.");
+        assert_eq!(text, "Hello there.");
+    }
+
+    #[test]
+    fn tags_preserves_content() {
+        let (text, end) = strip_agent_tags("The quarterly results look promising. Revenue is up 15%.");
+        assert_eq!(text, "The quarterly results look promising. Revenue is up 15%.");
+        assert!(!end);
+    }
+
+    // ── word_overlap_ratio ─────────────────────────────────────────
+
+    #[test]
+    fn overlap_high() {
+        let a = "Update: We have configured the COINEX API credentials for trading operations.";
+        let b = "Good. The COINEX API credentials have been configured. Update sent via DM.";
+        let ratio = word_overlap_ratio(a, b);
+        assert!(ratio > 0.6, "Expected >60% overlap, got {:.0}%", ratio * 100.0);
+    }
+
+    #[test]
+    fn overlap_low() {
+        let a = "The quarterly revenue report is ready for review.";
+        let b = "Please hire a new manager for the engineering department.";
+        let ratio = word_overlap_ratio(a, b);
+        assert!(ratio < 0.3, "Expected <30% overlap, got {:.0}%", ratio * 100.0);
+    }
+
+    #[test]
+    fn overlap_empty() {
+        assert_eq!(word_overlap_ratio("", "hello"), 0.0);
+        assert_eq!(word_overlap_ratio("hello", ""), 0.0);
+        assert_eq!(word_overlap_ratio("", ""), 0.0);
+    }
+
+    #[test]
+    fn overlap_identical() {
+        let text = "This is a test message with several words in it.";
+        let ratio = word_overlap_ratio(text, text);
+        assert!((ratio - 1.0).abs() < f64::EPSILON);
+    }
 }
