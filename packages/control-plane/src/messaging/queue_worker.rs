@@ -189,12 +189,5 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
             let _ = handle.await;
         }
 
-        // Check for stale claims periodically
-        tokio::select! {
-            _ = stale_check_interval.tick() => {
-                recover_stale_claims(&state.db).await;
-            },
-            else => {},
-        }
     }
 }
