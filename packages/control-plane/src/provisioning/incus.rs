@@ -108,11 +108,15 @@ impl IncusProvider {
             args.extend(&["--user", &uid_str]);
         }
 
-        if let Some(wd) = working_dir {
-            args.extend(&["--cwd", wd]);
-        }
+        // Note: --cwd is not supported in Incus 6.0.x (LTS). Instead, prepend
+        // a `cd` to the command string so it runs in the desired directory.
+        let full_command = if let Some(wd) = working_dir {
+            format!("cd {} && {}", wd, command)
+        } else {
+            command.to_string()
+        };
 
-        args.extend(&["--", "/bin/bash", "-lc", command]);
+        args.extend(&["--", "/bin/bash", "-lc", &full_command]);
 
         let secs = timeout_secs.unwrap_or(30).min(120);
         let output = timeout(
