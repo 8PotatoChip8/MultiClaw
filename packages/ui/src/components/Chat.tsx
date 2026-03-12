@@ -35,6 +35,7 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
     const [hoveredMsg, setHoveredMsg] = useState<string | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
+    const inputRef = useRef<HTMLInputElement>(null);
     const event = useMultiClawEvents();
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const isGroup = threadType === 'GROUP';
@@ -75,6 +76,10 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
     useEffect(() => {
         setShowProfile(false);
     }, [threadId]);
+
+    useEffect(() => {
+        if (!sending) inputRef.current?.focus();
+    }, [sending]);
 
     const handleSend = async () => {
         if (!input.trim() || sending) return;
@@ -464,6 +469,7 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
             {/* Input */}
             <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', gap: '8px' }}>
                 <input
+                    ref={inputRef}
                     value={input}
                     onChange={e => setInput(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && handleSend()}
