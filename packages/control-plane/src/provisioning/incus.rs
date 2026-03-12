@@ -99,7 +99,7 @@ impl IncusProvider {
 
         let uid_str;
         if let Some(u) = user {
-            // incus exec --user expects a numeric UID; map "root" → 0, "agent" → 1000
+            // incus exec --user expects a numeric UID; map "root" → 0, everything else → 1000
             let uid = match u {
                 "root" => 0u32,
                 _ => 1000,

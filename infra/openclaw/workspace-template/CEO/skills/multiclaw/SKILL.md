@@ -82,15 +82,15 @@ curl -s "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/info?target=desktop"
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/exec?target=desktop" \
   -H 'Content-Type: application/json' \
-  -d '{"command": "ls /home/ubuntu"}'
+  -d '{"command": "ls /home/employee"}'
 ```
-Optional fields: `"user"` (default: `ubuntu`), `"working_dir"` (default: `/home/ubuntu`), `"timeout_secs"`.
+Optional fields: `"user"` (default: `employee`), `"working_dir"` (default: `/home/employee`), `"timeout_secs"`.
 
 **Send a file to your computer:**
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/push?target=desktop" \
   -H 'Content-Type: application/json' \
-  -d '{"path": "/home/ubuntu/report.csv", "content": "FILE_CONTENT"}'
+  -d '{"path": "/home/employee/report.csv", "content": "FILE_CONTENT"}'
 ```
 Set `"encoding": "base64"` for binary files (images, PDFs, etc.).
 
@@ -98,7 +98,7 @@ Set `"encoding": "base64"` for binary files (images, PDFs, etc.).
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/pull?target=desktop" \
   -H 'Content-Type: application/json' \
-  -d '{"path": "/home/ubuntu/report.csv"}'
+  -d '{"path": "/home/employee/report.csv"}'
 ```
 
 **Start / stop your computer:**
@@ -134,14 +134,14 @@ curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/exec?target=san
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/push?target=sandbox" \
   -H 'Content-Type: application/json' \
-  -d '{"path": "/home/ubuntu/test.py", "content": "FILE_CONTENT"}'
+  -d '{"path": "/home/employee/test.py", "content": "FILE_CONTENT"}'
 ```
 
 **Download a file from your testing environment:**
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/pull?target=sandbox" \
   -H 'Content-Type: application/json' \
-  -d '{"path": "/home/ubuntu/output.log"}'
+  -d '{"path": "/home/employee/output.log"}'
 ```
 
 **Start / stop your testing environment:**
@@ -162,7 +162,7 @@ Copy a file directly between your two computers without downloading and re-uploa
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox \
   -H 'Content-Type: application/json' \
-  -d '{"src_path": "/home/ubuntu/project/app.py", "dest_path": "/home/ubuntu/app.py"}'
+  -d '{"src_path": "/home/employee/project/app.py", "dest_path": "/home/employee/app.py"}'
 ```
 - `src_path`: file path on your **personal work computer**
 - `dest_path` (optional): destination on your **testing environment** (defaults to the same path)

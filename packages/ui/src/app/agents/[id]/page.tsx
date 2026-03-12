@@ -66,7 +66,7 @@ export default function AgentDetailPage() {
     const [vmTarget, setVmTarget] = useState<'desktop' | 'sandbox'>('desktop');
     const [cmdHistory, setCmdHistory] = useState<Record<string, CmdEntry[]>>({ desktop: [], sandbox: [] });
     const [currentCmd, setCurrentCmd] = useState('');
-    const [workingDir, setWorkingDir] = useState<Record<string, string>>({ desktop: '/home/ubuntu', sandbox: '/home/ubuntu' });
+    const [workingDir, setWorkingDir] = useState<Record<string, string>>({ desktop: '/home/employee', sandbox: '/home/employee' });
     const [isRunning, setIsRunning] = useState(false);
     const [vmInfoData, setVmInfoData] = useState<Record<string, VmInfoData | null>>({ desktop: null, sandbox: null });
     const [sandboxProvisioning, setSandboxProvisioning] = useState(false);
@@ -127,7 +127,7 @@ export default function AgentDetailPage() {
         if (trimmed.startsWith('cd ') && (result.exit_code === 0)) {
             const target = trimmed.slice(3).trim().replace(/^['"]|['"]$/g, '');
             if (target.startsWith('/')) setWorkingDir(prev => ({ ...prev, [vmTarget]: target }));
-            else if (target === '~') setWorkingDir(prev => ({ ...prev, [vmTarget]: '/home/ubuntu' }));
+            else if (target === '~') setWorkingDir(prev => ({ ...prev, [vmTarget]: '/home/employee' }));
             else setWorkingDir(prev => ({ ...prev, [vmTarget]: `${cwd.replace(/\/$/, '')}/${target}` }));
         }
         setCurrentCmd('');

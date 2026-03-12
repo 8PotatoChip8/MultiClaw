@@ -139,7 +139,7 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 **File Push body:**
 ```json
 {
-  "path": "/home/ubuntu/file.txt",
+  "path": "/home/employee/file.txt",
   "content": "file contents or base64",
   "encoding": "text"
 }
@@ -148,8 +148,8 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 **Copy to Sandbox body:**
 ```json
 {
-  "source_path": "/home/ubuntu/project/app.py",
-  "dest_path": "/home/ubuntu/test/app.py"
+  "source_path": "/home/employee/project/app.py",
+  "dest_path": "/home/employee/test/app.py"
 }
 ```
 

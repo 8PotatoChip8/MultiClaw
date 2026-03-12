@@ -3,8 +3,8 @@ Description=MultiClaw Agent Sidecar
 After=network.target openclaw-gateway.service
 
 [Service]
-User=ubuntu
-Group=ubuntu
+User=employee
+Group=employee
 Environment="RUST_LOG=info"
 Environment="AGENT_ID={{AGENT_ID}}"
 Environment="AGENTD_TOKEN={{AGENTD_TOKEN}}"

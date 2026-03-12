@@ -5,14 +5,14 @@
 # configure it for use as a managed MultiClaw agent.
 #
 # Environment variables expected:
-#   AGENT_USER       — the unprivileged user to run OpenClaw under (default: ubuntu)
+#   AGENT_USER       — the unprivileged user to run OpenClaw under (default: employee)
 #   HOST_IP          — the host machine IP for contacting multiclawd
 #   MULTICLAWD_PORT  — control-plane port on the host (default: 8080)
 #   OLLAMA_PROXY_PORT— ollama proxy port on the host (default: 11436)
 
 set -euo pipefail
 
-AGENT_USER="${AGENT_USER:-ubuntu}"
+AGENT_USER="${AGENT_USER:-employee}"
 HOST_IP="${HOST_IP:-127.0.0.1}"
 MULTICLAWD_PORT="${MULTICLAWD_PORT:-8080}"
 OLLAMA_PROXY_PORT="${OLLAMA_PROXY_PORT:-11436}"

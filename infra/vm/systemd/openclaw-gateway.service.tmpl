@@ -3,11 +3,11 @@ Description=OpenClaw Gateway Service
 After=network.target
 
 [Service]
-User=ubuntu
-Group=ubuntu
-WorkingDirectory=/home/ubuntu
+User=employee
+Group=employee
+WorkingDirectory=/home/employee
 Environment="OPENCLAW_GATEWAY_TOKEN={{OPENCLAW_GATEWAY_TOKEN}}"
-ExecStart=/home/ubuntu/.openclaw/bin/openclaw gateway start --blocking
+ExecStart=/home/employee/.openclaw/bin/openclaw gateway start --blocking
 Restart=always
 RestartSec=3
 
