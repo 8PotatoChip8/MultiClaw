@@ -34,6 +34,7 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
     const [showProfile, setShowProfile] = useState(false);
     const [hoveredMsg, setHoveredMsg] = useState<string | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
+    const [sendBlocked, setSendBlocked] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
     const event = useMultiClawEvents();
@@ -77,12 +78,14 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
         setShowProfile(false);
     }, [threadId]);
 
-    useEffect(() => {
-        if (!sending) inputRef.current?.focus();
-    }, [sending]);
 
     const handleSend = async () => {
-        if (!input.trim() || sending) return;
+        if (!input.trim()) return;
+        if (sending) {
+            setSendBlocked(true);
+            setTimeout(() => setSendBlocked(false), 2500);
+            return;
+        }
         setSending(true);
         setAgentTyping(true);
         const content = input.trim();
@@ -466,6 +469,21 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                 )}
             </div>
 
+            {/* Send-blocked toast */}
+            {sendBlocked && (
+                <div style={{
+                    padding: '8px 16px',
+                    background: 'rgba(245, 158, 11, 0.12)',
+                    borderTop: '1px solid rgba(245, 158, 11, 0.3)',
+                    color: '#f59e0b',
+                    fontSize: '12px', fontWeight: 500,
+                    textAlign: 'center',
+                    animation: 'fadeIn 0.15s ease-out',
+                }}>
+                    Cannot send message right now — please wait for the agent to finish responding
+                </div>
+            )}
+
             {/* Input */}
             <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', gap: '8px' }}>
                 <input
@@ -474,10 +492,9 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                     onChange={e => setInput(e.target.value)}
                     onKeyDown={e => e.key === 'Enter' && handleSend()}
                     placeholder={isGroup ? "Message the group..." : "Type a message..."}
-                    disabled={sending}
                     style={{ flex: 1 }}
                 />
-                <button className="button" onClick={handleSend} disabled={sending || !input.trim()} style={{ padding: '10px 16px' }}>
+                <button className="button" onClick={handleSend} disabled={!input.trim()} style={{ padding: '10px 16px' }}>
                     {sending ? <Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> : <Send size={18} />}
                 </button>
             </div>
@@ -525,6 +542,10 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                 @keyframes spin {
                     from { transform: rotate(0deg); }
                     to { transform: rotate(360deg); }
+                }
+                @keyframes fadeIn {
+                    from { opacity: 0; transform: translateY(4px); }
+                    to { opacity: 1; transform: translateY(0); }
                 }
             `}</style>
         </div>
