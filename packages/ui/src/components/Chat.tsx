@@ -284,7 +284,11 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                             marginBottom: '12px',
                         }}>
                             <div
-                                style={{ position: 'relative', maxWidth: '70%', paddingRight: '36px' }}
+                                style={{
+                                    position: 'relative', maxWidth: '70%',
+                                    paddingLeft: msg.sender_type === 'USER' ? '36px' : '0',
+                                    paddingRight: msg.sender_type === 'USER' ? '0' : '36px',
+                                }}
                                 onMouseEnter={() => setHoveredMsg(msg.id)}
                                 onMouseLeave={() => setHoveredMsg(null)}
                             >
@@ -305,7 +309,8 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                                         onClick={() => handleCopy(msg.id, getContent(msg))}
                                         title="Copy message"
                                         style={{
-                                            position: 'absolute', top: '6px', right: '0px',
+                                            position: 'absolute', top: '6px',
+                                            ...(msg.sender_type === 'USER' ? { left: '0px' } : { right: '0px' }),
                                             background: 'rgba(30,40,68,0.9)', border: '1px solid var(--border)',
                                             borderRadius: '6px', padding: '4px', cursor: 'pointer',
                                             color: copiedId === msg.id ? 'var(--success)' : 'var(--text-muted)',
