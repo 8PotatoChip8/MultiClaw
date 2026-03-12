@@ -6,7 +6,7 @@ use futures::{sink::SinkExt, stream::StreamExt};
 use sqlx::PgPool;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
+use tokio::sync::{broadcast, Notify, RwLock};
 use uuid::Uuid;
 
 use crate::config::Config;
@@ -54,6 +54,8 @@ pub struct AppState {
     /// Per-agent message serialization. Ensures each agent processes one message
     /// at a time so concurrent senders don't confuse the LLM context.
     pub agent_message_locks: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
+    /// Notification channel to wake the message queue worker when new work is enqueued.
+    pub queue_notify: Arc<Notify>,
 }
 
 impl AppState {
@@ -98,6 +100,33 @@ impl AppState {
             }
         };
         mutex.lock_owned().await
+    }
+
+    /// Enqueue a message for background processing by the queue worker.
+    /// Returns the queue item ID. The worker will pick it up and deliver it.
+    pub async fn enqueue_message(
+        &self,
+        agent_id: Uuid,
+        priority: i16,
+        kind: &str,
+        payload: serde_json::Value,
+    ) -> Result<Uuid, sqlx::Error> {
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO message_queue (agent_id, priority, kind, payload) \
+             VALUES ($1, $2, $3, $4) RETURNING id"
+        )
+        .bind(agent_id)
+        .bind(priority)
+        .bind(kind)
+        .bind(&payload)
+        .fetch_one(&self.db)
+        .await?;
+
+        // Wake the queue worker
+        self.queue_notify.notify_one();
+
+        tracing::debug!("[queue] enqueued {}:{} for agent {} (priority {})", kind, id, agent_id, priority);
+        Ok(id)
     }
 
     /// Mark an agent as done with a request. Decrements pending_requests; if 0, sets IDLE.

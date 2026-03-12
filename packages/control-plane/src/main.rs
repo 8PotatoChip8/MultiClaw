@@ -1,4 +1,3 @@
-use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,26 +22,6 @@ use agents::main_agent::MainAgent;
 use crypto::CryptoMaster;
 use openclaw::OpenClawManager;
 use provisioning::incus::IncusProvider;
-
-/// Acquire a per-agent turn lock (standalone version for tasks without AppState).
-async fn acquire_agent_turn(
-    locks: &tokio::sync::RwLock<std::collections::HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    agent_id: Uuid,
-) -> tokio::sync::OwnedMutexGuard<()> {
-    let mutex = {
-        let map = locks.read().await;
-        if let Some(m) = map.get(&agent_id) {
-            m.clone()
-        } else {
-            drop(map);
-            let mut map = locks.write().await;
-            map.entry(agent_id)
-                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-                .clone()
-        }
-    };
-    mutex.lock_owned().await
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -193,7 +172,17 @@ async fn main() -> anyhow::Result<()> {
         responding_to_user: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         action_prompt_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         agent_message_locks: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        queue_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
     };
+
+    // Spawn the durable message queue worker
+    {
+        let worker_state = app_state.clone();
+        let worker_notify = app_state.queue_notify.clone();
+        tokio::spawn(async move {
+            messaging::queue_worker::run(worker_state, worker_notify).await;
+        });
+    }
 
     // Watch channel: signals when OpenClaw instance recovery is complete and all containers are ready.
     // The heartbeat, watchdog, and recovery prompt tasks all wait on this instead of fixed timers.
@@ -274,9 +263,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Post-restart recovery prompts: cascade top-down so agents resume work
     let pool_rp = pool.clone();
-    let openclaw_rp = openclaw_mgr.clone();
-    let tx_rp = app_state.tx.clone();
-    let agent_locks_rp = app_state.agent_message_locks.clone();
+    let app_state_rp = app_state.clone();
     let mut rp_rx = recovery_rx.clone();
     tokio::spawn(async move {
         // Wait for all containers to be ready
@@ -317,9 +304,9 @@ async fn main() -> anyhow::Result<()> {
             return;
         }
 
-        tracing::info!("Starting post-restart recovery prompts for {} agents...", agents.len());
+        tracing::info!("Enqueuing post-restart recovery prompts for {} agents...", agents.len());
 
-        // Group by tier and send cascade
+        // Enqueue recovery prompts by tier with delays between tiers
         let tiers = ["MAIN", "CEO", "MANAGER", "WORKER"];
         for tier_name in &tiers {
             let tier_agents: Vec<&(Uuid, String, String)> = agents.iter()
@@ -331,65 +318,48 @@ async fn main() -> anyhow::Result<()> {
             }
 
             tracing::info!(
-                "Recovery prompts: sending to {} tier ({} agents)",
+                "Recovery prompts: enqueuing {} tier ({} agents)",
                 tier_name, tier_agents.len()
             );
 
-            // Send to all agents in this tier concurrently
-            let mut handles = Vec::new();
             for (agent_id, agent_name, role) in &tier_agents {
-                let pool = pool_rp.clone();
-                let openclaw = openclaw_rp.clone();
-                let tx = tx_rp.clone();
-                let locks = agent_locks_rp.clone();
-                let agent_id = *agent_id;
-                let agent_name = (*agent_name).clone();
-                let role = (*role).clone();
-                let restart_ts = restart_ts.clone();
-
-                handles.push(tokio::spawn(async move {
-                    send_recovery_prompt(
-                        &pool, &openclaw, &tx, &locks,
-                        agent_id, &agent_name, &role, &restart_ts,
-                    ).await;
-                }));
+                let _ = app_state_rp.enqueue_message(
+                    *agent_id, 4, "recovery_prompt",
+                    serde_json::json!({
+                        "agent_id": agent_id.to_string(),
+                        "agent_name": agent_name,
+                        "role": role,
+                        "restart_time": restart_ts,
+                    }),
+                ).await;
             }
 
-            // Wait for all agents in this tier to respond before moving to next
-            for handle in handles {
-                let _ = handle.await;
-            }
-
-            // Delay between tiers so agent actions can settle
-            tracing::info!("Recovery prompts: {} tier complete, waiting 30s before next tier", tier_name);
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // Wait between tiers so higher-tier agents process first.
+            // The queue worker will pick up these items and process them.
+            tracing::info!("Recovery prompts: {} tier enqueued, waiting 60s before next tier", tier_name);
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         }
 
-        tracing::info!("Post-restart recovery prompts complete");
+        tracing::info!("Post-restart recovery prompts all enqueued");
     });
 
-    // MainAgent heartbeat: periodic check-in loop
+    // MainAgent heartbeat: periodic check-in loop — enqueues heartbeat via message queue
     let pool_hb = pool.clone();
-    let openclaw_hb = openclaw_mgr.clone();
-    let tx_hb = app_state.tx.clone();
-    let agent_locks_hb = app_state.agent_message_locks.clone();
+    let app_state_hb = app_state.clone();
     let mut hb_rx = recovery_rx.clone();
     tokio::spawn(async move {
         // Wait for recovery + recovery prompts to finish before starting heartbeat.
-        // The 300s settling delay gives recovery prompts (~5-7 min) time to complete.
         let _ = hb_rx.changed().await;
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
         tracing::info!("MainAgent heartbeat loop started (post-recovery)");
 
         loop {
-            // Read interval from system_meta (default 600s = 10 minutes)
             let interval_secs: u64 = sqlx::query_scalar::<_, String>(
                 "SELECT value FROM system_meta WHERE key = 'heartbeat_interval_secs'"
             ).fetch_optional(&pool_hb).await.ok().flatten()
              .and_then(|v| v.parse().ok())
              .unwrap_or(600);
 
-            // 0 = disabled
             if interval_secs == 0 {
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                 continue;
@@ -397,7 +367,6 @@ async fn main() -> anyhow::Result<()> {
 
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 
-            // Find the MAIN agent
             let main_agent: Option<(Uuid, String)> = sqlx::query_as(
                 "SELECT id, name FROM agents WHERE role = 'MAIN' AND status != 'QUARANTINED' LIMIT 1"
             ).fetch_optional(&pool_hb).await.ok().flatten();
@@ -410,7 +379,6 @@ async fn main() -> anyhow::Result<()> {
                 }
             };
 
-            // Send heartbeat prompt via OpenClaw
             let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
                 Read HEARTBEAT.md and follow the checklist. \
                 If everything is running smoothly, respond with just: [HEARTBEAT_OK]";
@@ -419,56 +387,16 @@ async fn main() -> anyhow::Result<()> {
                 Follow the HEARTBEAT.md checklist. Do not narrate — just check and report. \
                 If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else.";
 
-            let _agent_guard = acquire_agent_turn(&agent_locks_hb, main_id).await;
-            match openclaw_hb.send_message(main_id, heartbeat_prompt, Some(instructions)).await {
-                Ok(response) => {
-                    let trimmed = response.trim();
-                    // Content-aware heartbeat detection: strip the heartbeat tag and
-                    // narration filler, then check if any substantive content remains.
-                    // This handles cases like "Let me check...\n[HEARTBEAT_OK]" where
-                    // the model narrates before the tag, pushing length past any fixed guard.
-                    let (cleaned, _) = api::routes::strip_agent_tags(trimmed);
-                    let has_heartbeat_tag = {
-                        let normalized: String = trimmed.chars()
-                            .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
-                            .collect();
-                        normalized.contains("HEARTBEAT_OK") || normalized.contains("HEARTBEATOK")
-                    };
-                    if has_heartbeat_tag {
-                        // Response contained HEARTBEAT_OK — all clear, discard any
-                        // surrounding narration (e.g. "I'll check... [HEARTBEAT_OK]")
-                        tracing::debug!("Heartbeat: {} reports all clear", main_name);
-                    } else if cleaned.is_empty() {
-                        tracing::debug!("Heartbeat: {} response was empty after cleaning", main_name);
-                    } else {
-                        tracing::info!("Heartbeat: {} has a report ({}B)", main_name, cleaned.len());
-                        // Store the cleaned response in the MainAgent's human-operator DM thread
-                        let thread_id: Option<Uuid> = sqlx::query_scalar(
-                            "SELECT tm.thread_id FROM thread_members tm \
-                             JOIN threads t ON t.id = tm.thread_id \
-                             JOIN thread_members tm2 ON t.id = tm2.thread_id \
-                             WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
-                               AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
-                        ).bind(main_id).fetch_optional(&pool_hb).await.ok().flatten();
-
-                        if let Some(tid) = thread_id {
-                            let msg_id = Uuid::new_v4();
-                            let content = serde_json::json!({"text": cleaned});
-                            let _ = sqlx::query(
-                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
-                                 VALUES ($1,$2,'AGENT',$3,$4,0)"
-                            ).bind(msg_id).bind(tid).bind(main_id).bind(&content)
-                            .execute(&pool_hb).await;
-                            let _ = tx_hb.send(serde_json::json!({
-                                "type":"new_message",
-                                "message": {"id": msg_id, "thread_id": tid, "sender_type": "AGENT", "sender_id": main_id, "content": content}
-                            }).to_string());
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Heartbeat failed for {}: {}", main_name, e);
-                }
+            match app_state_hb.enqueue_message(
+                main_id, 5, "heartbeat",
+                serde_json::json!({
+                    "agent_id": main_id.to_string(),
+                    "prompt": heartbeat_prompt,
+                    "instructions": instructions,
+                }),
+            ).await {
+                Ok(queue_id) => tracing::debug!("Heartbeat enqueued for {} (queue_id={})", main_name, queue_id),
+                Err(e) => tracing::warn!("Failed to enqueue heartbeat for {}: {}", main_name, e),
             }
         }
     });
@@ -483,133 +411,3 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Send a recovery prompt to a single agent after system restart.
-/// Crafts a role-appropriate prompt, sends via OpenClaw, and handles the response.
-/// Only MAIN agent substantive responses are posted to the user DM thread.
-async fn send_recovery_prompt(
-    db: &PgPool,
-    openclaw: &OpenClawManager,
-    tx: &Arc<broadcast::Sender<String>>,
-    agent_locks: &tokio::sync::RwLock<std::collections::HashMap<Uuid, std::sync::Arc<tokio::sync::Mutex<()>>>>,
-    agent_id: Uuid,
-    agent_name: &str,
-    role: &str,
-    restart_time: &str,
-) {
-    let prompt = match role {
-        "MAIN" => format!(
-            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
-             All agent containers have been recovered. Your in-memory context from before the restart is gone. \
-             Review your current situation: \
-             1. Check your org tree (companies and their CEOs) \
-             2. Check your recent threads and messages for any in-progress work \
-             3. Check your workspace memory for any saved state \
-             4. Resume any interrupted work or verify everything is on track \
-             If everything looks good and nothing needs immediate attention, respond with just: [RECOVERY_OK] \
-             If there are issues or interrupted work to resume, briefly describe what you're doing about it.",
-            restart_time
-        ),
-        "CEO" => format!(
-            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
-             Your container has been recovered but your in-memory context is gone. \
-             Review your situation: \
-             1. Check your team (managers and workers under you) \
-             2. Check your recent threads and DMs for any in-progress work \
-             3. Check your workspace memory for saved state \
-             4. Resume any interrupted work — do NOT re-hire people you already hired or re-brief people already briefed \
-             If everything is on track, respond with: [RECOVERY_OK] \
-             If you need to resume something, briefly act on it.",
-            restart_time
-        ),
-        "MANAGER" => format!(
-            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
-             Your container has been recovered but your in-memory context is gone. \
-             Review your situation: \
-             1. Check your team (workers under you) \
-             2. Check your recent threads for any in-progress work \
-             3. Check your workspace memory for saved state \
-             4. Resume any interrupted work — do NOT re-hire or re-brief workers already in place \
-             If everything is on track, respond with: [RECOVERY_OK] \
-             If you need to resume something, briefly act on it.",
-            restart_time
-        ),
-        _ => format!(
-            "SYSTEM RESTART NOTICE: The system was restarted at {}. \
-             Your container has been recovered but your in-memory context is gone. \
-             Review your situation: \
-             1. Check your workspace for any in-progress files or work \
-             2. Check your recent threads for context on what you were working on \
-             3. Check your workspace memory for saved state \
-             4. Resume any interrupted work from where you left off \
-             If everything is on track, respond with: [RECOVERY_OK] \
-             If you have interrupted work to resume, briefly describe what you're picking back up.",
-            restart_time
-        ),
-    };
-
-    let instructions = "This is a system-generated restart notification. \
-        Be concise. Review your state using available tools, then either resume \
-        interrupted work or confirm everything is on track with [RECOVERY_OK]. \
-        Do NOT narrate what you are about to do — just do it and respond with the result. \
-        Do NOT repeat or summarize information you already know.";
-
-    tracing::info!("Sending recovery prompt to {} ({})", agent_name, role);
-
-    let _agent_guard = acquire_agent_turn(agent_locks, agent_id).await;
-    match openclaw.send_message(agent_id, &prompt, Some(instructions)).await {
-        Ok(response) => {
-            let (cleaned, _) = api::routes::strip_agent_tags(&response);
-            let has_recovery_ok = {
-                let normalized: String = response.chars()
-                    .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
-                    .collect();
-                normalized.contains("RECOVERY_OK") || normalized.contains("RECOVERYOK")
-            };
-
-            if has_recovery_ok {
-                tracing::info!("Recovery: {} ({}) reports all clear", agent_name, role);
-            } else if cleaned.trim().is_empty() {
-                tracing::warn!("Recovery: {} ({}) returned empty response", agent_name, role);
-            } else {
-                tracing::info!(
-                    "Recovery: {} ({}) is resuming work ({} chars)",
-                    agent_name, role, cleaned.len()
-                );
-
-                // For MAIN agent only: post substantive recovery reports to user DM thread
-                // (mirrors heartbeat behavior so the operator sees what MAIN is doing)
-                if role == "MAIN" {
-                    let thread_id: Option<Uuid> = sqlx::query_scalar(
-                        "SELECT tm.thread_id FROM thread_members tm \
-                         JOIN threads t ON t.id = tm.thread_id \
-                         JOIN thread_members tm2 ON t.id = tm2.thread_id \
-                         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
-                           AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
-                    ).bind(agent_id).fetch_optional(db).await.ok().flatten();
-
-                    if let Some(tid) = thread_id {
-                        let msg_id = Uuid::new_v4();
-                        let prefixed = format!("[Post-Restart Recovery] {}", cleaned);
-                        let content = serde_json::json!({"text": prefixed});
-                        let _ = sqlx::query(
-                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
-                             VALUES ($1,$2,'AGENT',$3,$4,0)"
-                        ).bind(msg_id).bind(tid).bind(agent_id).bind(&content)
-                        .execute(db).await;
-                        let _ = tx.send(serde_json::json!({
-                            "type": "new_message",
-                            "message": {
-                                "id": msg_id, "thread_id": tid,
-                                "sender_type": "AGENT", "sender_id": agent_id,
-                                "content": content
-                            }
-                        }).to_string());
-                    }
-                }
-            }
-        }
-        Err(e) => {
-            tracing::error!("Recovery prompt failed for {} ({}): {}", agent_name, role, e);
-        }
-    }
-}

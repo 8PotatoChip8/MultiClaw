@@ -19,10 +19,6 @@ use crate::provisioning::vm_provider::{VmProvider, VmResources};
 const MAX_THREAD_REPLY_DEPTH: i32 = 5;
 
 /// Safety ceiling for agent-to-agent DM conversations.
-/// Conversations should end naturally via [END_CONVERSATION] signal, but this
-/// hard limit prevents truly runaway loops if the signal is never produced.
-const DM_SAFETY_LIMIT: i32 = 20;
-
 /// Default available models for agent selection.
 const DEFAULT_MODELS: &[&str] = &[
     "glm-5:cloud",
@@ -215,33 +211,29 @@ fn fix_punctuation_spacing(s: &str) -> String {
 
 /// Fix Markdown bold markers broken by streaming: "** word" → "**word", "word **" → "word**".
 /// The tokenizer sometimes emits "**" and the word as separate tokens with a space between.
-fn fix_markdown_bold_spacing(s: &str) -> String {
+fn strip_markdown_bold(s: &str) -> String {
+    // Remove ** bold markers entirely, ensuring a space exists where needed.
+    // "the**$150 profit**" → "the $150 profit"
     let chars: Vec<char> = s.chars().collect();
     let len = chars.len();
     let mut result = String::with_capacity(s.len());
     let mut i = 0;
 
     while i < len {
-        // Opening bold: "** " followed by an alphanumeric char → remove the space
-        if i + 3 < len && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == ' ' && chars[i + 3].is_alphanumeric() {
-            // Only if preceded by start-of-string, whitespace, or newline (opening context)
-            if i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '\n' {
-                result.push('*');
-                result.push('*');
-                i += 3; // skip the space
-                continue;
-            }
-        }
-        // Closing bold: " **" preceded by an alphanumeric char → remove the space
-        if i + 2 < len && chars[i] == ' ' && chars[i + 1] == '*' && chars[i + 2] == '*' {
-            if i > 0 && chars[i - 1].is_alphanumeric() {
-                // Check that the ** is followed by end-of-string, whitespace, newline, or punctuation
-                let after = if i + 3 < len { chars[i + 3] } else { '\n' };
-                if after.is_whitespace() || after == '\n' || after.is_ascii_punctuation() {
-                    i += 1; // skip the space, let ** be pushed next iteration
-                    continue;
+        if i + 1 < len && chars[i] == '*' && chars[i + 1] == '*' {
+            // Skip the **
+            i += 2;
+            // If removal would glue two non-space chars together, insert a space.
+            // e.g. "the**$150" → prev='e', next='$' → insert space
+            // But "** word" → prev=start/space, next=' '/alpha → no extra space
+            if !result.is_empty() {
+                let prev = result.chars().last().unwrap();
+                let next = if i < len { chars[i] } else { ' ' };
+                if !prev.is_whitespace() && !next.is_whitespace() && prev != '\n' && next != '\n' {
+                    result.push(' ');
                 }
             }
+            continue;
         }
         result.push(chars[i]);
         i += 1;
@@ -507,7 +499,7 @@ fn dedup_content_blocks(text: &str) -> String {
 /// Compute word-overlap ratio between two texts.
 /// Returns |A ∩ B| / min(|A|, |B|) on sets of words (>2 chars, punctuation-trimmed).
 /// Used to detect when a DM sender repeats/rephrases their own earlier message.
-fn word_overlap_ratio(a: &str, b: &str) -> f64 {
+pub(crate) fn word_overlap_ratio(a: &str, b: &str) -> f64 {
     let to_words = |s: &str| -> std::collections::HashSet<String> {
         s.split_whitespace()
             .map(|w| w.trim_matches(|c: char| c.is_ascii_punctuation()).to_lowercase())
@@ -622,8 +614,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("[ ]", "");
     // Fix spacing artifacts: space before punctuation/contractions from token boundaries
     text = fix_punctuation_spacing(&text);
-    // Fix broken Markdown bold markers: "** word" → "**word" (streaming splits ** from the word)
-    text = fix_markdown_bold_spacing(&text);
+    // Strip Markdown bold markers (**) entirely — agents output plain text for chat
+    text = strip_markdown_bold(&text);
     // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
     text = fix_broken_words(&text);
     // Strip pure narration lines (runs AFTER newline/word fixes so streaming fragments
@@ -1141,24 +1133,18 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
                 // DM the approver agent about the pending request
                 if approver_type_str == "AGENT" {
                     if let Some(aid) = approver_id {
-                        let ceo_name = ceo.name.clone();
-                        let req_type_clone = request_type.clone();
-                        let hire_name = payload.name.clone();
-                        let state_clone = state.clone();
-                        tokio::spawn(async move {
-                            let dm_text = format!(
-                                "APPROVAL REQUEST from {}: Hire manager #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                                 To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                                 To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                                ceo_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
-                            );
-                            let _agent_guard = state_clone.acquire_agent_turn(aid).await;
-                            state_clone.mark_agent_working(aid, "Processing approval request").await;
-                            let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
-                            state_clone.mark_agent_done(aid).await;
-                        });
+                        let dm_text = format!(
+                            "APPROVAL REQUEST from {}: Hire manager #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
+                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+                            ceo.name, new_count, payload.name, req_id, request_type, req_id, req_id
+                        );
+                        let _ = state.enqueue_message(
+                            aid, 2, "approval_escalate",
+                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+                        ).await;
                     }
                 } else {
                     // User-targeted: notify UI
@@ -1290,24 +1276,18 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
                 // DM the approver agent about the pending request
                 if approver_type_str == "AGENT" {
                     if let Some(aid) = approver_id {
-                        let mgr_name = mgr.name.clone();
-                        let req_type_clone = request_type.clone();
-                        let hire_name = payload.name.clone();
-                        let state_clone = state.clone();
-                        tokio::spawn(async move {
-                            let dm_text = format!(
-                                "APPROVAL REQUEST from {}: Hire worker #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                                 To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                                 To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                                 -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                                mgr_name, new_count, hire_name, req_id, req_type_clone, req_id, req_id
-                            );
-                            let _agent_guard = state_clone.acquire_agent_turn(aid).await;
-                            state_clone.mark_agent_working(aid, "Processing approval request").await;
-                            let _ = state_clone.openclaw.send_message(aid, &dm_text, None).await;
-                            state_clone.mark_agent_done(aid).await;
-                        });
+                        let dm_text = format!(
+                            "APPROVAL REQUEST from {}: Hire worker #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
+                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
+                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
+                            mgr.name, new_count, payload.name, req_id, request_type, req_id, req_id
+                        );
+                        let _ = state.enqueue_message(
+                            aid, 2, "approval_escalate",
+                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+                        ).await;
                     }
                 } else {
                     // User-targeted: notify UI
@@ -2100,274 +2080,70 @@ async fn send_message(
                     .to_string();
 
                 if !user_text.is_empty() {
-                    let state_clone = state.clone();
-                    let tid = thread_id;
                     let is_agent_sender = sender_type == "AGENT";
-                    let next_depth = reply_depth + 1;
-                    tokio::spawn(async move {
-                        tracing::info!("Processing message (depth {}): '{}'", reply_depth, &user_text[..user_text.len().min(100)]);
 
-                        // Check thread type
-                        let thread_type: String = sqlx::query_scalar(
-                            "SELECT type FROM threads WHERE id = $1"
-                        )
-                        .bind(tid)
-                        .fetch_optional(&state_clone.db)
-                        .await
-                        .ok()
-                        .flatten()
+                    // Resolve which agents should respond (agent routing logic)
+                    let thread_type: String = sqlx::query_scalar("SELECT type FROM threads WHERE id = $1")
+                        .bind(thread_id).fetch_optional(&state.db).await.ok().flatten()
                         .unwrap_or_else(|| "DM".to_string());
 
-                        // Get agent members of this thread
-                        let agent_ids: Vec<Uuid> = sqlx::query_scalar(
-                            "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
-                        )
-                        .bind(tid)
-                        .fetch_all(&state_clone.db)
-                        .await
-                        .unwrap_or_default();
+                    let agent_ids: Vec<Uuid> = sqlx::query_scalar(
+                        "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
+                    ).bind(thread_id).fetch_all(&state.db).await.unwrap_or_default();
 
-                        // Determine which agents should respond
-                        let mut responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
-                            // Check for @-mentions in the message (format: @agent-name or @handle)
-                            let mut mentioned: Vec<Uuid> = Vec::new();
-                            for aid in &agent_ids {
-                                let agent_info: Option<(String, Option<String>)> = sqlx::query_as(
-                                    "SELECT name, handle FROM agents WHERE id = $1"
-                                ).bind(aid).fetch_optional(&state_clone.db).await.ok().flatten();
-                                if let Some((name, handle)) = agent_info {
-                                    let lower_text = user_text.to_lowercase();
-                                    if lower_text.contains(&format!("@{}", name.to_lowercase().replace(' ', "-")))
-                                        || handle.as_ref().map(|h| lower_text.contains(&h.to_lowercase())).unwrap_or(false)
-                                        || lower_text.contains(&name.to_lowercase())
-                                    {
-                                        mentioned.push(*aid);
-                                    }
+                    let mut responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
+                        let mut mentioned: Vec<Uuid> = Vec::new();
+                        for aid in &agent_ids {
+                            let agent_info: Option<(String, Option<String>)> = sqlx::query_as(
+                                "SELECT name, handle FROM agents WHERE id = $1"
+                            ).bind(aid).fetch_optional(&state.db).await.ok().flatten();
+                            if let Some((name, handle)) = agent_info {
+                                let lower_text = user_text.to_lowercase();
+                                if lower_text.contains(&format!("@{}", name.to_lowercase().replace(' ', "-")))
+                                    || handle.as_ref().map(|h| lower_text.contains(&h.to_lowercase())).unwrap_or(false)
+                                    || lower_text.contains(&name.to_lowercase())
+                                {
+                                    mentioned.push(*aid);
                                 }
-                            }
-                            if mentioned.is_empty() {
-                                // No specific mention — route to ALL agents in the group (max 3)
-                                agent_ids.iter().take(3).cloned().collect()
-                            } else {
-                                // Route only to mentioned agents (max 3)
-                                mentioned.into_iter().take(3).collect()
-                            }
-                        } else {
-                            // DM: single agent
-                            if let Some(aid) = agent_ids.first() {
-                                vec![*aid]
-                            } else {
-                                // Fallback to MainAgent
-                                let main_id: Option<Uuid> = sqlx::query_scalar(
-                                    "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
-                                )
-                                .fetch_optional(&state_clone.db)
-                                .await
-                                .ok()
-                                .flatten();
-                                main_id.into_iter().collect()
-                            }
-                        };
-
-                        // If sender is an agent, exclude them from responders
-                        if is_agent_sender {
-                            responding_agents.retain(|id| *id != sender_id);
-                        }
-
-                        // Build context-aware instructions so agents know their conversation context
-                        let thread_title: Option<String> = sqlx::query_scalar(
-                            "SELECT title FROM threads WHERE id = $1"
-                        ).bind(tid).fetch_optional(&state_clone.db).await.ok().flatten();
-
-                        let participant_names: Vec<String> = sqlx::query_scalar(
-                            "SELECT a.name FROM agents a JOIN thread_members tm ON a.id = tm.member_id \
-                             WHERE tm.thread_id = $1 AND tm.member_type = 'AGENT'"
-                        ).bind(tid).fetch_all(&state_clone.db).await.unwrap_or_default();
-
-                        let sender_label = if is_agent_sender {
-                            // Look up the sending agent's name
-                            let name: Option<String> = sqlx::query_scalar(
-                                "SELECT name FROM agents WHERE id = $1"
-                            ).bind(sender_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                            name.unwrap_or_else(|| "an agent".to_string())
-                        } else {
-                            "the human operator".to_string()
-                        };
-
-                        let thread_context = if thread_type == "GROUP" {
-                            let title = thread_title.as_deref().unwrap_or("Group Chat");
-                            let members = participant_names.join(", ");
-                            format!(
-                                "You are responding in the group thread '{}' (participants: {}). The message is from {}. \
-                                 Send ONLY your direct response. \
-                                 Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
-                                 Do NOT include internal thoughts, planning steps, or tool-use commentary. \
-                                 The other participants see everything you write.",
-                                title, members, sender_label
-                            )
-                        } else {
-                            format!(
-                                "You are in a direct message with {}. \
-                                 Send ONLY your direct response. \
-                                 Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
-                                 Do NOT include internal thoughts, planning steps, or tool-use commentary. \
-                                 {} sees everything you write.",
-                                sender_label, sender_label
-                            )
-                        };
-
-                        // Fetch recent thread history so agents have conversation context
-                        let recent_msgs: Vec<(String, Uuid, serde_json::Value)> = sqlx::query_as(
-                            "SELECT sender_type, sender_id, content FROM messages \
-                             WHERE thread_id = $1 ORDER BY created_at DESC LIMIT 20"
-                        ).bind(tid).fetch_all(&state_clone.db).await.unwrap_or_default();
-
-                        let thread_context = if recent_msgs.len() > 1 {
-                            // Build a name cache: agent_id → name (reuse participant_names query results)
-                            let mut name_cache: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
-                            for (stype, sid, _) in &recent_msgs {
-                                if stype == "AGENT" && !name_cache.contains_key(sid) {
-                                    let aname: Option<String> = sqlx::query_scalar(
-                                        "SELECT name FROM agents WHERE id = $1"
-                                    ).bind(sid).fetch_optional(&state_clone.db).await.ok().flatten();
-                                    if let Some(n) = aname { name_cache.insert(*sid, n); }
-                                }
-                            }
-
-                            // Build transcript (skip the most recent msg — it's the current input)
-                            let mut transcript = String::from("Recent conversation history (most recent last):\n---\n");
-                            for (stype, sid, content) in recent_msgs.iter().rev().take(recent_msgs.len() - 1) {
-                                if stype == "SYSTEM" { continue; }
-                                let name = if stype == "USER" {
-                                    "Operator".to_string()
-                                } else {
-                                    name_cache.get(sid).cloned().unwrap_or_else(|| "Agent".to_string())
-                                };
-                                let text = content.get("text").and_then(|v| v.as_str()).unwrap_or("");
-                                // Truncate long messages to keep context compact
-                                let truncated = if text.len() > 200 {
-                                    let end = text.char_indices().take_while(|(i, _)| *i < 200).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(200);
-                                    format!("{}...", &text[..end])
-                                } else { text.to_string() };
-                                transcript.push_str(&format!("{}: {}\n", name, truncated));
-                            }
-                            transcript.push_str("---\n");
-                            format!("{}\n\n{}", transcript, thread_context)
-                        } else {
-                            thread_context
-                        };
-
-                        // Send to each responding agent (sequentially to avoid token waste)
-                        for responding_agent_id in &responding_agents {
-                            // Prepend per-agent identity so the agent knows who they are
-                            let agent_role: Option<String> = sqlx::query_scalar(
-                                "SELECT role FROM agents WHERE id = $1"
-                            ).bind(responding_agent_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                            let agent_name_ctx: String = sqlx::query_scalar(
-                                "SELECT name FROM agents WHERE id = $1"
-                            ).bind(responding_agent_id).fetch_optional(&state_clone.db).await.ok().flatten()
-                                .unwrap_or_else(|| "Agent".to_string());
-                            let role_str = match agent_role.as_deref() {
-                                Some("CEO") => "CEO", Some("MANAGER") => "Manager",
-                                Some("WORKER") => "Worker", _ => "member",
-                            };
-                            let agent_context = format!("You are {} ({}). {}", agent_name_ctx, role_str, thread_context);
-
-                            // Track that this agent is responding to a user in this DM thread,
-                            // so dm-user calls during processing are suppressed (they'd be duplicates).
-                            if !is_agent_sender && thread_type == "DM" {
-                                state_clone.responding_to_user.write().await.insert(*responding_agent_id, tid);
-                            }
-
-                            let _agent_guard = state_clone.acquire_agent_turn(*responding_agent_id).await;
-                            state_clone.mark_agent_working(*responding_agent_id, "Responding in thread").await;
-                            let result: Result<String, anyhow::Error> = match state_clone.openclaw.send_message(
-                                *responding_agent_id, &user_text,
-                                Some(&agent_context)
-                            ).await {
-                                Ok(response) => {
-                                    tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
-                                    Ok(response)
-                                }
-                                Err(e) => {
-                                    tracing::warn!("OpenClaw unavailable for agent {}: {}", responding_agent_id, e);
-                                    let agent_name: String = sqlx::query_scalar(
-                                        "SELECT name FROM agents WHERE id = $1"
-                                    )
-                                    .bind(responding_agent_id)
-                                    .fetch_optional(&state_clone.db)
-                                    .await
-                                    .ok()
-                                    .flatten()
-                                    .unwrap_or_else(|| "Agent".to_string());
-
-                                    Ok(format!(
-                                        "⚠️ {} is currently unavailable — their OpenClaw runtime is not running. \
-                                         Please wait for their instance to come online before sending messages.",
-                                        agent_name
-                                    ))
-                                }
-                            };
-                            state_clone.mark_agent_done(*responding_agent_id).await;
-
-                            match result {
-                                Ok(response) => {
-                                    // Strip system tags and model artifacts, then scrub secrets
-                                    let (cleaned, _) = strip_agent_tags(&response);
-                                    let scrubbed = if let Some(ref crypto) = state_clone.crypto {
-                                        scrub_secrets(&state_clone.db, crypto, *responding_agent_id, &cleaned).await
-                                    } else { cleaned };
-                                    // Skip storing empty messages (all content was tags/narration)
-                                    if scrubbed.trim().is_empty() {
-                                        tracing::warn!(
-                                            "Agent {} response on thread {} stripped to empty (original {} chars): {:?}",
-                                            responding_agent_id, tid, response.len(),
-                                            &response[..response.len().min(200)]
-                                        );
-                                        continue;
-                                    }
-                                    let resp_id = Uuid::new_v4();
-                                    let content = json!({"text": scrubbed});
-                                    if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
-                                         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-                                    )
-                                    .bind(resp_id)
-                                    .bind(tid)
-                                    .bind(responding_agent_id)
-                                    .bind(&content)
-                                    .bind(next_depth)
-                                    .fetch_one(&state_clone.db)
-                                    .await {
-                                        let _ = state_clone.tx.send(
-                                            json!({"type":"new_message","message": agent_msg}).to_string()
-                                        );
-                                        tracing::info!("Agent {} responded on thread {}", responding_agent_id, tid);
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Agent error: {}", e);
-                                    let resp_id = Uuid::new_v4();
-                                    let content = json!({"text": format!("Sorry, I encountered an error: {}", e)});
-                                    let _ = sqlx::query(
-                                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5)"
-                                    )
-                                    .bind(resp_id)
-                                    .bind(tid)
-                                    .bind(responding_agent_id)
-                                    .bind(&content)
-                                    .bind(next_depth)
-                                    .execute(&state_clone.db)
-                                    .await;
-                                }
-                            }
-
-                            // Clear the responding-to-user tracking now that the response is stored
-                            if !is_agent_sender && thread_type == "DM" {
-                                state_clone.responding_to_user.write().await.remove(responding_agent_id);
                             }
                         }
-                    });
+                        if mentioned.is_empty() {
+                            agent_ids.iter().take(3).cloned().collect()
+                        } else {
+                            mentioned.into_iter().take(3).collect()
+                        }
+                    } else {
+                        if let Some(aid) = agent_ids.first() {
+                            vec![*aid]
+                        } else {
+                            let main_id: Option<Uuid> = sqlx::query_scalar(
+                                "SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1"
+                            ).fetch_optional(&state.db).await.ok().flatten();
+                            main_id.into_iter().collect()
+                        }
+                    };
+
+                    if is_agent_sender {
+                        responding_agents.retain(|id| *id != sender_id);
+                    }
+
+                    // Enqueue one thread_reply per responding agent
+                    let priority = if sender_type == "USER" { 1i16 } else { 3 };
+                    for responding_agent_id in responding_agents {
+                        let _ = state.enqueue_message(
+                            responding_agent_id,
+                            priority,
+                            "thread_reply",
+                            json!({
+                                "thread_id": thread_id.to_string(),
+                                "message_text": user_text,
+                                "sender_id": sender_id.to_string(),
+                                "sender_type": sender_type,
+                                "reply_depth": reply_depth,
+                                "responding_agent_id": responding_agent_id.to_string(),
+                            }),
+                        ).await;
+                    }
                 }
             }
 
@@ -2458,13 +2234,10 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
              -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
             requester_name, description, id, p.r#type, id, id
         );
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let _agent_guard = state_clone.acquire_agent_turn(superior_id).await;
-            state_clone.mark_agent_working(superior_id, "Processing approval request").await;
-            let _ = state_clone.openclaw.send_message(superior_id, &dm_text, None).await;
-            state_clone.mark_agent_done(superior_id).await;
-        });
+        let _ = state.enqueue_message(
+            superior_id, 2, "approval_escalate",
+            json!({"agent_id": superior_id.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+        ).await;
     }
 
     (StatusCode::CREATED, Json(json!({"id": id, "status":"PENDING", "approver_type": approver_type})))
@@ -2527,13 +2300,21 @@ async fn trigger_tool_creation(state: &AppState, request_id: Uuid) {
                 )
             };
 
-            let state_clone = state.clone();
-            tokio::spawn(async move {
-                match state_clone.main_agent.handle_message(&state_clone.db, &msg).await {
-                    Ok(response) => tracing::info!("MAIN agent tool creation response for request {}: {}", request_id, response),
-                    Err(e) => tracing::error!("Failed to instruct MAIN to create tool for request {}: {}", request_id, e),
-                }
-            });
+            // Find the MAIN agent to enqueue the tool creation prompt
+            let main_id: Option<Uuid> = sqlx::query_scalar("SELECT id FROM agents WHERE role = 'MAIN' LIMIT 1")
+                .fetch_optional(&state.db).await.ok().flatten();
+            if let Some(mid) = main_id {
+                let _ = state.enqueue_message(
+                    mid, 2, "generic_send",
+                    json!({
+                        "agent_id": mid.to_string(),
+                        "message": msg,
+                        "task_label": "Creating tool for agent",
+                    }),
+                ).await;
+            } else {
+                tracing::error!("No MAIN agent found for tool creation request {}", request_id);
+            }
         }
     }
 }
@@ -2605,13 +2386,10 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
             "Your request \"{}\" (ID: {}) has been {}.{}{}",
             req_type.replace('_', " "), request_id, decision, note_text, availability_caveat
         );
-        let state_clone = state.clone();
-        tokio::spawn(async move {
-            let _agent_guard = state_clone.acquire_agent_turn(agent_id).await;
-            state_clone.mark_agent_working(agent_id, "Processing approval decision").await;
-            let _ = state_clone.openclaw.send_message(agent_id, &msg, None).await;
-            state_clone.mark_agent_done(agent_id).await;
-        });
+        let _ = state.enqueue_message(
+            agent_id, 2, "hire_notify",
+            json!({"agent_id": agent_id.to_string(), "message": msg, "task_label": "Processing approval decision"}),
+        ).await;
     }
 }
 
@@ -2690,13 +2468,10 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                      -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                     approver_name, description, request_id, req_type, request_id, request_id
                 );
-                let state_clone = state.clone();
-                tokio::spawn(async move {
-                    let _agent_guard = state_clone.acquire_agent_turn(next_superior_id).await;
-                    state_clone.mark_agent_working(next_superior_id, "Processing escalated approval").await;
-                    let _ = state_clone.openclaw.send_message(next_superior_id, &dm_text, None).await;
-                    state_clone.mark_agent_done(next_superior_id).await;
-                });
+                let _ = state.enqueue_message(
+                    next_superior_id, 2, "approval_escalate",
+                    json!({"agent_id": next_superior_id.to_string(), "message": dm_text, "task_label": "Processing escalated approval"}),
+                ).await;
                 (StatusCode::OK, Json(json!({"status":"escalated","next_approver_id": next_superior_id})))
             }
             None => {
@@ -3197,289 +2972,20 @@ async fn agent_dm(
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
-            // Conversation loop: agents take turns responding until conversation ends naturally
-            let state_clone = state.clone();
-            let text = p.message.clone();
-            tokio::spawn(async move {
-                let mut current_depth: i32 = 0;
-                let mut responder_id = target_id;
-                let mut other_id = sender_id;
-                let mut current_text = text;
-                let mut dm_retries: u32 = 0;
-
-                loop {
-                    // Check if either agent was quarantined during conversation
-                    let responder_status: Option<String> = sqlx::query_scalar(
-                        "SELECT status FROM agents WHERE id = $1"
-                    ).bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                    if responder_status.as_deref() == Some("QUARANTINED") {
-                        tracing::info!("DM conversation on thread {} stopped: agent {} is quarantined", thread_id, responder_id);
-                        break;
-                    }
-
-                    // Build DM instructions with role/hierarchy context
-                    let partner_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten()
-                        .unwrap_or_else(|| "a colleague".into());
-                    let responder_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten()
-                        .unwrap_or_else(|| "Agent".into());
-                    let responder_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
-                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                    let partner_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
-                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                    let responder_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
-                        .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                    let partner_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
-                        .bind(other_id).fetch_optional(&state_clone.db).await.ok().flatten();
-                    let responder_company: Option<String> = sqlx::query_scalar(
-                        "SELECT c.name FROM companies c JOIN agents a ON a.company_id = c.id WHERE a.id = $1"
-                    ).bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten();
-
-                    let role_label = |r: &Option<String>| match r.as_deref() {
-                        Some("CEO") => "CEO", Some("MANAGER") => "Manager",
-                        Some("WORKER") => "Worker", Some("MAIN") => "Head of Holdings", _ => "colleague",
-                    };
-                    let relationship = if responder_parent == Some(other_id) {
-                        "They are your superior — you report to them."
-                    } else if partner_parent == Some(responder_id) {
-                        "They report to you."
-                    } else if responder_parent == partner_parent && responder_parent.is_some() {
-                        "They are your peer — you share the same manager."
-                    } else { "" };
-
-                    let company_label = responder_company.as_deref().unwrap_or("the company");
-                    let dm_ctx = format!(
-                        "You are {} ({} at {}). You are in a DM with {} ({}). {} \
-                         Communicate naturally — ask questions, share information, and respond as needed. \
-                         Send ONLY your actual message to {}. \
-                         Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
-                         NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
-                         NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
-                         Do NOT include approval prompts, action requests, or instructions meant for the human operator — {} cannot act on those. Use the dm-user API to reach the operator separately. \
-                         When the conversation has reached a natural conclusion and you have nothing more to add, \
-                         end your final message with the exact tag [END_CONVERSATION] on its own line. \
-                         If the conversation has devolved into mutual acknowledgments or pleasantries with no new information \
-                         being exchanged (e.g., 'Understood', 'Got it', 'Sounds good', 'Will do'), that IS a natural conclusion — \
-                         use [END_CONVERSATION]. Do not keep exchanging acknowledgments back and forth. \
-                         Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
-                        responder_name, role_label(&responder_role), company_label,
-                        partner_name, role_label(&partner_role), relationship,
-                        partner_name, partner_name, partner_name, partner_name
-                    );
-
-                    let _agent_guard = state_clone.acquire_agent_turn(responder_id).await;
-                    state_clone.mark_agent_working(responder_id, "Chatting in DM").await;
-                    let result = state_clone.openclaw.send_message(responder_id, &current_text, Some(&dm_ctx)).await;
-                    state_clone.mark_agent_done(responder_id).await;
-
-                    match result {
-                        Ok(response) => {
-                            // Strip system tags and model artifacts from response
-                            let (clean_response, conversation_complete) = strip_agent_tags(&response);
-
-                            // Scrub secrets before storing (use clean response without tag)
-                            let scrubbed = if let Some(ref crypto) = state_clone.crypto {
-                                scrub_secrets(&state_clone.db, crypto, responder_id, &clean_response).await
-                            } else { clean_response.clone() };
-
-                            // Suppress redundant re-statements: if this agent's response
-                            // mostly repeats what they already said earlier in this DM,
-                            // skip storing and end the loop (prevents double-answers).
-                            if !scrubbed.trim().is_empty() {
-                                let prev_text: Option<String> = sqlx::query_scalar(
-                                    "SELECT content->>'text' FROM messages \
-                                     WHERE thread_id = $1 AND sender_id = $2 \
-                                     ORDER BY created_at DESC LIMIT 1"
-                                ).bind(thread_id).bind(responder_id)
-                                .fetch_optional(&state_clone.db).await.ok().flatten();
-
-                                if let Some(prev) = prev_text {
-                                    let overlap = word_overlap_ratio(&prev, &scrubbed);
-                                    if overlap > 0.6 {
-                                        tracing::info!(
-                                            "DM thread {}: suppressed {}'s redundant re-statement (overlap {:.0}%)",
-                                            thread_id, responder_id, overlap * 100.0
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-
-                            // Only store the message if there's actual content after cleaning.
-                            // Empty messages (all tags/narration stripped) create ghost entries
-                            // that show as invisible messages in the UI.
-                            if !scrubbed.trim().is_empty() {
-                                let resp_id = Uuid::new_v4();
-                                let resp_content = json!({"text": scrubbed});
-                                if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,$5) \
-                                     RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-                                ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
-                                .fetch_one(&state_clone.db).await {
-                                    let _ = state_clone.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
-                                }
-                            }
-
-                            // If the response was entirely system tags/narration with no actual
-                            // conversational content, treat it as conversation over — sending an
-                            // empty string to the other agent would cause a 400 Bad Request.
-                            if clean_response.trim().is_empty() {
-                                tracing::info!(
-                                    "DM conversation on thread {} ended: agent response was empty after tag stripping (depth {})",
-                                    thread_id, current_depth
-                                );
-                                break;
-                            }
-
-                            current_depth += 1;
-
-                            // End if the agent signaled conversation is complete
-                            if conversation_complete {
-                                tracing::info!("DM conversation on thread {} ended naturally at depth {}", thread_id, current_depth);
-                                break;
-                            }
-
-                            // Safety ceiling to prevent truly runaway conversations
-                            if current_depth >= DM_SAFETY_LIMIT {
-                                tracing::warn!("DM conversation on thread {} hit safety limit {}", thread_id, DM_SAFETY_LIMIT);
-                                break;
-                            }
-
-                            // Release agent turn before swapping roles
-                            drop(_agent_guard);
-                            // Swap roles: the other agent now responds to this one's message
-                            std::mem::swap(&mut responder_id, &mut other_id);
-                            current_text = clean_response;
-                        }
-                        Err(e) if current_depth <= 1 && dm_retries < 2 && !format!("{e}").contains("HTTP 400") => {
-                            // First message or first reply failed (likely container still starting
-                            // from recent hire). Retry after a delay instead of immediately giving up.
-                            // Excludes 400 Bad Request — that's a bad-input problem, not transient.
-                            dm_retries += 1;
-                            tracing::warn!(
-                                "OpenClaw unavailable for {} on first message (attempt {}/3), retrying in 30s: {}",
-                                responder_id, dm_retries, e
-                            );
-                            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                            continue;
-                        }
-                        Err(e) => {
-                            tracing::warn!("OpenClaw unavailable for agent {}: {}", responder_id, e);
-                            let agent_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                                .bind(responder_id).fetch_optional(&state_clone.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
-
-                            // Post a SYSTEM message so it shows in the thread UI
-                            let resp_id = Uuid::new_v4();
-                            let resp_content = json!({"text": format!("{} is currently unavailable. Your message was not delivered — please try again later.", agent_name)});
-                            let _ = sqlx::query(
-                                "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'SYSTEM',$3,$4,$5)"
-                            ).bind(resp_id).bind(thread_id).bind(responder_id).bind(&resp_content).bind(current_depth)
-                            .execute(&state_clone.db).await;
-                            let _ = state_clone.tx.send(json!({"type":"new_message","thread_id": thread_id, "system": true, "text": format!("{} is currently unavailable.", agent_name)}).to_string());
-
-                            // Notify the sender agent that delivery failed so they can retry
-                            let failure_notice = format!(
-                                "Your message to {} was NOT delivered — they are currently unavailable. \
-                                 You should retry sending this message later when they come back online.",
-                                agent_name
-                            );
-                            drop(_agent_guard); // release responder lock before messaging other agent
-                            let _other_guard = state_clone.acquire_agent_turn(other_id).await;
-                            state_clone.mark_agent_working(other_id, "Processing delivery failure").await;
-                            let _ = state_clone.openclaw.send_message(other_id, &failure_notice, None).await;
-                            state_clone.mark_agent_done(other_id).await;
-                            drop(_other_guard);
-                            break;
-                        }
-                    }
-                }
-
-                // Mark both agents as idle when the DM conversation ends
-                state_clone.mark_agent_done(sender_id).await;
-                state_clone.mark_agent_done(target_id).await;
-
-                // Post-conversation action prompt: nudge the TARGET agent (the one who
-                // received the DM) to act on what was discussed (hire workers, start tasks, etc.).
-                // Only for CEO and MANAGER roles — WORKERS act on direct instructions,
-                // and MAIN already has its own heartbeat loop.
-                let target_role: Option<String> = sqlx::query_scalar(
-                    "SELECT role FROM agents WHERE id = $1 AND status = 'ACTIVE'"
-                ).bind(target_id).fetch_optional(&state_clone.db).await.ok().flatten();
-
-                if matches!(target_role.as_deref(), Some("CEO") | Some("MANAGER")) {
-                    // Skip action prompt if agent already acted on a briefing recently
-                    // (prevents triplicate directives when multiple DMs arrive in quick succession)
-                    let should_skip = {
-                        let cooldowns = state_clone.action_prompt_cooldowns.read().await;
-                        cooldowns.get(&target_id)
-                            .map(|t| t.elapsed() < std::time::Duration::from_secs(120))
-                            .unwrap_or(false)
-                    };
-
-                    if should_skip {
-                        tracing::info!("Skipping post-DM action prompt for {} — acted recently", target_id);
-                    } else {
-                    let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-                        .bind(sender_id).fetch_optional(&state_clone.db).await.ok().flatten()
-                        .unwrap_or_else(|| "your colleague".into());
-
-                    let action_prompt = format!(
-                        "SYSTEM: The conversation with {} has concluded. \
-                         Based on what was discussed, take any NEW actions you need to. \
-                         Do NOT repeat actions you have already taken — do not re-hire staff you already hired, \
-                         do not re-brief workers you already briefed, do not restart work already in progress. \
-                         Check your existing team and threads before taking action. \
-                         If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
-                         Do NOT repeat or summarize the conversation — just act on what is NEW.",
-                        sender_name
-                    );
-
-                    let action_instructions = "You just finished receiving a briefing or directive. \
-                        Execute on it immediately using your available tools — but only NEW actions. \
-                        Do not repeat hiring, briefing, or tasks you have already completed. \
-                        IMPORTANT: When messaging other agents (workers, managers, etc.), use the `dm` endpoint \
-                        (POST /v1/agents/{YOUR_ID}/dm with {\"target\": \"AGENT_ID_OR_HANDLE\", \"message\": \"...\"}). \
-                        The `dm-user` endpoint is ONLY for contacting the human operator — never use it to message agents. \
-                        Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
-
-                    // Record cooldown before executing (so concurrent DMs see it immediately)
-                    state_clone.action_prompt_cooldowns.write().await
-                        .insert(target_id, tokio::time::Instant::now());
-
-                    tracing::info!("Post-DM action prompt for {} ({})", target_id, target_role.as_deref().unwrap_or("?"));
-                    let _agent_guard = state_clone.acquire_agent_turn(target_id).await;
-                    state_clone.mark_agent_working(target_id, "Acting on briefing").await;
-                    match state_clone.openclaw.send_message(target_id, &action_prompt, Some(action_instructions)).await {
-                        Ok(response) => {
-                            let (cleaned, _) = strip_agent_tags(&response);
-                            let normalized = cleaned.replace('[', "").replace(']', "").replace('\n', " ").replace(' ', "");
-                            if normalized.trim().is_empty() || normalized.trim().eq_ignore_ascii_case("NOACTIONNEEDED") {
-                                tracing::debug!("Post-DM: {} has no immediate actions", target_id);
-                            } else {
-                                tracing::info!("Post-DM: {} took action ({} chars)", target_id, cleaned.len());
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!("Post-DM action prompt failed for {}: {}", target_id, e);
-                        }
-                    }
-                    state_clone.mark_agent_done(target_id).await;
-                    } // end else (not skipped)
-                }
-
-                // Record cooldown for this agent pair to prevent infinite re-initiation
-                let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
-                {
-                    let mut cooldowns = state_clone.dm_cooldowns.write().await;
-                    cooldowns.insert(pair_key, tokio::time::Instant::now());
-                }
-                // Release active-conversation lock
-                {
-                    let mut active = state_clone.active_dm_pairs.write().await;
-                    active.remove(&pair_key);
-                }
-            });
+            // Enqueue first turn of the DM conversation
+            let _ = state.enqueue_message(
+                target_id, // target agent processes first
+                3, // agent DM priority
+                "dm_initiate",
+                json!({
+                    "thread_id": thread_id.to_string(),
+                    "sender_id": sender_id.to_string(),
+                    "target_id": target_id.to_string(),
+                    "message_text": p.message,
+                    "pair_key_a": pair_key.0.to_string(),
+                    "pair_key_b": pair_key.1.to_string(),
+                }),
+            ).await;
 
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
         }
@@ -3816,22 +3322,15 @@ async fn agent_send_file(
      .bind(filename).bind(size_bytes).bind(encoding).bind(dest_relative)
      .execute(&state.db).await;
 
-    // Notify receiver
-    let sender_name = sender.name.clone();
-    let notify_dest = dest_relative.to_string();
-    let notify_filename = filename.to_string();
-    let notify_size = file_bytes.len();
-    let state_clone = state.clone();
-    tokio::spawn(async move {
-        let msg = format!(
-            "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
-            sender_name, notify_filename, notify_dest, notify_size
-        );
-        let _agent_guard = state_clone.acquire_agent_turn(receiver_id).await;
-        state_clone.mark_agent_working(receiver_id, "Processing received file").await;
-        let _ = state_clone.openclaw.send_message(receiver_id, &msg, None).await;
-        state_clone.mark_agent_done(receiver_id).await;
-    });
+    // Notify receiver via queue
+    let notify_msg = format!(
+        "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
+        sender.name, filename, dest_relative, file_bytes.len()
+    );
+    let _ = state.enqueue_message(
+        receiver_id, 2, "file_notify",
+        json!({"agent_id": receiver_id.to_string(), "message": notify_msg, "task_label": "Processing received file"}),
+    ).await;
 
     // Broadcast WebSocket event
     let _ = state.tx.send(json!({
@@ -4666,7 +4165,7 @@ async fn get_agent_secret(
 }
 
 /// Scrub known secret values from agent message text to prevent leaks.
-async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, agent_id: Uuid, text: &str) -> String {
+pub(crate) async fn scrub_secrets(db: &sqlx::PgPool, crypto: &crate::crypto::CryptoMaster, agent_id: Uuid, text: &str) -> String {
     // Get agent's company_id, holding_id, parent_agent_id, and role
     let agent_info: Option<(Option<Uuid>, Uuid, Option<Uuid>, String)> = sqlx::query_as(
         "SELECT company_id, holding_id, parent_agent_id, role FROM agents WHERE id = $1"
@@ -5242,6 +4741,12 @@ mod tests {
         assert!(!end);
     }
 
+    #[test]
+    fn tags_strips_markdown_bold() {
+        let (text, _) = strip_agent_tags("the**$150 profit target within 7 days**");
+        assert_eq!(text, "the $150 profit target within 7 days");
+    }
+
     // ── word_overlap_ratio ─────────────────────────────────────────
 
     #[test]
@@ -5317,25 +4822,34 @@ mod tests {
         assert_eq!(fix_broken_words("All systems ready"), "All systems ready");
     }
 
-    // ── fix_markdown_bold_spacing ───────────────────────────────────
+    // ── strip_markdown_bold ────────────────────────────────────────
 
     #[test]
-    fn markdown_bold_opening_space() {
-        assert_eq!(fix_markdown_bold_spacing("** Status Update:**"), "**Status Update:**");
-        assert_eq!(fix_markdown_bold_spacing("** Hello** world"), "**Hello** world");
+    fn strip_bold_basic() {
+        assert_eq!(strip_markdown_bold("**Status Update:**"), "Status Update:");
+        assert_eq!(strip_markdown_bold("** Hello** world"), " Hello world");
     }
 
     #[test]
-    fn markdown_bold_closing_space() {
-        assert_eq!(fix_markdown_bold_spacing("**Update **:"), "**Update**:");
+    fn strip_bold_glued_to_word() {
+        // The reported bug: "the**$150 profit target within 7 days**"
+        assert_eq!(strip_markdown_bold("the**$150 profit target within 7 days**"), "the $150 profit target within 7 days");
     }
 
     #[test]
-    fn markdown_bold_preserves_normal() {
-        assert_eq!(fix_markdown_bold_spacing("**Status Update:**"), "**Status Update:**");
-        assert_eq!(fix_markdown_bold_spacing("no bold here"), "no bold here");
-        // Don't collapse ** in the middle of text (not a bold marker)
-        assert_eq!(fix_markdown_bold_spacing("a ** b"), "a ** b");
+    fn strip_bold_preserves_plain() {
+        assert_eq!(strip_markdown_bold("no bold here"), "no bold here");
+    }
+
+    #[test]
+    fn strip_bold_multiple() {
+        assert_eq!(strip_markdown_bold("**a** and **b**"), "a and b");
+    }
+
+    #[test]
+    fn strip_bold_with_spaces() {
+        // Space already present — don't double up
+        assert_eq!(strip_markdown_bold("word **bold** rest"), "word bold rest");
     }
 
     // ── word_overlap_ratio ─────────────────────────────────────────
