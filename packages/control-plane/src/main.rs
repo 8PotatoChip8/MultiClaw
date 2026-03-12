@@ -191,6 +191,8 @@ async fn main() -> anyhow::Result<()> {
     // Probe Ollama concurrency limit, recover OpenClaw instances, signal when ready
     let pool_clone = pool.clone();
     let openclaw_clone = openclaw_mgr.clone();
+    let probe_ceiling = cfg.probe_ceiling;
+    let probe_model_for_reprobe = probe_model.clone();
     tokio::spawn(async move {
         // Only probe concurrency when there are active agents to recover.
         // On fresh install, no agents exist yet and the model hasn't been pulled —
@@ -202,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or(0);
 
         if agent_count > 0 {
-            openclaw_clone.probe_concurrency(&probe_model).await;
+            openclaw_clone.probe_concurrency(&probe_model, probe_ceiling).await;
         } else {
             tracing::info!("No active agents — skipping concurrency probe (using configured default)");
         }
@@ -250,6 +252,53 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     });
+
+    // Periodic concurrency re-probe: adapt to changing Ollama capacity throughout the day
+    {
+        let pool_reprobe = pool.clone();
+        let openclaw_reprobe = openclaw_mgr.clone();
+        let probe_model_reprobe = probe_model_for_reprobe;
+        let reprobe_ceiling = cfg.probe_ceiling;
+        let reprobe_default_interval = cfg.probe_interval_secs;
+        let mut reprobe_rx = recovery_rx.clone();
+        tokio::spawn(async move {
+            // Wait for initial recovery to complete
+            let _ = reprobe_rx.changed().await;
+            // Additional delay so startup probe and recovery prompts settle
+            tokio::time::sleep(std::time::Duration::from_secs(120)).await;
+            tracing::info!("Concurrency re-probe loop started (default interval={}s, ceiling={})",
+                reprobe_default_interval, reprobe_ceiling);
+
+            loop {
+                // Read interval from system_meta (overridable at runtime), fall back to config default
+                let interval_secs: u64 = sqlx::query_scalar::<_, String>(
+                    "SELECT value FROM system_meta WHERE key = 'concurrency_probe_interval_secs'"
+                ).fetch_optional(&pool_reprobe).await.ok().flatten()
+                 .and_then(|v| v.parse().ok())
+                 .unwrap_or(reprobe_default_interval);
+
+                // Disabled if set to 0
+                if interval_secs == 0 {
+                    tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                    continue;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
+
+                // Only probe if there are active agents
+                let agent_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM agents WHERE status = 'ACTIVE'"
+                ).fetch_one(&pool_reprobe).await.unwrap_or(0);
+
+                if agent_count == 0 {
+                    tracing::debug!("Concurrency re-probe skipped: no active agents");
+                    continue;
+                }
+
+                openclaw_reprobe.adaptive_probe_concurrency(&probe_model_reprobe, reprobe_ceiling).await;
+            }
+        });
+    }
 
     // Cleanup stale DM cooldowns every 60 seconds
     let dm_cooldowns_clone = app_state.dm_cooldowns.clone();

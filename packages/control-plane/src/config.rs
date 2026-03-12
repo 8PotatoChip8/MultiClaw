@@ -11,6 +11,11 @@ pub struct Config {
     /// Maximum concurrent Ollama requests (semaphore permits). Default: 4.
     /// Set to 1 to restore serial behavior. Should match OLLAMA_NUM_PARALLEL on the server.
     pub max_concurrent_ollama: usize,
+    /// Maximum concurrency the adaptive probe will attempt to discover. Default: 32.
+    pub probe_ceiling: usize,
+    /// Seconds between periodic concurrency re-probes. Default: 300 (5 min).
+    /// Also readable at runtime from system_meta key 'concurrency_probe_interval_secs'.
+    pub probe_interval_secs: u64,
 }
 
 impl Config {
@@ -24,6 +29,14 @@ impl Config {
             .unwrap_or_else(|_| "4".to_string())
             .parse()
             .unwrap_or(4);
+        let probe_ceiling = env::var("MULTICLAW_PROBE_CEILING")
+            .unwrap_or_else(|_| "32".to_string())
+            .parse()
+            .unwrap_or(32);
+        let probe_interval_secs = env::var("MULTICLAW_PROBE_INTERVAL_SECS")
+            .unwrap_or_else(|_| "300".to_string())
+            .parse()
+            .unwrap_or(300);
 
         Ok(Self {
             database_url,
@@ -32,6 +45,8 @@ impl Config {
             ollama_url,
             host_ip,
             max_concurrent_ollama,
+            probe_ceiling,
+            probe_interval_secs,
         })
     }
 }

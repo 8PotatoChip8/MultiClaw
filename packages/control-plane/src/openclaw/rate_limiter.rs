@@ -57,7 +57,9 @@ impl ConcurrentRateLimiter {
     }
 
     /// Adjust the concurrency limit at runtime. Replaces the inner semaphore.
-    /// This should only be called when no requests are in flight (e.g., at startup).
+    /// Safe to call during active traffic: `acquire()` clones the semaphore Arc,
+    /// so in-flight requests hold the old semaphore and finish normally.
+    /// New requests immediately see the updated limit.
     pub async fn set_max_concurrent(&self, new_max: usize) {
         let mut sem_guard = self.semaphore.write().await;
         let mut max_guard = self.max_concurrent.write().await;

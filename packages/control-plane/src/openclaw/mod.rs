@@ -103,88 +103,14 @@ impl OpenClawManager {
         }
     }
 
-    /// Probe Ollama to discover the effective concurrency limit for the account.
-    ///
-    /// Sends `probe_count` concurrent minimal requests directly to the Ollama API
-    /// and counts how many succeed vs. get 429'd. Adjusts the rate limiter's
-    /// semaphore to the discovered limit.
-    ///
-    /// Call this at startup BEFORE any agent traffic. Uses the default model
-    /// with a 1-token response to minimise cost.
-    pub async fn probe_concurrency(&self, model: &str) {
-        let probe_count: usize = 10; // test up to 10 concurrent
-        let ollama_url = self.ollama_url.clone();
-
-        // Wait for Ollama to be reachable and the model to be available.
-        // On fresh install / cold boot, Ollama may not have loaded the model yet.
-        tracing::info!("Waiting for Ollama model '{}' to be available at {}...", model, ollama_url);
+    /// Fire `count` concurrent 1-token requests to Ollama and return the number of successes.
+    async fn fire_probe_batch(&self, model: &str, count: usize) -> usize {
         let client = reqwest::Client::new();
-        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
-        loop {
-            match client.get(format!("{}/api/tags", ollama_url))
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(body) = resp.json::<serde_json::Value>().await {
-                        // Check if our model appears in the list
-                        let found = body["models"].as_array()
-                            .map(|models| models.iter().any(|m| {
-                                m["name"].as_str()
-                                    .map(|n| n == model || n.starts_with(&format!("{}:", model.split(':').next().unwrap_or(model))))
-                                    .unwrap_or(false)
-                            }))
-                            .unwrap_or(false);
-                        if found {
-                            tracing::info!("Ollama model '{}' is available", model);
-                            break;
-                        }
-                        // Model not in list — could be a cloud model that doesn't appear in /api/tags.
-                        // Try a single lightweight request to see if it works.
-                        let test = client.post(format!("{}/api/chat", ollama_url))
-                            .json(&serde_json::json!({
-                                "model": model,
-                                "messages": [{"role": "user", "content": "Hi"}],
-                                "stream": false,
-                                "options": {"num_predict": 1},
-                            }))
-                            .timeout(std::time::Duration::from_secs(30))
-                            .send()
-                            .await;
-                        match test {
-                            Ok(r) if r.status().is_success() || r.status().as_u16() == 429 => {
-                                tracing::info!("Ollama model '{}' responds (cloud/unlisted model)", model);
-                                break;
-                            }
-                            _ => {} // Not ready yet
-                        }
-                    }
-                }
-                _ => {} // Ollama not reachable yet
-            }
+        let mut handles = Vec::with_capacity(count);
 
-            if tokio::time::Instant::now() >= deadline {
-                tracing::warn!(
-                    "Timed out waiting for Ollama model '{}' after 120s — proceeding with probe anyway",
-                    model
-                );
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        }
-
-        tracing::info!(
-            "Probing Ollama concurrency limit (sending {} concurrent requests to {})...",
-            probe_count, ollama_url
-        );
-
-        let client = reqwest::Client::new();
-        let mut handles = Vec::with_capacity(probe_count);
-
-        for i in 0..probe_count {
+        for i in 0..count {
             let client = client.clone();
-            let url = format!("{}/api/chat", ollama_url);
+            let url = format!("{}/api/chat", self.ollama_url);
             let model = model.to_string();
             handles.push(tokio::spawn(async move {
                 let resp = client
@@ -214,33 +140,146 @@ impl OpenClawManager {
         }
 
         let results = join_all(handles).await;
-        let succeeded = results.iter().filter(|r| matches!(r, Ok(true))).count();
+        results.iter().filter(|r| matches!(r, Ok(true))).count()
+    }
+
+    /// Startup-only probe: waits for model availability, then discovers the concurrency limit.
+    ///
+    /// Call BEFORE any agent traffic. Uses a 1-token response to minimise cost.
+    pub async fn probe_concurrency(&self, model: &str, ceiling: usize) {
+        let ollama_url = self.ollama_url.clone();
+
+        // Wait for Ollama to be reachable and the model to be available.
+        // On fresh install / cold boot, Ollama may not have loaded the model yet.
+        tracing::info!("Waiting for Ollama model '{}' to be available at {}...", model, ollama_url);
+        let client = reqwest::Client::new();
+        let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(120);
+        loop {
+            match client.get(format!("{}/api/tags", ollama_url))
+                .timeout(std::time::Duration::from_secs(5))
+                .send()
+                .await
+            {
+                Ok(resp) if resp.status().is_success() => {
+                    if let Ok(body) = resp.json::<serde_json::Value>().await {
+                        let found = body["models"].as_array()
+                            .map(|models| models.iter().any(|m| {
+                                m["name"].as_str()
+                                    .map(|n| n == model || n.starts_with(&format!("{}:", model.split(':').next().unwrap_or(model))))
+                                    .unwrap_or(false)
+                            }))
+                            .unwrap_or(false);
+                        if found {
+                            tracing::info!("Ollama model '{}' is available", model);
+                            break;
+                        }
+                        let test = client.post(format!("{}/api/chat", ollama_url))
+                            .json(&serde_json::json!({
+                                "model": model,
+                                "messages": [{"role": "user", "content": "Hi"}],
+                                "stream": false,
+                                "options": {"num_predict": 1},
+                            }))
+                            .timeout(std::time::Duration::from_secs(30))
+                            .send()
+                            .await;
+                        match test {
+                            Ok(r) if r.status().is_success() || r.status().as_u16() == 429 => {
+                                tracing::info!("Ollama model '{}' responds (cloud/unlisted model)", model);
+                                break;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ => {}
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                tracing::warn!(
+                    "Timed out waiting for Ollama model '{}' after 120s — proceeding with probe anyway",
+                    model
+                );
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+
+        // Use the adaptive probe for the initial measurement too
+        self.adaptive_probe_concurrency(model, ceiling).await;
+    }
+
+    /// Adaptive concurrency probe: discovers the current Ollama concurrency limit
+    /// by probing at the current level and expanding upward if all succeed.
+    ///
+    /// Safe to call while agent traffic is active — probes bypass the rate limiter
+    /// and `set_max_concurrent()` swaps the semaphore Arc without disrupting in-flight requests.
+    pub async fn adaptive_probe_concurrency(&self, model: &str, ceiling: usize) {
+        let current = self.rate_limiter.get_max_concurrent().await;
+        let probe_start = current.max(2); // probe at least 2 even if current is 1
+
+        tracing::info!(
+            "Adaptive concurrency probe: current={}, ceiling={}, starting at {}",
+            current, ceiling, probe_start
+        );
+
+        // Phase 1: validate current limit
+        let succeeded = self.fire_probe_batch(model, probe_start).await;
 
         if succeeded == 0 {
             tracing::warn!(
-                "Concurrency probe: 0/{} succeeded — Ollama may not be ready or login may have expired. \
-                 Keeping configured limit of {}.",
-                probe_count,
-                self.rate_limiter.get_max_concurrent().await
+                "Concurrency probe: 0/{} succeeded — Ollama may not be ready or login expired. \
+                 Keeping current limit of {}.",
+                probe_start, current
             );
             return;
         }
 
-        // Use the number of successes as the discovered limit.
-        // If all succeeded, the real limit may be higher, but we cap at probe_count.
-        let discovered = succeeded;
-        let configured = self.rate_limiter.get_max_concurrent().await;
-
-        if discovered != configured {
+        if succeeded < probe_start {
+            // Capacity decreased
             tracing::info!(
-                "Concurrency probe: {}/{} succeeded — adjusting limit from {} to {}",
-                succeeded, probe_count, configured, discovered
+                "Concurrency probe: {}/{} succeeded — capacity decreased, adjusting {} -> {}",
+                succeeded, probe_start, current, succeeded
             );
-            self.rate_limiter.set_max_concurrent(discovered).await;
+            self.rate_limiter.set_max_concurrent(succeeded).await;
+            return;
+        }
+
+        // Phase 2: all passed — probe upward (up to 3 expansion rounds)
+        let mut confirmed = succeeded;
+        for round in 0..3u8 {
+            if confirmed >= ceiling {
+                break;
+            }
+            let step = (confirmed / 2).max(2);
+            let extra = step.min(ceiling - confirmed);
+            if extra == 0 {
+                break;
+            }
+
+            tracing::debug!(
+                "Concurrency probe expansion round {}: testing {} extra (confirmed so far: {})",
+                round + 1, extra, confirmed
+            );
+            let extra_ok = self.fire_probe_batch(model, extra).await;
+            confirmed += extra_ok;
+
+            if extra_ok < extra {
+                // Found the ceiling
+                break;
+            }
+        }
+
+        if confirmed != current {
+            tracing::info!(
+                "Concurrency probe: adjusting limit {} -> {} (ceiling={})",
+                current, confirmed, ceiling
+            );
+            self.rate_limiter.set_max_concurrent(confirmed).await;
         } else {
             tracing::info!(
-                "Concurrency probe: {}/{} succeeded — configured limit of {} is correct",
-                succeeded, probe_count, configured
+                "Concurrency probe: limit stable at {} (ceiling={})",
+                current, ceiling
             );
         }
     }
