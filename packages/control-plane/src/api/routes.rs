@@ -260,6 +260,7 @@ fn fix_broken_words(s: &str) -> String {
         ("histor ical", "historical"),
         ("Escal ated", "Escalated"),
         ("escal ated", "escalated"),
+        ("VM s ", "VMs "),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
