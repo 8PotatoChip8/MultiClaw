@@ -38,16 +38,20 @@ async fn recover_stale_claims(pool: &PgPool) {
 /// agents that don't already have a PROCESSING item. Ordered by priority ASC
 /// (lower = higher priority), then created_at ASC (oldest first).
 async fn claim_work(pool: &PgPool, limit: i64) -> Vec<QueueItem> {
-    // Use a CTE to pick one PENDING row per agent_id, skipping agents that
-    // already have something PROCESSING, then atomically mark them PROCESSING.
+    // Use nested CTEs: first lock candidate rows (FOR UPDATE requires no DISTINCT),
+    // then pick one per agent_id with DISTINCT ON, then atomically mark PROCESSING.
     let items: Vec<QueueItem> = match sqlx::query_as::<_, QueueItem>(
-        "WITH candidates AS ( \
-            SELECT DISTINCT ON (agent_id) id, agent_id, kind, payload, retry_count, max_retries \
+        "WITH locked AS ( \
+            SELECT id, agent_id, kind, payload, retry_count, max_retries, priority, created_at \
             FROM message_queue \
             WHERE status = 'PENDING' \
-              AND agent_id NOT IN (SELECT DISTINCT agent_id FROM message_queue WHERE status = 'PROCESSING') \
+              AND agent_id NOT IN (SELECT agent_id FROM message_queue WHERE status = 'PROCESSING') \
             ORDER BY agent_id, priority ASC, created_at ASC \
             FOR UPDATE SKIP LOCKED \
+        ), candidates AS ( \
+            SELECT DISTINCT ON (agent_id) id, agent_id, kind, payload, retry_count, max_retries \
+            FROM locked \
+            ORDER BY agent_id, priority ASC, created_at ASC \
         ) \
         UPDATE message_queue q \
         SET status = 'PROCESSING', claimed_at = NOW() \
