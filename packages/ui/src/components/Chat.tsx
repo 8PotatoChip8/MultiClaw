@@ -154,9 +154,22 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
     };
 
     const handleCopy = (msgId: string, text: string) => {
-        navigator.clipboard.writeText(text);
-        setCopiedId(msgId);
-        setTimeout(() => setCopiedId(null), 1500);
+        const onSuccess = () => {
+            setCopiedId(msgId);
+            setTimeout(() => setCopiedId(null), 1500);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(onSuccess).catch(() => {});
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { document.execCommand('copy'); onSuccess(); } catch {}
+            document.body.removeChild(textarea);
+        }
     };
 
     const agentParticipants = participants.filter(p => p.member_type === 'AGENT');
