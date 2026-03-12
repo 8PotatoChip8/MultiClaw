@@ -174,7 +174,7 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
     }
 
     state.mark_agent_working(responding_agent_id, "Responding in thread").await;
-    let result = match state.openclaw.send_message(responding_agent_id, message_text, Some(&agent_context)).await {
+    let result: Result<String, String> = match state.openclaw.send_message(responding_agent_id, message_text, Some(&agent_context)).await {
         Ok(response) => {
             tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
             Ok(response)
@@ -527,7 +527,7 @@ async fn run_dm_turn(
 }
 
 /// Post-DM cleanup: mark agents idle, record cooldowns, release active pair, optionally enqueue action prompt.
-async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload: &serde_json::Value) {
+async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, _payload: &serde_json::Value) {
     state.mark_agent_done(sender_id).await;
     state.mark_agent_done(target_id).await;
 

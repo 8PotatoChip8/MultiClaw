@@ -3343,14 +3343,14 @@ async fn agent_send_file(
         "dest_path": dest_relative,
     }).to_string());
 
-    tracing::info!("File '{}' transferred from {} to {} ({} bytes)", filename, sender.name, receiver.name, notify_size);
+    tracing::info!("File '{}' transferred from {} to {} ({} bytes)", filename, sender.name, receiver.name, size_bytes);
 
     (StatusCode::CREATED, Json(json!({
         "transfer_id": transfer_id,
         "status": "delivered",
         "filename": filename,
         "dest_path": dest_relative,
-        "size_bytes": notify_size,
+        "size_bytes": size_bytes,
     })))
 }
 
