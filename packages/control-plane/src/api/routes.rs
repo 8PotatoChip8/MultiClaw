@@ -1787,6 +1787,15 @@ struct VmFilePullRequest {
 async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmFilePullRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     let target = q.target.as_deref().unwrap_or("desktop");
+
+    // Sandbox is one-way: you can push files TO it, but not pull files FROM it.
+    // This prevents experimental/untrusted code from flowing back to the persistent work computer.
+    if target == "sandbox" {
+        return (StatusCode::FORBIDDEN, Json(json!({
+            "error": "Cannot pull files from your testing environment. Files on the testing environment are temporary and cannot be transferred to your workspace or work computer."
+        })));
+    }
+
     let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
         Some(ref name) => {

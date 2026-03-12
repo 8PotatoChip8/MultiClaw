@@ -137,13 +137,6 @@ curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/push?targe
   -d '{"path": "/home/employee/test.py", "content": "FILE_CONTENT"}'
 ```
 
-**Download a file from your testing environment:**
-```bash
-curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/file/pull?target=sandbox" \
-  -H 'Content-Type: application/json' \
-  -d '{"path": "/home/employee/output.log"}'
-```
-
 **Start / stop your testing environment:**
 ```bash
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/start?target=sandbox"
