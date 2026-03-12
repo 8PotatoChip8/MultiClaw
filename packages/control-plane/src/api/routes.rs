@@ -1918,14 +1918,16 @@ async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery
     if q.agent_only.unwrap_or(false) {
         // Return only threads with agent members and NO user members (agent-to-agent only)
         match sqlx::query_as::<_, Thread>(
-            "SELECT DISTINCT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
+            "SELECT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
              FROM threads t \
-             JOIN thread_members tm ON t.id = tm.thread_id \
-             WHERE tm.member_type = 'AGENT' \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM thread_members tm2 \
-                   WHERE tm2.thread_id = t.id AND tm2.member_type = 'USER' \
-               ) \
+             WHERE EXISTS ( \
+                 SELECT 1 FROM thread_members tm \
+                 WHERE tm.thread_id = t.id AND tm.member_type = 'AGENT' \
+             ) \
+             AND NOT EXISTS ( \
+                 SELECT 1 FROM thread_members tm2 \
+                 WHERE tm2.thread_id = t.id AND tm2.member_type = 'USER' \
+             ) \
              ORDER BY COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id), t.created_at) DESC"
         ).fetch_all(&state.db).await {
             Ok(t) => (StatusCode::OK, Json(json!(t))),
@@ -1934,7 +1936,7 @@ async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery
     } else {
         // Return only threads where the user is a member (excludes agent-only threads)
         match sqlx::query_as::<_, Thread>(
-            "SELECT DISTINCT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
+            "SELECT t.id, t.type, t.title, t.created_by_user_id, t.created_at \
              FROM threads t \
              WHERE EXISTS ( \
                  SELECT 1 FROM thread_members tm \

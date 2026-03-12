@@ -12,7 +12,10 @@ type TabType = 'dms' | 'groups';
 export default function ChatsPage() {
     const [threads, setThreads] = useState<Thread[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);
-    const [selectedThread, setSelectedThread] = useState<string | null>(null);
+    const [selectedThread, setSelectedThread] = useState<string | null>(() => {
+        if (typeof window !== 'undefined') return sessionStorage.getItem('multiclaw-selected-thread');
+        return null;
+    });
     const [activeTab, setActiveTab] = useState<TabType>('dms');
     const [showNewGroup, setShowNewGroup] = useState(false);
     const [showAgentPicker, setShowAgentPicker] = useState(false);
@@ -26,12 +29,21 @@ export default function ChatsPage() {
         return map;
     }, [agents]);
 
+    // Persist selected thread across navigation
+    useEffect(() => {
+        if (selectedThread) sessionStorage.setItem('multiclaw-selected-thread', selectedThread);
+    }, [selectedThread]);
+
     // Load threads and agents
     useEffect(() => {
         api.getThreads().then(d => {
             const list = Array.isArray(d) ? d : [];
             setThreads(list);
-            if (list.length > 0 && !selectedThread) setSelectedThread(list[0].id);
+            if (list.length > 0 && !selectedThread) {
+                setSelectedThread(list[0].id);
+            } else if (selectedThread && list.length > 0 && !list.some(t => t.id === selectedThread)) {
+                setSelectedThread(list[0].id);
+            }
         });
         api.getAgents().then(d => setAgents(Array.isArray(d) ? d : []));
     }, []);
