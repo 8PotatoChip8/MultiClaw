@@ -154,11 +154,15 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
             continue;
         }
 
-        // Process each claimed item concurrently (they're for different agents)
-        let mut handles = Vec::new();
+        // Fire-and-forget: spawn each item as an independent task.
+        // Don't wait for tasks to finish — immediately loop back to claim_work.
+        // claim_work's NOT IN (... WHERE status = 'PROCESSING') filter prevents
+        // double-claiming for agents with in-flight work. When all agents with
+        // pending work are busy, claim_work returns empty and we sleep above.
         for item in items {
             let state_clone = state.clone();
-            let handle = tokio::spawn(async move {
+            let notify_clone = notify.clone();
+            tokio::spawn(async move {
                 let item_id = item.id;
                 let agent_id = item.agent_id;
                 let kind = item.kind.clone();
@@ -180,13 +184,11 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                         mark_failed(&state_clone.db, item_id, &e, item.retry_count, item.max_retries).await;
                     }
                 }
-            });
-            handles.push(handle);
-        }
 
-        // Wait for all concurrent tasks to finish before claiming more work
-        for handle in handles {
-            let _ = handle.await;
+                // Wake queue worker to immediately claim this agent's next
+                // pending item (if any), without waiting for the 5s poll.
+                notify_clone.notify_one();
+            });
         }
 
     }
