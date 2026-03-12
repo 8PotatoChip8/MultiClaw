@@ -1710,8 +1710,8 @@ async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Query(q)
                 match provider.exec_command(
                     name,
                     &body.command,
-                    body.user.as_deref().or(Some("agent")),
-                    body.working_dir.as_deref().or(Some("/home/agent")),
+                    body.user.as_deref().or(Some("ubuntu")),
+                    body.working_dir.as_deref().or(Some("/home/ubuntu")),
                     body.timeout_secs,
                 ).await {
                     Ok(result) => (StatusCode::OK, Json(json!(result))),

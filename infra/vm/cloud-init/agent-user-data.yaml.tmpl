@@ -2,10 +2,7 @@
 hostname: {{HOSTNAME}}
 
 users:
-  - name: agent
-    groups: sudo
-    shell: /bin/bash
-    sudo: ALL=(ALL) NOPASSWD:ALL
+  - default
 
 packages:
   - curl
@@ -14,16 +11,16 @@ packages:
   - git
 
 write_files:
-  - path: /home/agent/.openclaw/openclaw.json
-    owner: agent:agent
+  - path: /home/ubuntu/.openclaw/openclaw.json
+    owner: ubuntu:ubuntu
     permissions: '0644'
     content: |
       {{OPENCLAW_JSON}}
-  
+
   - path: /etc/systemd/system/openclaw-gateway.service
     content: |
       {{OPENCLAW_SERVICE}}
-      
+
   - path: /etc/systemd/system/multiclaw-agentd.service
     content: |
       {{AGENTD_SERVICE}}
@@ -31,7 +28,7 @@ write_files:
 runcmd:
   # Download and run the custom OpenClaw install script from control-plane
   - curl -fsSL http://{{HOST_IP}}:8080/v1/scripts/install-openclaw.sh -o /tmp/install-openclaw.sh
-  - HOST_IP={{HOST_IP}} AGENT_USER=agent bash /tmp/install-openclaw.sh
+  - HOST_IP={{HOST_IP}} AGENT_USER=ubuntu bash /tmp/install-openclaw.sh
 
   # Download multiclaw-agentd sidecar from the control plane
   - curl -o /usr/local/bin/multiclaw-agentd http://{{HOST_IP}}:8080/v1/agentd/download/$(uname -m) || true

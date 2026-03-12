@@ -37,7 +37,7 @@ struct ExecRequest {
 }
 
 async fn exec_handler(Json(body): Json<ExecRequest>) -> Json<Value> {
-    let wd = body.working_dir.unwrap_or_else(|| "/home/agent".into());
+    let wd = body.working_dir.unwrap_or_else(|| "/home/ubuntu".into());
     let secs = body.timeout_secs.unwrap_or(30).min(120);
 
     let result = tokio::time::timeout(

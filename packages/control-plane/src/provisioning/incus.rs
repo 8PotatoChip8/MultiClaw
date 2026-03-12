@@ -313,8 +313,8 @@ impl VmProvider for IncusProvider {
             sleep(Duration::from_secs(1)).await;
         }
 
-        // 7. Wait for cloud-init to finish (creates agent user, installs packages, sets up services).
-        // Without this, vm/exec fails because /home/agent and UID 1000 don't exist yet.
+        // 7. Wait for cloud-init to finish (installs packages, sets up services).
+        // Without this, vm/exec fails because cloud-init hasn't finished configuring the VM.
         if ip.is_some() {
             let mut cloud_ready = false;
             for attempt in 0..90 {
