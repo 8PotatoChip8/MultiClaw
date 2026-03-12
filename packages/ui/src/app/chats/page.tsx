@@ -179,36 +179,39 @@ export default function ChatsPage() {
                                     transition: 'all 0.15s',
                                 }}
                             >
-                                <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                    <div style={{ position: 'relative', flexShrink: 0 }}>
-                                        <div style={{
-                                            width: '28px', height: '28px', borderRadius: '50%',
-                                            background: 'linear-gradient(135deg, var(--primary), var(--accent))',
-                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                            fontSize: '11px', fontWeight: 700, color: '#fff',
-                                        }}>
-                                            {(t.title || 'D')[0].toUpperCase()}
+                                {(() => {
+                                    const dmName = (t.title || '').replace(/^DM with /, '');
+                                    const agent = agentByName[dmName];
+                                    const presence = agent ? presenceMap[agent.id] : undefined;
+                                    return (
+                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                            <div style={{ position: 'relative', flexShrink: 0 }}>
+                                                <div style={{
+                                                    width: '28px', height: '28px', borderRadius: '50%',
+                                                    background: 'linear-gradient(135deg, var(--primary), var(--accent))',
+                                                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                                    fontSize: '11px', fontWeight: 700, color: '#fff',
+                                                }}>
+                                                    {(dmName || 'D')[0].toUpperCase()}
+                                                </div>
+                                                {presence && (
+                                                    <span style={{
+                                                        position: 'absolute', bottom: '-1px', right: '-1px',
+                                                        width: '10px', height: '10px', borderRadius: '50%',
+                                                        backgroundColor: presence.presenceStatus === 'Busy' ? '#f59e0b' : presence.presenceStatus === 'Active' ? '#22c55e' : '#6b7280',
+                                                        border: '2px solid rgba(10, 14, 26, 0.8)',
+                                                        animation: presence.presenceStatus === 'Busy' ? 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' : 'none',
+                                                    }} />
+                                                )}
+                                            </div>
+                                            <div style={{ overflow: 'hidden' }}>
+                                                <div style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                    {dmName || 'Direct Message'}
+                                                </div>
+                                            </div>
                                         </div>
-                                        {(() => {
-                                            const agent = agentByName[t.title || ''];
-                                            const presence = agent ? presenceMap[agent.id] : undefined;
-                                            return presence ? (
-                                                <span style={{
-                                                    position: 'absolute', bottom: '-1px', right: '-1px',
-                                                    width: '10px', height: '10px', borderRadius: '50%',
-                                                    backgroundColor: presence.presenceStatus === 'Busy' ? '#f59e0b' : presence.presenceStatus === 'Active' ? '#22c55e' : '#6b7280',
-                                                    border: '2px solid rgba(10, 14, 26, 0.8)',
-                                                    animation: presence.presenceStatus === 'Busy' ? 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' : 'none',
-                                                }} />
-                                            ) : null;
-                                        })()}
-                                    </div>
-                                    <div style={{ overflow: 'hidden' }}>
-                                        <div style={{ fontSize: '13px', fontWeight: 500, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                                            {t.title || 'Direct Message'}
-                                        </div>
-                                    </div>
-                                </div>
+                                    );
+                                })()}
                             </div>
                         ))
                     ) : (
@@ -255,7 +258,9 @@ export default function ChatsPage() {
                         initialMessages={[]}
                         dmAgent={(() => {
                             const t = threads.find(t => t.id === selectedThread);
-                            return t?.type === 'DM' ? agentByName[t.title || ''] : undefined;
+                            if (t?.type !== 'DM') return undefined;
+                            const title = t.title || '';
+                            return agentByName[title] || agentByName[title.replace(/^DM with /, '')];
                         })()}
                         presenceMap={presenceMap}
                     />
