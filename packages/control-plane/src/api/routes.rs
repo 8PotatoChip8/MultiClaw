@@ -1878,7 +1878,7 @@ async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery
                    SELECT 1 FROM thread_members tm2 \
                    WHERE tm2.thread_id = t.id AND tm2.member_type = 'USER' \
                ) \
-             ORDER BY t.created_at DESC"
+             ORDER BY COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id), t.created_at) DESC"
         ).fetch_all(&state.db).await {
             Ok(t) => (StatusCode::OK, Json(json!(t))),
             Err(_) => (StatusCode::OK, Json(json!([])))
@@ -1892,7 +1892,7 @@ async fn get_threads(State(state): State<AppState>, Query(q): Query<ThreadsQuery
                  SELECT 1 FROM thread_members tm \
                  WHERE tm.thread_id = t.id AND tm.member_type = 'USER' \
              ) \
-             ORDER BY t.created_at DESC"
+             ORDER BY COALESCE((SELECT MAX(m.created_at) FROM messages m WHERE m.thread_id = t.id), t.created_at) DESC"
         ).fetch_all(&state.db).await {
             Ok(t) => (StatusCode::OK, Json(json!(t))),
             Err(_) => (StatusCode::OK, Json(json!([])))
