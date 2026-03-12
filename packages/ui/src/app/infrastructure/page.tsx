@@ -54,7 +54,24 @@ export default function InfrastructurePage() {
     const fetchContainers = useCallback(async () => {
         try {
             const data = await api.getContainers();
-            setContainers(Array.isArray(data) ? data : []);
+            const list = Array.isArray(data) ? data : [];
+            setContainers(list);
+
+            // Refresh logs for any expanded containers
+            setExpandedLogs(prev => {
+                const openIds = Object.keys(prev);
+                if (openIds.length === 0) return prev;
+                const nameById = new Map(list.map(c => [c.ID, c.Names?.replace(/^\//, '')]));
+                for (const id of openIds) {
+                    const name = nameById.get(id);
+                    if (name) {
+                        api.getContainerLogs(name, 200).then(d => {
+                            setExpandedLogs(cur => cur[id] !== undefined ? { ...cur, [id]: d?.logs || 'No logs available' } : cur);
+                        }).catch(() => {});
+                    }
+                }
+                return prev;
+            });
         } catch (e) {
             console.error('Failed to fetch containers:', e);
         }
