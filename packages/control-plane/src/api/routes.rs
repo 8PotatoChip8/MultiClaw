@@ -213,6 +213,42 @@ fn fix_punctuation_spacing(s: &str) -> String {
     result
 }
 
+/// Fix Markdown bold markers broken by streaming: "** word" → "**word", "word **" → "word**".
+/// The tokenizer sometimes emits "**" and the word as separate tokens with a space between.
+fn fix_markdown_bold_spacing(s: &str) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let len = chars.len();
+    let mut result = String::with_capacity(s.len());
+    let mut i = 0;
+
+    while i < len {
+        // Opening bold: "** " followed by an alphanumeric char → remove the space
+        if i + 3 < len && chars[i] == '*' && chars[i + 1] == '*' && chars[i + 2] == ' ' && chars[i + 3].is_alphanumeric() {
+            // Only if preceded by start-of-string, whitespace, or newline (opening context)
+            if i == 0 || chars[i - 1].is_whitespace() || chars[i - 1] == '\n' {
+                result.push('*');
+                result.push('*');
+                i += 3; // skip the space
+                continue;
+            }
+        }
+        // Closing bold: " **" preceded by an alphanumeric char → remove the space
+        if i + 2 < len && chars[i] == ' ' && chars[i + 1] == '*' && chars[i + 2] == '*' {
+            if i > 0 && chars[i - 1].is_alphanumeric() {
+                // Check that the ** is followed by end-of-string, whitespace, newline, or punctuation
+                let after = if i + 3 < len { chars[i + 3] } else { '\n' };
+                if after.is_whitespace() || after == '\n' || after.is_ascii_punctuation() {
+                    i += 1; // skip the space, let ** be pushed next iteration
+                    continue;
+                }
+            }
+        }
+        result.push(chars[i]);
+        i += 1;
+    }
+    result
+}
+
 /// Fix mid-word spaces from streaming token assembly.
 /// The tokenizer sometimes splits words across tokens, producing "Under stood",
 /// "H ire", etc.  Two-tier approach:
@@ -586,6 +622,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("[ ]", "");
     // Fix spacing artifacts: space before punctuation/contractions from token boundaries
     text = fix_punctuation_spacing(&text);
+    // Fix broken Markdown bold markers: "** word" → "**word" (streaming splits ** from the word)
+    text = fix_markdown_bold_spacing(&text);
     // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
     text = fix_broken_words(&text);
     // Strip pure narration lines (runs AFTER newline/word fixes so streaming fragments
@@ -5275,6 +5313,27 @@ mod tests {
         assert_eq!(fix_broken_words("Go ahead and start"), "Go ahead and start");
         assert_eq!(fix_broken_words("Set everything up"), "Set everything up");
         assert_eq!(fix_broken_words("All systems ready"), "All systems ready");
+    }
+
+    // ── fix_markdown_bold_spacing ───────────────────────────────────
+
+    #[test]
+    fn markdown_bold_opening_space() {
+        assert_eq!(fix_markdown_bold_spacing("** Status Update:**"), "**Status Update:**");
+        assert_eq!(fix_markdown_bold_spacing("** Hello** world"), "**Hello** world");
+    }
+
+    #[test]
+    fn markdown_bold_closing_space() {
+        assert_eq!(fix_markdown_bold_spacing("**Update **:"), "**Update**:");
+    }
+
+    #[test]
+    fn markdown_bold_preserves_normal() {
+        assert_eq!(fix_markdown_bold_spacing("**Status Update:**"), "**Status Update:**");
+        assert_eq!(fix_markdown_bold_spacing("no bold here"), "no bold here");
+        // Don't collapse ** in the middle of text (not a bold marker)
+        assert_eq!(fix_markdown_bold_spacing("a ** b"), "a ** b");
     }
 
     // ── word_overlap_ratio ─────────────────────────────────────────
