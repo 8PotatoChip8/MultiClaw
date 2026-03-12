@@ -237,7 +237,16 @@ export default function ChatsPage() {
             {/* Right Panel — Chat */}
             <div style={{ flex: 1 }}>
                 {selectedThread ? (
-                    <Chat threadId={selectedThread} threadType={threads.find(t => t.id === selectedThread)?.type} initialMessages={[]} />
+                    <Chat
+                        threadId={selectedThread}
+                        threadType={threads.find(t => t.id === selectedThread)?.type}
+                        initialMessages={[]}
+                        dmAgent={(() => {
+                            const t = threads.find(t => t.id === selectedThread);
+                            return t?.type === 'DM' ? agentByName[t.title || ''] : undefined;
+                        })()}
+                        presenceMap={presenceMap}
+                    />
                 ) : (
                     <div className="panel" style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '0 12px 12px 0' }}>
                         <div style={{ textAlign: 'center' }}>

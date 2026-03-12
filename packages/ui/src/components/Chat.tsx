@@ -2,19 +2,28 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../lib/api';
 import { useMultiClawEvents } from '../lib/ws';
+import { AgentPresence } from '../lib/ws';
 import { Message, Agent } from '../lib/types';
 import MarkdownText from './MarkdownText';
-import { Send, Loader2, Plus, UserMinus, Users, X, Copy, Check } from 'lucide-react';
+import AgentStatus from './AgentStatus';
+import Link from 'next/link';
+import { Send, Loader2, Plus, UserMinus, Users, X, Copy, Check, ExternalLink } from 'lucide-react';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
+
+const ROLE_COLORS: Record<string, string> = {
+    MAIN: 'var(--accent)', CEO: 'var(--primary)', MANAGER: 'var(--success)', WORKER: 'var(--text-muted)'
+};
 
 interface ChatProps {
     threadId: string;
     threadType?: string;
     initialMessages: any[];
+    dmAgent?: Agent;
+    presenceMap?: Record<string, AgentPresence>;
 }
 
-export default function Chat({ threadId, threadType, initialMessages }: ChatProps) {
+export default function Chat({ threadId, threadType, initialMessages, dmAgent, presenceMap }: ChatProps) {
     const [messages, setMessages] = useState<Message[]>([]);
     const [input, setInput] = useState('');
     const [sending, setSending] = useState(false);
@@ -22,12 +31,15 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
     const [participants, setParticipants] = useState<Participant[]>([]);
     const [agents, setAgents] = useState<Agent[]>([]);
     const [showAddMember, setShowAddMember] = useState(false);
+    const [showProfile, setShowProfile] = useState(false);
     const [hoveredMsg, setHoveredMsg] = useState<string | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const bottomRef = useRef<HTMLDivElement>(null);
     const event = useMultiClawEvents();
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const isGroup = threadType === 'GROUP';
+
+    const presence = dmAgent && presenceMap ? presenceMap[dmAgent.id] : undefined;
 
     useEffect(() => {
         api.getMessages(threadId).then(d => setMessages(Array.isArray(d) ? d : []));
@@ -59,6 +71,10 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
     useEffect(() => {
         bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [messages]);
+
+    useEffect(() => {
+        setShowProfile(false);
+    }, [threadId]);
 
     const handleSend = async () => {
         if (!input.trim() || sending) return;
@@ -131,6 +147,7 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
 
     const getSenderLabel = (msg: Message) => {
         if (msg.sender_type === 'USER') return 'You';
+        if (dmAgent && msg.sender_id === dmAgent.id) return `🤖 ${dmAgent.name}`;
         const agent = agentMap.get(msg.sender_id);
         if (agent) return `🤖 ${agent.name}`;
         return '🤖 Agent';
@@ -146,7 +163,62 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
     const nonMemberAgents = agents.filter(a => !agentParticipants.some(p => p.member_id === a.id));
 
     return (
-        <div className="panel no-hover" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: '0' }}>
+        <div className="panel no-hover" style={{ height: '100%', display: 'flex', flexDirection: 'column', padding: '0', position: 'relative' }}>
+            {/* DM header bar */}
+            {dmAgent && (
+                <div
+                    onClick={() => setShowProfile(!showProfile)}
+                    style={{
+                        padding: '10px 16px',
+                        borderBottom: '1px solid var(--border)',
+                        display: 'flex', alignItems: 'center', gap: '12px',
+                        cursor: 'pointer',
+                        transition: 'background 0.15s',
+                        background: showProfile ? 'var(--primary-glow)' : 'transparent',
+                    }}
+                    onMouseOver={e => { if (!showProfile) e.currentTarget.style.background = 'rgba(255,255,255,0.03)'; }}
+                    onMouseOut={e => { if (!showProfile) e.currentTarget.style.background = 'transparent'; }}
+                >
+                    <div style={{ position: 'relative', flexShrink: 0 }}>
+                        <div style={{
+                            width: '34px', height: '34px', borderRadius: '50%',
+                            background: `linear-gradient(135deg, ${ROLE_COLORS[dmAgent.role] || 'var(--primary)'}, var(--accent))`,
+                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                            fontSize: '13px', fontWeight: 700, color: '#fff',
+                        }}>
+                            {dmAgent.name[0].toUpperCase()}
+                        </div>
+                        {presence && (
+                            <span style={{
+                                position: 'absolute', bottom: '-1px', right: '-1px',
+                                width: '10px', height: '10px', borderRadius: '50%',
+                                backgroundColor: presence.presenceStatus === 'Busy' ? '#f59e0b' : presence.presenceStatus === 'Active' ? '#22c55e' : '#6b7280',
+                                border: '2px solid var(--bg)',
+                                animation: presence.presenceStatus === 'Busy' ? 'pulse 2s cubic-bezier(0.4,0,0.6,1) infinite' : 'none',
+                            }} />
+                        )}
+                    </div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: '14px', fontWeight: 600 }}>{dmAgent.name}</div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <AgentStatus
+                                presence={presence?.presenceStatus ?? 'Active'}
+                                showLabel={true}
+                                size={7}
+                            />
+                            {presence?.presenceStatus === 'Busy' && presence.task && (
+                                <span style={{
+                                    fontSize: '11px', color: 'var(--text-muted)',
+                                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                                }}>
+                                    — {presence.task}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
+
             {/* Group header with participants */}
             {isGroup && agentParticipants.length > 0 && (
                 <div style={{
@@ -198,68 +270,177 @@ export default function Chat({ threadId, threadType, initialMessages }: ChatProp
                 </div>
             )}
 
-            {/* Messages */}
-            <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
-                {messages.length === 0 && (
-                    <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px' }}>No messages yet. Start the conversation!</p>
-                )}
-                {messages.map(msg => (
-                    <div key={msg.id} style={{
-                        display: 'flex',
-                        justifyContent: msg.sender_type === 'USER' ? 'flex-end' : 'flex-start',
-                        marginBottom: '12px',
-                    }}>
-                        <div
-                            style={{ position: 'relative', maxWidth: '70%' }}
-                            onMouseEnter={() => setHoveredMsg(msg.id)}
-                            onMouseLeave={() => setHoveredMsg(null)}
-                        >
+            {/* Main content area: messages + optional profile panel */}
+            <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
+                {/* Messages */}
+                <div style={{ flex: 1, overflowY: 'auto', padding: '20px' }}>
+                    {messages.length === 0 && (
+                        <p style={{ color: 'var(--text-muted)', textAlign: 'center', marginTop: '40px' }}>No messages yet. Start the conversation!</p>
+                    )}
+                    {messages.map(msg => (
+                        <div key={msg.id} style={{
+                            display: 'flex',
+                            justifyContent: msg.sender_type === 'USER' ? 'flex-end' : 'flex-start',
+                            marginBottom: '12px',
+                        }}>
+                            <div
+                                style={{ position: 'relative', maxWidth: '70%' }}
+                                onMouseEnter={() => setHoveredMsg(msg.id)}
+                                onMouseLeave={() => setHoveredMsg(null)}
+                            >
+                                <div style={{
+                                    padding: '10px 16px',
+                                    borderRadius: msg.sender_type === 'USER' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
+                                    background: msg.sender_type === 'USER' ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'rgba(30,40,68,0.9)',
+                                    fontSize: '14px',
+                                    lineHeight: '1.5',
+                                }}>
+                                    <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', marginBottom: '4px', fontWeight: 600 }}>
+                                        {getSenderLabel(msg)}
+                                    </div>
+                                    <MarkdownText>{getContent(msg)}</MarkdownText>
+                                </div>
+                                {hoveredMsg === msg.id && (
+                                    <button
+                                        onClick={() => handleCopy(msg.id, getContent(msg))}
+                                        title="Copy message"
+                                        style={{
+                                            position: 'absolute', top: '6px', right: '-32px',
+                                            background: 'rgba(30,40,68,0.9)', border: '1px solid var(--border)',
+                                            borderRadius: '6px', padding: '4px', cursor: 'pointer',
+                                            color: copiedId === msg.id ? 'var(--success)' : 'var(--text-muted)',
+                                            display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                            transition: 'color 0.2s',
+                                        }}
+                                    >
+                                        {copiedId === msg.id ? <Check size={14} /> : <Copy size={14} />}
+                                    </button>
+                                )}
+                            </div>
+                        </div>
+                    ))}
+                    {agentTyping && (
+                        <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: '12px' }}>
                             <div style={{
                                 padding: '10px 16px',
-                                borderRadius: msg.sender_type === 'USER' ? '16px 16px 4px 16px' : '16px 16px 16px 4px',
-                                background: msg.sender_type === 'USER' ? 'linear-gradient(135deg, var(--primary), var(--accent))' : 'rgba(30,40,68,0.9)',
-                                fontSize: '14px',
-                                lineHeight: '1.5',
+                                borderRadius: '16px 16px 16px 4px',
+                                background: 'rgba(30,40,68,0.9)', fontSize: '14px',
+                                display: 'flex', alignItems: 'center', gap: '8px',
                             }}>
-                                <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', marginBottom: '4px', fontWeight: 600 }}>
-                                    {getSenderLabel(msg)}
+                                <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', fontWeight: 600 }}>
+                                    {dmAgent ? `🤖 ${dmAgent.name}` : '🤖 Agent'}
                                 </div>
-                                <MarkdownText>{getContent(msg)}</MarkdownText>
+                                <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: 'var(--primary)' }} />
+                                <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Thinking...</span>
                             </div>
-                            {hoveredMsg === msg.id && (
-                                <button
-                                    onClick={() => handleCopy(msg.id, getContent(msg))}
-                                    title="Copy message"
-                                    style={{
-                                        position: 'absolute', top: '6px', right: '-32px',
-                                        background: 'rgba(30,40,68,0.9)', border: '1px solid var(--border)',
-                                        borderRadius: '6px', padding: '4px', cursor: 'pointer',
-                                        color: copiedId === msg.id ? 'var(--success)' : 'var(--text-muted)',
-                                        display: 'flex', alignItems: 'center', justifyContent: 'center',
-                                        transition: 'color 0.2s',
-                                    }}
-                                >
-                                    {copiedId === msg.id ? <Check size={14} /> : <Copy size={14} />}
-                                </button>
+                        </div>
+                    )}
+                    <div ref={bottomRef} />
+                </div>
+
+                {/* Agent Profile Side Panel */}
+                {showProfile && dmAgent && (
+                    <div style={{
+                        width: '280px', minWidth: '280px',
+                        borderLeft: '1px solid var(--border)',
+                        background: 'rgba(10, 14, 26, 0.8)',
+                        overflowY: 'auto',
+                        display: 'flex', flexDirection: 'column',
+                    }}>
+                        {/* Close button */}
+                        <div style={{ padding: '12px 16px', display: 'flex', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setShowProfile(false)}
+                                style={{ background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '4px' }}
+                            >
+                                <X size={16} />
+                            </button>
+                        </div>
+
+                        {/* Avatar */}
+                        <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', padding: '0 20px 20px' }}>
+                            <div style={{
+                                width: '72px', height: '72px', borderRadius: '50%',
+                                background: `linear-gradient(135deg, ${ROLE_COLORS[dmAgent.role] || 'var(--primary)'}, var(--accent))`,
+                                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                                fontSize: '28px', fontWeight: 700, color: '#fff',
+                                marginBottom: '12px',
+                            }}>
+                                {dmAgent.name[0].toUpperCase()}
+                            </div>
+
+                            {/* Name */}
+                            <div style={{ fontSize: '16px', fontWeight: 700, textAlign: 'center' }}>{dmAgent.name}</div>
+
+                            {/* Handle */}
+                            {dmAgent.handle && (
+                                <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginTop: '2px' }}>@{dmAgent.handle}</div>
+                            )}
+
+                            {/* Status */}
+                            <div style={{ marginTop: '8px' }}>
+                                <AgentStatus
+                                    presence={presence?.presenceStatus ?? 'Active'}
+                                    showLabel={true}
+                                    size={9}
+                                />
+                            </div>
+
+                            {/* Busy task */}
+                            {presence?.presenceStatus === 'Busy' && presence.task && (
+                                <div style={{
+                                    marginTop: '6px', fontSize: '11px', color: 'var(--text-muted)',
+                                    textAlign: 'center', fontStyle: 'italic',
+                                }}>
+                                    {presence.task}
+                                </div>
                             )}
                         </div>
-                    </div>
-                ))}
-                {agentTyping && (
-                    <div style={{ display: 'flex', justifyContent: 'flex-start', marginBottom: '12px' }}>
-                        <div style={{
-                            padding: '10px 16px',
-                            borderRadius: '16px 16px 16px 4px',
-                            background: 'rgba(30,40,68,0.9)', fontSize: '14px',
-                            display: 'flex', alignItems: 'center', gap: '8px',
-                        }}>
-                            <div style={{ fontSize: '11px', color: 'rgba(255,255,255,0.6)', fontWeight: 600 }}>🤖 Agent</div>
-                            <Loader2 size={14} style={{ animation: 'spin 1s linear infinite', color: 'var(--primary)' }} />
-                            <span style={{ color: 'var(--text-muted)', fontSize: '13px' }}>Thinking...</span>
+
+                        {/* Info sections */}
+                        <div style={{ padding: '0 20px 20px', display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                            {/* Role */}
+                            <div>
+                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Role</div>
+                                <span className={`badge ${dmAgent.role === 'CEO' ? 'external' : dmAgent.role === 'MANAGER' ? 'internal' : 'active'}`} style={{ fontSize: '11px' }}>
+                                    {dmAgent.role}
+                                </span>
+                            </div>
+
+                            {/* Specialty */}
+                            {dmAgent.specialty && (
+                                <div>
+                                    <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Specialty</div>
+                                    <div style={{ fontSize: '13px', lineHeight: '1.4' }}>{dmAgent.specialty}</div>
+                                </div>
+                            )}
+
+                            {/* Model */}
+                            <div>
+                                <div style={{ fontSize: '10px', color: 'var(--text-muted)', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: '4px' }}>Model</div>
+                                <div style={{ fontSize: '13px', color: 'var(--text-muted)' }}>{dmAgent.effective_model}</div>
+                            </div>
+
+                            {/* View full profile link */}
+                            <Link
+                                href={`/agents/${dmAgent.id}`}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: '6px',
+                                    fontSize: '12px', color: 'var(--primary)', fontWeight: 500,
+                                    textDecoration: 'none', marginTop: '4px',
+                                    padding: '8px 12px', borderRadius: '8px',
+                                    border: '1px solid var(--border)',
+                                    transition: 'background 0.15s',
+                                }}
+                                onMouseOver={e => (e.currentTarget.style.background = 'var(--primary-glow)')}
+                                onMouseOut={e => (e.currentTarget.style.background = 'transparent')}
+                            >
+                                <ExternalLink size={12} />
+                                View full profile
+                            </Link>
                         </div>
                     </div>
                 )}
-                <div ref={bottomRef} />
             </div>
 
             {/* Input */}
