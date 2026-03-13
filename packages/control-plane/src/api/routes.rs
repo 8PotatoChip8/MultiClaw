@@ -2968,18 +2968,14 @@ async fn agent_dm(
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 10 agent messages per minute"})));
     }
 
-    // Prevent concurrent DM conversations between the same pair
+    // Prevent concurrent DM conversations between the same pair (atomic check-and-set)
     {
-        let active = state.active_dm_pairs.read().await;
-        if active.contains(&pair_key) {
+        let mut active = state.active_dm_pairs.write().await;
+        if !active.insert(pair_key) {
             return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
                 "error": "A DM conversation between these agents is already in progress."
             })));
         }
-    }
-    {
-        let mut active = state.active_dm_pairs.write().await;
-        active.insert(pair_key);
     }
 
     // Find existing agent-to-agent DM (no USER members)
@@ -3015,6 +3011,35 @@ async fn agent_dm(
             .bind(tid).bind(target_id).execute(&state.db).await;
         tid
     };
+
+    // Suppress stale re-narrations: if both agents already exchanged messages in
+    // this thread within the last 5 minutes, the real conversation already happened
+    // via dm_initiate/dm_continue. This new DM is likely a stale re-narration from
+    // an action_prompt that ran after the conversation ended.
+    {
+        let distinct_recent_senders: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(DISTINCT sender_id) FROM messages \
+             WHERE thread_id = $1 AND sender_type = 'AGENT' \
+               AND created_at > NOW() - INTERVAL '5 minutes' \
+               AND sender_id IN ($2, $3)"
+        )
+        .bind(thread_id).bind(sender_id).bind(target_id)
+        .fetch_optional(&state.db).await.ok().flatten();
+
+        if distinct_recent_senders.unwrap_or(0) >= 2 {
+            tracing::info!(
+                "agent_dm: suppressed stale DM from {} to {} (recent conversation in thread {})",
+                sender_id, target_id, thread_id
+            );
+            let mut active = state.active_dm_pairs.write().await;
+            active.remove(&pair_key);
+            return (StatusCode::OK, Json(json!({
+                "status": "suppressed",
+                "reason": "A conversation between you and this agent just occurred.",
+                "thread_id": thread_id
+            })));
+        }
+    }
 
     // Insert message (strip tags + scrub secrets before storing)
     let msg_id = Uuid::new_v4();

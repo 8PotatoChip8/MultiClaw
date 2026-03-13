@@ -387,6 +387,37 @@ pub async fn handle_dm_outbound(state: &AppState, payload: &serde_json::Value) -
     let message_text = str_from_json(payload, "message_text")?;
     let raw_message = str_from_json(payload, "raw_message")?;
 
+    // Redundancy check: skip if this message substantially overlaps with the
+    // sender's last message in this thread (catches stale re-narrations from
+    // action_prompts that slip past the 5-minute suppression in agent_dm).
+    {
+        let prev_text: Option<String> = sqlx::query_scalar(
+            "SELECT content->>'text' FROM messages \
+             WHERE thread_id = $1 AND sender_id = $2 AND sender_type = 'AGENT' \
+             ORDER BY created_at DESC LIMIT 1"
+        )
+        .bind(thread_id).bind(sender_id)
+        .fetch_optional(&state.db).await.ok().flatten();
+
+        if let Some(prev) = prev_text {
+            let overlap = word_overlap_ratio(&prev, message_text);
+            if overlap > 0.5 {
+                tracing::info!(
+                    "dm_outbound: suppressed redundant message from {} in thread {} (overlap {:.0}%)",
+                    sender_id, thread_id, overlap * 100.0
+                );
+                // Release active-conversation lock
+                let pair_key_a = uuid_from_json(payload, "pair_key_a").ok();
+                let pair_key_b = uuid_from_json(payload, "pair_key_b").ok();
+                if let (Some(a), Some(b)) = (pair_key_a, pair_key_b) {
+                    let mut active = state.active_dm_pairs.write().await;
+                    active.remove(&(a, b));
+                }
+                return Ok(());
+            }
+        }
+    }
+
     // 1. INSERT the sender's message into the DB
     let content = json!({"text": message_text});
     match sqlx::query_as::<_, Message>(
