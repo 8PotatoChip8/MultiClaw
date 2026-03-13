@@ -142,6 +142,10 @@ export const api = {
     updateSettings: (data: Record<string, string>) =>
         request('/system/settings', { method: 'PUT', body: JSON.stringify(data) }),
 
+    // Rewrite
+    rewrite: (data: { text: string; model?: string }) =>
+        request('/rewrite', { method: 'POST', body: JSON.stringify(data) }),
+
     // World
     getWorldSnapshot: () => request('/world/snapshot'),
 

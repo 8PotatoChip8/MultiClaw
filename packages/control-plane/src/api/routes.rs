@@ -765,6 +765,8 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/system/update", post(system_update))
         .route("/v1/system/containers", get(list_containers))
         .route("/v1/system/containers/:id/logs", get(get_container_logs))
+        // Rewrite
+        .route("/v1/rewrite", post(rewrite_text))
         // World
         .route("/v1/world/snapshot", get(world_snapshot))
         // Events WS
@@ -4613,6 +4615,84 @@ async fn update_system_settings(State(state): State<AppState>, Json(body): Json<
 // ═══════════════════════════════════════════════════════════════
 // World Snapshot
 // ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// Rewrite
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct RewriteRequest {
+    text: String,
+    model: Option<String>,
+}
+
+async fn rewrite_text(
+    State(state): State<AppState>,
+    Json(body): Json<RewriteRequest>,
+) -> impl IntoResponse {
+    // Determine model: request body → system setting → default
+    let model = if let Some(m) = body.model {
+        m
+    } else {
+        let setting: Option<(String,)> = sqlx::query_as(
+            "SELECT value FROM system_meta WHERE key = 'rewrite_model'"
+        )
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+        setting.map(|s| s.0).unwrap_or_else(|| "glm-5:cloud".to_string())
+    };
+
+    let system_prompt = "You are a message rewriting assistant. The user will give you a draft \
+        message they want to send to someone. Rewrite it to be clearer, more structured, and \
+        concise while preserving ALL details, intent, and meaning. Output ONLY the rewritten \
+        message — no explanations, no preamble, no quotes around it.";
+
+    let ollama_url = format!("{}/api/chat", state.config.ollama_url);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let chat_req = json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": system_prompt },
+            { "role": "user", "content": body.text }
+        ],
+        "stream": false,
+        "tools": []
+    });
+
+    let resp = client.post(&ollama_url).json(&chat_req).send().await;
+    match resp {
+        Ok(r) => {
+            let status = r.status();
+            if !status.is_success() {
+                let err_text = r.text().await.unwrap_or_default();
+                return (StatusCode::BAD_GATEWAY, Json(json!({
+                    "error": format!("Ollama returned {}: {}", status, err_text)
+                })));
+            }
+            match r.json::<Value>().await {
+                Ok(val) => {
+                    let rewritten = val["message"]["content"]
+                        .as_str()
+                        .unwrap_or("")
+                        .to_string();
+                    (StatusCode::OK, Json(json!({ "rewritten": rewritten })))
+                }
+                Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({
+                    "error": format!("Failed to parse Ollama response: {}", e)
+                }))),
+            }
+        }
+        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({
+            "error": format!("Failed to reach Ollama: {}", e)
+        }))),
+    }
+}
 
 /// Aggregated snapshot endpoint for the 3D world view.
 /// Returns companies, agents, balances, activities, and VM states in one call.

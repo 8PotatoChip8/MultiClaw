@@ -232,39 +232,35 @@ export default function AgentDetailPage() {
                         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '12px' }}>
                             <div>
                                 <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '4px' }}>Model</div>
-                                {agent.role === 'CEO' ? (
-                                    editingModel ? (
-                                        <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
-                                            <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)}
-                                                style={{ flex: 1, fontSize: '13px' }}>
-                                                {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                                            </select>
-                                            <button className="button small" disabled={modelSaving} onClick={async () => {
-                                                setModelSaving(true);
-                                                await api.patchAgent(id, { preferred_model: selectedModel });
-                                                setModelSaving(false);
-                                                setEditingModel(false);
-                                                load();
-                                            }} style={{ fontSize: '11px', padding: '4px 10px' }}>
-                                                {modelSaving ? '...' : 'Save'}
-                                            </button>
-                                            <button onClick={() => { setEditingModel(false); setSelectedModel(agent.effective_model); }}
-                                                style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0 }}>
-                                                <X size={14} />
-                                            </button>
-                                        </div>
-                                    ) : (
-                                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                                            <span style={{ fontSize: '14px', fontWeight: 500 }}>{agent.effective_model}</span>
-                                            <button onClick={() => { setSelectedModel(agent.effective_model); setEditingModel(true); }}
-                                                style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '4px',
-                                                    cursor: 'pointer', color: 'var(--text-muted)', fontSize: '11px', padding: '2px 8px' }}>
-                                                Change
-                                            </button>
-                                        </div>
-                                    )
+                                {editingModel ? (
+                                    <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                                        <select value={selectedModel} onChange={e => setSelectedModel(e.target.value)}
+                                            style={{ flex: 1, fontSize: '13px' }}>
+                                            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                        </select>
+                                        <button className="button small" disabled={modelSaving} onClick={async () => {
+                                            setModelSaving(true);
+                                            await api.patchAgent(id, { preferred_model: selectedModel });
+                                            setModelSaving(false);
+                                            setEditingModel(false);
+                                            load();
+                                        }} style={{ fontSize: '11px', padding: '4px 10px' }}>
+                                            {modelSaving ? '...' : 'Save'}
+                                        </button>
+                                        <button onClick={() => { setEditingModel(false); setSelectedModel(agent.effective_model); }}
+                                            style={{ background: 'none', border: 'none', cursor: 'pointer', color: 'var(--text-muted)', padding: 0 }}>
+                                            <X size={14} />
+                                        </button>
+                                    </div>
                                 ) : (
-                                    <div style={{ fontSize: '14px', fontWeight: 500 }}>{agent.effective_model}</div>
+                                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                        <span style={{ fontSize: '14px', fontWeight: 500 }}>{agent.effective_model}</span>
+                                        <button onClick={() => { setSelectedModel(agent.effective_model); setEditingModel(true); }}
+                                            style={{ background: 'none', border: '1px solid var(--border)', borderRadius: '4px',
+                                                cursor: 'pointer', color: 'var(--text-muted)', fontSize: '11px', padding: '2px 8px' }}>
+                                            Change
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                             {[

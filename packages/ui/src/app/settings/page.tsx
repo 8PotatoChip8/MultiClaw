@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart, Cpu, X, Star, Plus } from 'lucide-react';
+import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart, Cpu, X, Star, Plus, Sparkles } from 'lucide-react';
 
 type Channel = 'stable' | 'beta' | 'dev';
 
@@ -27,6 +27,9 @@ export default function SettingsPage() {
     const [modelsSaving, setModelsSaving] = useState(false);
     const [modelsSaved, setModelsSaved] = useState(false);
     const [pullStatus, setPullStatus] = useState<Record<string, { status: string; error?: string }>>({});
+    const [rewriteModel, setRewriteModel] = useState('glm-5:cloud');
+    const [rewriteSaving, setRewriteSaving] = useState(false);
+    const [rewriteSaved, setRewriteSaved] = useState(false);
 
     useEffect(() => {
         api.getSettings().then(data => {
@@ -34,6 +37,7 @@ export default function SettingsPage() {
                 setSettings(data);
                 if (data.update_channel) setSelectedChannel(data.update_channel as Channel);
                 if (data.heartbeat_interval_secs) setHeartbeatSecs(data.heartbeat_interval_secs);
+                if (data.rewrite_model) setRewriteModel(data.rewrite_model);
             }
         });
         api.getModels().then(data => {
@@ -306,6 +310,55 @@ export default function SettingsPage() {
                 <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '12px' }}>
                     Set to 0 to disable. When nothing needs attention, each heartbeat costs very little (a short prompt + a silent OK response).
                     Takes effect on the next cycle — no restart required.
+                </p>
+            </div>
+
+            {/* Message Rewrite Model */}
+            <div className="panel" style={{ maxWidth: '700px', marginBottom: '24px' }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '12px' }}>
+                    <div>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
+                            <Sparkles size={18} style={{ color: 'var(--primary)' }} />
+                            <h2 style={{ fontSize: '18px', fontWeight: 600 }}>Message Rewrite Model</h2>
+                        </div>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)' }}>
+                            AI model used to rewrite and improve your messages before sending
+                        </p>
+                    </div>
+                    {rewriteSaved && (
+                        <span style={{ display: 'flex', alignItems: 'center', gap: '4px', fontSize: '12px', color: 'var(--success)', fontWeight: 600 }}>
+                            <Check size={14} /> Saved
+                        </span>
+                    )}
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                    <select
+                        value={rewriteModel}
+                        onChange={e => setRewriteModel(e.target.value)}
+                        style={{
+                            flex: 1, maxWidth: '300px', padding: '10px 12px', borderRadius: '8px',
+                            background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                            color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
+                        }}
+                    >
+                        {models.map(m => (
+                            <option key={m} value={m}>{m}</option>
+                        ))}
+                    </select>
+                    <button className="button small" onClick={async () => {
+                        setRewriteSaving(true);
+                        await api.updateSettings({ rewrite_model: rewriteModel });
+                        setRewriteSaving(false);
+                        setRewriteSaved(true);
+                        setTimeout(() => setRewriteSaved(false), 2000);
+                    }} disabled={rewriteSaving} style={{ fontSize: '12px' }}>
+                        {rewriteSaving ? 'Saving...' : 'Save'}
+                    </button>
+                </div>
+
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '12px' }}>
+                    Used by the rewrite button in the chat input. Click the sparkle icon next to the message input to rewrite a draft message.
                 </p>
             </div>
 

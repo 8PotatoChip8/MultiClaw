@@ -7,7 +7,7 @@ import { Message, Agent } from '../lib/types';
 import MarkdownText from './MarkdownText';
 import AgentStatus from './AgentStatus';
 import Link from 'next/link';
-import { Send, Loader2, Plus, UserMinus, Users, X, Copy, Check, ExternalLink } from 'lucide-react';
+import { Send, Loader2, Plus, UserMinus, Users, X, Copy, Check, ExternalLink, Sparkles } from 'lucide-react';
 
 interface Participant { thread_id: string; member_type: string; member_id: string; }
 
@@ -35,8 +35,14 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
     const [hoveredMsg, setHoveredMsg] = useState<string | null>(null);
     const [copiedId, setCopiedId] = useState<string | null>(null);
     const [sendBlocked, setSendBlocked] = useState(false);
+    const [showRewrite, setShowRewrite] = useState(false);
+    const [rewriteInput, setRewriteInput] = useState('');
+    const [rewriteOutput, setRewriteOutput] = useState('');
+    const [rewriting, setRewriting] = useState(false);
+    const [rewriteCopied, setRewriteCopied] = useState(false);
     const bottomRef = useRef<HTMLDivElement>(null);
     const inputRef = useRef<HTMLInputElement>(null);
+    const rewriteInputRef = useRef<HTMLTextAreaElement>(null);
     const event = useMultiClawEvents();
     const agentMap = new Map(agents.map(a => [a.id, a]));
     const isGroup = threadType === 'GROUP';
@@ -165,6 +171,38 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
         const onSuccess = () => {
             setCopiedId(msgId);
             setTimeout(() => setCopiedId(null), 1500);
+        };
+        if (navigator.clipboard && window.isSecureContext) {
+            navigator.clipboard.writeText(text).then(onSuccess).catch(() => {});
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            textarea.style.position = 'fixed';
+            textarea.style.opacity = '0';
+            document.body.appendChild(textarea);
+            textarea.select();
+            try { document.execCommand('copy'); onSuccess(); } catch {}
+            document.body.removeChild(textarea);
+        }
+    };
+
+    const handleRewrite = async () => {
+        if (!rewriteInput.trim() || rewriting) return;
+        setRewriting(true);
+        setRewriteOutput('');
+        try {
+            const res = await api.rewrite({ text: rewriteInput.trim() });
+            setRewriteOutput(res.rewritten || res.error || 'No response');
+        } catch (e: any) {
+            setRewriteOutput('Error: ' + (e.message || 'Failed to rewrite'));
+        }
+        setRewriting(false);
+    };
+
+    const handleRewriteCopy = (text: string) => {
+        const onSuccess = () => {
+            setRewriteCopied(true);
+            setTimeout(() => setRewriteCopied(false), 1500);
         };
         if (navigator.clipboard && window.isSecureContext) {
             navigator.clipboard.writeText(text).then(onSuccess).catch(() => {});
@@ -484,8 +522,89 @@ export default function Chat({ threadId, threadType, initialMessages, dmAgent, p
                 </div>
             )}
 
+            {/* Rewrite Popup */}
+            {showRewrite && (
+                <div style={{
+                    borderTop: '1px solid var(--border)',
+                    background: 'rgba(10, 14, 26, 0.95)',
+                    padding: '16px',
+                    display: 'flex', flexDirection: 'column', gap: '10px',
+                }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '13px', fontWeight: 600, color: 'var(--primary)' }}>
+                            <Sparkles size={14} />
+                            Rewrite Assistant
+                        </div>
+                        <button onClick={() => { setShowRewrite(false); setRewriteOutput(''); }} style={{
+                            background: 'none', border: 'none', color: 'var(--text-muted)', cursor: 'pointer', padding: '2px',
+                        }}>
+                            <X size={16} />
+                        </button>
+                    </div>
+                    <textarea
+                        ref={rewriteInputRef}
+                        value={rewriteInput}
+                        onChange={e => setRewriteInput(e.target.value)}
+                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleRewrite(); } }}
+                        placeholder="Type your draft message here..."
+                        rows={3}
+                        style={{
+                            width: '100%', resize: 'vertical', padding: '10px 12px',
+                            borderRadius: '8px', background: 'rgba(255,255,255,0.05)',
+                            border: '1px solid var(--border)', color: 'var(--text)',
+                            fontSize: '13px', lineHeight: '1.5', fontFamily: 'inherit',
+                        }}
+                    />
+                    <button className="button small" onClick={handleRewrite} disabled={!rewriteInput.trim() || rewriting}
+                        style={{ alignSelf: 'flex-end', fontSize: '12px', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        {rewriting ? <><Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} /> Rewriting...</> : <><Sparkles size={14} /> Rewrite</>}
+                    </button>
+                    {rewriteOutput && (
+                        <div style={{
+                            padding: '12px', borderRadius: '8px',
+                            background: 'rgba(59,130,246,0.08)',
+                            border: '1px solid rgba(59,130,246,0.2)',
+                            fontSize: '13px', lineHeight: '1.5',
+                            whiteSpace: 'pre-wrap',
+                        }}>
+                            <div style={{ fontSize: '10px', color: 'var(--primary)', fontWeight: 600, marginBottom: '6px', textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+                                Rewritten
+                            </div>
+                            {rewriteOutput}
+                            <div style={{ marginTop: '8px', display: 'flex', justifyContent: 'flex-end' }}>
+                                <button onClick={() => handleRewriteCopy(rewriteOutput)} style={{
+                                    background: 'none', border: '1px solid var(--border)',
+                                    borderRadius: '6px', padding: '4px 10px', cursor: 'pointer',
+                                    color: rewriteCopied ? 'var(--success)' : 'var(--text-muted)',
+                                    fontSize: '11px', fontWeight: 600,
+                                    display: 'flex', alignItems: 'center', gap: '4px',
+                                    transition: 'color 0.2s',
+                                }}>
+                                    {rewriteCopied ? <><Check size={12} /> Copied</> : <><Copy size={12} /> Copy</>}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </div>
+            )}
+
             {/* Input */}
-            <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', gap: '8px' }}>
+            <div style={{ padding: '16px', borderTop: '1px solid var(--border)', display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <button
+                    onClick={() => { setShowRewrite(!showRewrite); if (!showRewrite) setTimeout(() => rewriteInputRef.current?.focus(), 100); }}
+                    title="Rewrite assistant"
+                    style={{
+                        background: showRewrite ? 'rgba(59,130,246,0.15)' : 'none',
+                        border: showRewrite ? '1px solid var(--primary)' : '1px solid transparent',
+                        borderRadius: '8px', padding: '8px', cursor: 'pointer',
+                        color: showRewrite ? 'var(--primary)' : 'var(--text-muted)',
+                        display: 'flex', alignItems: 'center', justifyContent: 'center',
+                        transition: 'all 0.15s',
+                        flexShrink: 0,
+                    }}
+                >
+                    <Sparkles size={18} />
+                </button>
                 <input
                     ref={inputRef}
                     value={input}
