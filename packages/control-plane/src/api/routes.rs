@@ -610,13 +610,12 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
                 .unwrap_or(end_pos);
             // Also consume the tool name token before <arg_key> (e.g. "memory_search")
             // by scanning back over word chars
-            let mut real_start = start;
             let chars: Vec<char> = text[..start].chars().collect();
             let mut i = chars.len();
             while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
                 i -= 1;
             }
-            real_start = chars[..i].iter().collect::<String>().len();
+            let real_start = chars[..i].iter().collect::<String>().len();
             text = format!("{}{}", &text[..real_start], &text[end..]);
         }
         // Second: strip orphan XML tool tags that appear without </tool_call>
