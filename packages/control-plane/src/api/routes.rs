@@ -275,6 +275,8 @@ fn fix_broken_words(s: &str) -> String {
         ("cer tainly", "certainly"),
         ("Im mediately", "Immediately"),
         ("im mediately", "immediately"),
+        ("Document ed", "Documented"),
+        ("document ed", "documented"),
         ("Not ed", "Noted"),
         ("not ed", "noted"),
         ("E lena", "Elena"),
