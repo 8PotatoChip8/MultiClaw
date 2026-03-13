@@ -387,24 +387,29 @@ pub async fn handle_dm_outbound(state: &AppState, payload: &serde_json::Value) -
     let message_text = str_from_json(payload, "message_text")?;
     let raw_message = str_from_json(payload, "raw_message")?;
 
-    // Redundancy check: skip if this message substantially overlaps with the
-    // sender's last message in this thread (catches stale re-narrations from
-    // action_prompts that slip past the 5-minute suppression in agent_dm).
+    // Staleness check: if this dm_outbound was enqueued at time T but the thread
+    // already has messages created AFTER T, the conversation moved on without this
+    // message (e.g. run_dm_turn() or thread_reply wrote responses while this item
+    // was stuck in the queue behind a long-running dm_initiate). Suppress it.
     {
-        let prev_text: Option<String> = sqlx::query_scalar(
-            "SELECT content->>'text' FROM messages \
-             WHERE thread_id = $1 AND sender_id = $2 AND sender_type = 'AGENT' \
-             ORDER BY created_at DESC LIMIT 1"
-        )
-        .bind(thread_id).bind(sender_id)
-        .fetch_optional(&state.db).await.ok().flatten();
+        let enqueued_at = payload.get("enqueued_at")
+            .and_then(|v| v.as_str())
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok());
 
-        if let Some(prev) = prev_text {
-            let overlap = word_overlap_ratio(&prev, message_text);
-            if overlap > 0.5 {
+        if let Some(enqueued) = enqueued_at {
+            let newer_count: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM messages \
+                 WHERE thread_id = $1 AND sender_type = 'AGENT' \
+                   AND created_at > $2"
+            )
+            .bind(thread_id).bind(enqueued.naive_utc())
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if newer_count.unwrap_or(0) > 0 {
                 tracing::info!(
-                    "dm_outbound: suppressed redundant message from {} in thread {} (overlap {:.0}%)",
-                    sender_id, thread_id, overlap * 100.0
+                    "dm_outbound: suppressed stale message from {} in thread {} \
+                     (enqueued at {}, but {} newer messages exist)",
+                    sender_id, thread_id, enqueued, newer_count.unwrap_or(0)
                 );
                 // Release active-conversation lock
                 let pair_key_a = uuid_from_json(payload, "pair_key_a").ok();

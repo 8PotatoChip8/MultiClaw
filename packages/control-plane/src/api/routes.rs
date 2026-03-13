@@ -3012,24 +3012,24 @@ async fn agent_dm(
         tid
     };
 
-    // Suppress stale re-narrations: if both agents already exchanged messages in
-    // this thread within the last 5 minutes, the real conversation already happened
-    // via dm_initiate/dm_continue. This new DM is likely a stale re-narration from
-    // an action_prompt that ran after the conversation ended.
+    // Suppress action-prompt re-narrations: if the sender already completed a
+    // dm_outbound to this same target within the last 5 minutes, this new DM is
+    // likely a stale re-narration from an action_prompt that re-triggered the
+    // same curl DM after the real conversation already happened.
     {
-        let distinct_recent_senders: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(DISTINCT sender_id) FROM messages \
-             WHERE thread_id = $1 AND sender_type = 'AGENT' \
-               AND created_at > NOW() - INTERVAL '5 minutes' \
-               AND sender_id IN ($2, $3)"
+        let recent_completed: Option<i64> = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM message_queue \
+             WHERE kind = 'dm_outbound' AND status = 'COMPLETED' \
+               AND agent_id = $1 AND payload->>'target_id' = $2 \
+               AND completed_at > NOW() - INTERVAL '5 minutes'"
         )
-        .bind(thread_id).bind(sender_id).bind(target_id)
+        .bind(sender_id).bind(target_id.to_string())
         .fetch_optional(&state.db).await.ok().flatten();
 
-        if distinct_recent_senders.unwrap_or(0) >= 2 {
+        if recent_completed.unwrap_or(0) > 0 {
             tracing::info!(
-                "agent_dm: suppressed stale DM from {} to {} (recent conversation in thread {})",
-                sender_id, target_id, thread_id
+                "agent_dm: suppressed re-narration DM from {} to {} (recent dm_outbound already completed)",
+                sender_id, target_id
             );
             let mut active = state.active_dm_pairs.write().await;
             active.remove(&pair_key);
@@ -3067,6 +3067,7 @@ async fn agent_dm(
             "raw_message": p.message,
             "pair_key_a": pair_key.0.to_string(),
             "pair_key_b": pair_key.1.to_string(),
+            "enqueued_at": chrono::Utc::now().to_rfc3339(),
         }),
     ).await {
         Ok(_) => {
@@ -3404,6 +3405,50 @@ async fn agent_send_file(
     ).bind(transfer_id).bind(sender_id).bind(receiver_id)
      .bind(filename).bind(size_bytes).bind(encoding).bind(dest_relative)
      .execute(&state.db).await;
+
+    // Insert a message into the sender↔receiver DM thread so file transfers
+    // are visible in Agent Comms.
+    {
+        let ft_thread: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT t.id FROM threads t \
+             JOIN thread_members tm1 ON t.id = tm1.thread_id \
+             JOIN thread_members tm2 ON t.id = tm2.thread_id \
+             WHERE t.type = 'DM' \
+               AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+               AND tm2.member_type = 'AGENT' AND tm2.member_id = $2 \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM thread_members tm3 \
+                   WHERE tm3.thread_id = t.id AND tm3.member_type = 'USER' \
+               ) \
+             LIMIT 1"
+        ).bind(sender_id).bind(receiver_id).fetch_optional(&state.db).await.unwrap_or(None);
+
+        let ft_thread_id = if let Some((tid,)) = ft_thread { tid } else {
+            let tid = Uuid::new_v4();
+            let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+                .bind(tid).bind(format!("{} <-> {}", sender.name, receiver.name))
+                .execute(&state.db).await;
+            let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+                .bind(tid).bind(sender_id).execute(&state.db).await;
+            let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+                .bind(tid).bind(receiver_id).execute(&state.db).await;
+            tid
+        };
+
+        let ft_msg_id = Uuid::new_v4();
+        let ft_content = json!({
+            "text": format!("Sent file \"{}\" to {} ({} bytes)", filename, receiver.name, size_bytes),
+            "file_transfer": transfer_id.to_string(),
+        });
+        if let Ok(msg) = sqlx::query_as::<_, Message>(
+            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+             VALUES ($1,$2,'AGENT',$3,$4,0) \
+             RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+        ).bind(ft_msg_id).bind(ft_thread_id).bind(sender_id).bind(&ft_content)
+        .fetch_one(&state.db).await {
+            let _ = state.tx.send(json!({"type": "new_message", "message": msg}).to_string());
+        }
+    }
 
     // Notify receiver via queue
     let notify_msg = format!(
