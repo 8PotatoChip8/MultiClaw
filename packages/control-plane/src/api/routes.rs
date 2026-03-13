@@ -582,6 +582,38 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("[[reply_to_current]]", "");
     text = text.replace("[reply_to_current]", "");
     text = strip_fragmented_tag(&text, "reply_to_current");
+    // Strip leaked tool-call XML markup (model outputs raw XML when OpenClaw fails to parse)
+    // e.g. "memory_search<arg_key>query</arg_key><arg_value>...</arg_value></tool_call>"
+    // Also handles <tool_call>...</tool_call> wrappers.
+    {
+        // First: strip complete </tool_call>-terminated blocks.
+        // Find the start by looking for <arg_key> or <tool_call (the earliest XML tool tag).
+        while let Some(end_pos) = text.find("</tool_call>") {
+            let end = end_pos + "</tool_call>".len();
+            // Walk backwards from the first <arg_key> or <tool_call to find block start
+            let search_region = &text[..end_pos];
+            let start = search_region.rfind("<tool_call")
+                .or_else(|| search_region.rfind("<arg_key>"))
+                .unwrap_or(end_pos);
+            // Also consume the tool name token before <arg_key> (e.g. "memory_search")
+            // by scanning back over word chars
+            let mut real_start = start;
+            let chars: Vec<char> = text[..start].chars().collect();
+            let mut i = chars.len();
+            while i > 0 && (chars[i - 1].is_alphanumeric() || chars[i - 1] == '_') {
+                i -= 1;
+            }
+            real_start = chars[..i].iter().collect::<String>().len();
+            text = format!("{}{}", &text[..real_start], &text[end..]);
+        }
+        // Second: strip orphan XML tool tags that appear without </tool_call>
+        // (e.g. just "<arg_key>...</arg_key>" fragments)
+        let tool_xml_tags = ["<arg_key>", "</arg_key>", "<arg_value>", "</arg_value>",
+                             "<tool_call>", "<tool_call ", "</tool_call>"];
+        for tag in &tool_xml_tags {
+            text = text.replace(tag, "");
+        }
+    }
     // Strip OpenClaw tool-failure feedback lines the model leaks into output
     // e.g. "⚠️ 📝 Edit: `in /workspace/MEMORY.md (315 chars)` failed"
     {
