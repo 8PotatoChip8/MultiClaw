@@ -38,6 +38,13 @@
         enabled: true,
         provider: "local",
         {{MEMORY_SEARCH_LOCAL}}
+        query: {
+          hybrid: {
+            enabled: true,
+            vectorWeight: 0.7,
+            textWeight: 0.3,
+          },
+        },
       },
 
       // Compaction: flush durable notes before context truncation

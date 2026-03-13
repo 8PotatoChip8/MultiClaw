@@ -430,6 +430,8 @@ async fn run_dm_turn(
     let company_label = responder_company.as_deref().unwrap_or("the company");
     let dm_ctx = format!(
         "You are {} ({} at {}). You are in a DM with {} ({}). {} \
+         Before responding, use memory_search to recall relevant context about this person and topic. \
+         After the conversation, save important decisions, agreements, or new information to MEMORY.md. \
          Communicate naturally — ask questions, share information, and respond as needed. \
          Send ONLY your actual message to {}. \
          Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
@@ -593,7 +595,9 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
          do not re-brief workers you already briefed, do not restart work already in progress. \
          Check your existing team and threads before taking action. \
          If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
-         Do NOT repeat or summarize the conversation — just act on what is NEW.",
+         Do NOT repeat or summarize the conversation — just act on what is NEW. \
+         After completing actions, save key outcomes and decisions to MEMORY.md (long-term) \
+         or today's daily log in memory/ (working notes).",
         sender_name
     );
 
