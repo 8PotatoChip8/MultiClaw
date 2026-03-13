@@ -15,12 +15,14 @@ struct QueueItem {
     max_retries: i16,
 }
 
-/// Reset any PROCESSING rows that have been stuck for more than 15 minutes.
-/// This handles process crashes — the items get retried.
+/// Reset any PROCESSING rows that have been stuck for more than 5 minutes.
+/// This handles process crashes — the items get retried. The per-item 300s
+/// timeout in the spawned task is the primary defense; this is the backup
+/// for cases where the process itself dies.
 async fn recover_stale_claims(pool: &PgPool) {
     match sqlx::query(
         "UPDATE message_queue SET status = 'PENDING', claimed_at = NULL \
-         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '15 minutes'"
+         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '5 minutes'"
     )
     .execute(pool)
     .await
@@ -135,7 +137,7 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
     // Recover any items that were PROCESSING when the server last crashed
     recover_stale_claims(&state.db).await;
 
-    let mut stale_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(300));
+    let mut stale_check_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
     stale_check_interval.tick().await; // skip the first immediate tick
 
     loop {
@@ -173,16 +175,35 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                     kind, item_id, agent_id, item.retry_count, item.max_retries
                 );
 
-                // Acquire the per-agent turn lock to serialize messages
-                let _agent_guard = state_clone.acquire_agent_turn(agent_id).await;
+                // 5-minute timeout covers lock acquisition + handler execution.
+                // Normal send_message() completes in 5-60s; this catches hangs
+                // from unresponsive containers or stuck locks.
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(300),
+                    async {
+                        let _agent_guard = state_clone.acquire_agent_turn(agent_id).await;
+                        process_item(&state_clone, &item).await
+                    },
+                ).await;
 
-                match process_item(&state_clone, &item).await {
-                    Ok(()) => {
+                match result {
+                    Ok(Ok(())) => {
                         mark_completed(&state_clone.db, item_id).await;
                         tracing::info!("[queue_worker] completed {}:{}", kind, item_id);
                     }
-                    Err(e) => {
+                    Ok(Err(e)) => {
                         mark_failed(&state_clone.db, item_id, &e, item.retry_count, item.max_retries).await;
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "[queue_worker] {}:{} for agent {} timed out after 300s",
+                            kind, item_id, agent_id
+                        );
+                        mark_failed(
+                            &state_clone.db, item_id,
+                            "handler timed out after 300s",
+                            item.retry_count, item.max_retries,
+                        ).await;
                     }
                 }
 
