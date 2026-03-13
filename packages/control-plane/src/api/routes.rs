@@ -4647,7 +4647,9 @@ async fn rewrite_text(
     let system_prompt = "You are a message rewriting assistant. The user will give you a draft \
         message they want to send to someone. Rewrite it to be clearer, more structured, and \
         concise while preserving ALL details, intent, and meaning. Output ONLY the rewritten \
-        message — no explanations, no preamble, no quotes around it.";
+        message — no explanations, no preamble, no quotes around it. Do NOT use any markdown \
+        formatting — no bold, no italics, no headers, no bullet points, no asterisks. Write \
+        in plain text only.";
 
     let ollama_url = format!("{}/api/chat", state.config.ollama_url);
     let client = reqwest::Client::builder()
