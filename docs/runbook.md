@@ -13,12 +13,11 @@ See internal CLI: `multiclaw init rotate-keys`
 
 ## VM Level Checks
 ```bash
-incus list multiclaw
-incus shell mc-mainhc-ceo-1
-# from inside the VM
-systemctl status openclaw-gateway
-systemctl status multiclaw-agentd
+incus list  # show all VMs
+incus shell mc-3a96c961  # shell into a desktop VM (mc-<agent-uuid-prefix>)
+incus shell mc-3a96c961-sb  # shell into a sandbox VM
 ```
+VM names use the first 8 characters of the agent's UUID: `mc-{uuid-prefix}` for desktop, `mc-{uuid-prefix}-sb` for sandbox.
 
 ## Quarantining an Agent
 If an agent is behaving dangerously or looping, use the Quick-Panic button in the UI or call the API:
@@ -66,7 +65,7 @@ If KonnerBot has nothing to report, the heartbeat costs very little (a short pro
 The heartbeat loop waits for OpenClaw container recovery to complete (signaled via a watch channel), then waits an additional 5 minutes for post-restart recovery prompts to settle before starting.
 
 ## Post-Restart Recovery Prompts
-After a restart, multiclawd sends role-appropriate recovery prompts to all active agents in hierarchical order (MAIN → CEO → MANAGER → WORKER, 30s between tiers). This tells agents the system restarted and asks them to check memory and resume work.
+After a restart, multiclawd sends role-appropriate recovery prompts to all active agents in hierarchical order (MAIN → CEO → MANAGER → WORKER, 60s between tiers). This tells agents the system restarted and asks them to check memory and resume work.
 
 ### Disable recovery prompts
 ```sql
@@ -92,6 +91,41 @@ docker compose logs multiclawd | grep -i "concurrency"
 ### Adjust concurrency
 Set `OLLAMA_NUM_PARALLEL` on the Ollama service and `MULTICLAW_MAX_CONCURRENT_OLLAMA` in the multiclawd environment. They should match.
 Default: 4. Set in `/etc/systemd/system/ollama.service.d/concurrency.conf` and `/opt/multiclaw/.env`.
+
+## Message Queue Troubleshooting
+
+### Check for stuck items
+```sql
+SELECT id, agent_id, kind, status, claimed_at, retry_count, error
+FROM message_queue WHERE status = 'PROCESSING'
+ORDER BY claimed_at ASC;
+```
+Items in PROCESSING for more than 5 minutes will be automatically recovered by the stale claim sweep (runs every 60s). Items are also subject to a 300-second per-handler timeout — if a handler hangs, the item is marked as failed and retried.
+
+### Manually recover a stuck item
+```sql
+UPDATE message_queue SET status = 'PENDING', claimed_at = NULL
+WHERE id = '<item-uuid>' AND status = 'PROCESSING';
+```
+
+### Check failed items
+```sql
+SELECT id, agent_id, kind, error, retry_count, max_retries
+FROM message_queue WHERE status = 'FAILED'
+ORDER BY completed_at DESC LIMIT 20;
+```
+
+### Check queue depth per agent
+```sql
+SELECT agent_id, COUNT(*) as pending
+FROM message_queue WHERE status = 'PENDING'
+GROUP BY agent_id ORDER BY pending DESC;
+```
+
+### Check logs for timeouts
+```bash
+docker compose logs multiclawd | grep "timed out after 300s"
+```
 
 ## Provisioning Secrets for Agents
 Store API keys, credentials, and other sensitive values using the Secrets API. **Never paste secrets into chat messages or DMs** — use the secrets store instead.

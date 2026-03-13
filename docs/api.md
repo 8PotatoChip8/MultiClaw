@@ -130,11 +130,13 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 **VM Exec body:**
 ```json
 {
-  "command": ["bash", "-c", "echo hello"],
-  "timeout": 30,
-  "user": "ubuntu"
+  "command": "echo hello",
+  "user": "employee",
+  "working_dir": "/home/employee",
+  "timeout_secs": 30
 }
 ```
+`user` defaults to `"employee"` (UID 1000). `working_dir` defaults to `/home/employee`. `timeout_secs` defaults to 30.
 
 **File Push body:**
 ```json
@@ -197,10 +199,15 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
   "scope_type": "agent",
   "scope_id": "uuid",
   "name": "API_KEY",
-  "value": "sk-live-...",
+  "fields": [
+    { "label": "Access Key", "value": "AKIA..." },
+    { "label": "Secret Key", "value": "wJalr..." }
+  ],
   "description": "Read-only API key for market data"
 }
 ```
+For single-value secrets, a legacy `"value": "..."` field is also accepted instead of `"fields"`.
+
 `scope_type` can be `"agent"`, `"manager"` (department), `"company"`, or `"holding"`. The `description` field is optional but recommended — it helps agents choose the right credential when they have multiple secrets for the same service. Agents can list their accessible secrets via `GET /v1/agents/:id/secrets` (names and descriptions only) and fetch by name via `GET /v1/agents/:id/secrets/:name` with hierarchical lookup (agent → manager → company → holding).
 
 ---
@@ -244,6 +251,63 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/v1/scripts/install-openclaw.sh` | Serve OpenClaw install script for VM cloud-init |
+
+---
+
+## Models
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/models` | List available Ollama models and the system default |
+| GET | `/v1/models/pull-status` | Check pull/download progress for all models |
+| POST | `/v1/models/pull` | Pull/download a model to Ollama |
+
+**Pull Model body:**
+```json
+{
+  "model": "glm-5:cloud"
+}
+```
+
+**List Models response:**
+```json
+{
+  "models": ["glm-5:cloud", "qwen3-coder-next:cloud"],
+  "default": "glm-5:cloud"
+}
+```
+
+---
+
+## AI Rewrite
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/rewrite` | Rewrite a draft message for clarity using an AI model |
+
+**Rewrite body:**
+```json
+{
+  "text": "hey can u check on the thing we talked about",
+  "model": "glm-5:cloud"
+}
+```
+`model` is optional — defaults to the `rewrite_model` system setting, or the system default model.
+
+**Response:**
+```json
+{
+  "rewritten": "Could you check on the item we discussed earlier?"
+}
+```
+
+---
+
+## World
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/world/snapshot` | Get a full snapshot of the current world state (companies, agents, threads) |
 
 ---
 

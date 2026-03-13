@@ -75,5 +75,11 @@ This software enables autonomous agents to execute code and use web browsers. Ru
 ## Troubleshooting
 See `docs/runbook.md` for daily operational checklists.
 
+## Message Queue
+All agent interactions (DMs, thread replies, heartbeats, recovery prompts, etc.) are processed through a persistent PostgreSQL-backed message queue. Items are serialized per-agent (only one item processes at a time per agent) and ordered by priority then age. Each handler has a 300-second timeout to prevent hung requests from blocking an agent's queue. A background recovery sweep every 60 seconds reclaims items stuck in processing for more than 5 minutes (e.g., after a process crash).
+
+## AI Message Rewrite
+The chat interface includes a rewrite assistant (sparkle button) that rewrites draft messages for clarity using an AI model. The rewrite model can be configured in the Settings page and defaults to the system's primary model. See `POST /v1/rewrite` in `docs/api.md`.
+
 ## Post-Restart Recovery
-When multiclawd restarts, it automatically sends recovery prompts to all active agents in hierarchical order (MAIN first, then CEOs, then managers, then workers) with 30-second delays between tiers. Each prompt tells the agent the system restarted, reminds them of their role, and asks them to check their memory and resume work. Recovery prompts can be disabled via `system_meta` setting `recovery_prompts_enabled = false`.
+When multiclawd restarts, it automatically sends recovery prompts to all active agents in hierarchical order (MAIN first, then CEOs, then managers, then workers) with 60-second delays between tiers. Each prompt tells the agent the system restarted, reminds them of their role, and asks them to check their memory and resume work. Recovery prompts can be disabled via `system_meta` setting `recovery_prompts_enabled = false`.
