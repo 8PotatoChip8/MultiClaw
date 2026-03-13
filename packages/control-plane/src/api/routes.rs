@@ -3034,7 +3034,34 @@ async fn agent_dm(
         Ok(msg) => {
             let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
 
-            // Enqueue first turn of the DM conversation
+            // Coalesce: if a PENDING dm_initiate already exists for the same
+            // (sender → target) pair, merge this message into it instead of
+            // creating a second conversation. This prevents rapid-fire DMs
+            // (e.g. from action prompts) from spawning duplicate conversations.
+            let existing_qi: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, payload FROM message_queue \
+                 WHERE agent_id = $1 AND kind = 'dm_initiate' AND status = 'PENDING' \
+                   AND payload->>'sender_id' = $2 AND payload->>'target_id' = $3 \
+                 LIMIT 1"
+            )
+            .bind(target_id).bind(sender_id.to_string()).bind(target_id.to_string())
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if let Some((qi_id, mut qi_payload)) = existing_qi {
+                // Append new message text to existing queue item's payload
+                let existing_text = qi_payload["message_text"].as_str().unwrap_or("");
+                let combined = format!("{}\n\n{}", existing_text, p.message);
+                qi_payload["message_text"] = serde_json::Value::String(combined);
+                let _ = sqlx::query("UPDATE message_queue SET payload = $1 WHERE id = $2")
+                    .bind(&qi_payload).bind(qi_id)
+                    .execute(&state.db).await;
+                tracing::info!("Coalesced DM from {} to {} into existing queue item {}", sender_id, target_id, qi_id);
+                return (StatusCode::CREATED, Json(json!({
+                    "thread_id": thread_id, "message_id": msg_id, "coalesced": true
+                })));
+            }
+
+            // No existing pending DM — enqueue first turn of the DM conversation
             let _ = state.enqueue_message(
                 target_id, // target agent processes first
                 3, // agent DM priority
