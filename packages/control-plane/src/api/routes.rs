@@ -548,6 +548,7 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
             .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
             .collect();
         normalized.contains("END_CONVERSATION") || normalized.contains("ENDCONVERSATION")
+            || normalized.contains("NO_REPLY") || normalized.contains("NOREPLY")
     };
     let mut text = response.to_string();
     // Decode HTML entities that glm-5 occasionally outputs (e.g. &#039; -> ')
@@ -558,11 +559,14 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = text.replace("HEARTBEAT_OK", "");
     text = text.replace("[NO_ACTION_NEEDED]", "");
     text = text.replace("NO_ACTION_NEEDED", "");
+    text = text.replace("[NO_REPLY]", "");
+    text = text.replace("NO_REPLY", "");
     // Strip fragmented variants where streaming split the tag across tokens
     // (e.g. "HE ARTBEAT_OK", "END _CONVERSATION", "NO_ACTION _NEEDED")
     text = strip_fragmented_tag(&text, "HEARTBEAT_OK");
     text = strip_fragmented_tag(&text, "END_CONVERSATION");
     text = strip_fragmented_tag(&text, "NO_ACTION_NEEDED");
+    text = strip_fragmented_tag(&text, "NO_REPLY");
     // Strip internal sentinel from send_message() retry failures
     text = text.replace("[Agent produced no text output]", "");
     // Strip model-narrated OpenClaw failures (model itself says this when a tool call fails)
@@ -629,7 +633,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
         .collect();
     if matches!(compact.as_str(),
         "HEARTBEAT_OK" | "HEARTBEATOK" | "ENDCONVERSATION" | "END_CONVERSATION" |
-        "NO_ACTION_NEEDED" | "NOACTIONNEEDED") {
+        "NO_ACTION_NEEDED" | "NOACTIONNEEDED" |
+        "NO_REPLY" | "NOREPLY") {
         text = String::new();
     }
     (text.trim().to_string(), end_conv)
