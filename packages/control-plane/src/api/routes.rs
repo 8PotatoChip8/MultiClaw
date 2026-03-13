@@ -555,6 +555,17 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let mut text = response.to_string();
     // Decode HTML entities that glm-5 occasionally outputs (e.g. &#039; -> ')
     text = decode_html_entities(&text);
+    // Strip CJK characters that leak from multilingual models (qwen, glm)
+    text = text.chars().filter(|c| {
+        let cp = *c as u32;
+        !(0x4E00..=0x9FFF).contains(&cp)   // CJK Unified Ideographs
+        && !(0x3400..=0x4DBF).contains(&cp) // CJK Extension A
+        && !(0xF900..=0xFAFF).contains(&cp) // CJK Compatibility Ideographs
+        && !(0x3040..=0x309F).contains(&cp) // Hiragana
+        && !(0x30A0..=0x30FF).contains(&cp) // Katakana
+        && !(0xAC00..=0xD7AF).contains(&cp) // Hangul Syllables
+        && !(0x3000..=0x303F).contains(&cp) // CJK Symbols and Punctuation
+    }).collect();
     // Strip known system tags (including variants where streaming splits brackets/text across lines)
     text = text.replace("[END_CONVERSATION]", "");
     text = text.replace("[HEARTBEAT_OK]", "");
