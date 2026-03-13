@@ -115,8 +115,8 @@ async fn build_thread_context(
                 name_cache.get(sid).cloned().unwrap_or_else(|| "Agent".to_string())
             };
             let text = content.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let truncated = if text.len() > 200 {
-                let end = text.char_indices().take_while(|(i, _)| *i < 200).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(200);
+            let truncated = if text.len() > 500 {
+                let end = text.char_indices().take_while(|(i, _)| *i < 500).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(500);
                 format!("{}...", &text[..end])
             } else { text.to_string() };
             transcript.push_str(&format!("{}: {}\n", name, truncated));
@@ -428,8 +428,48 @@ async fn run_dm_turn(
     } else { "" };
 
     let company_label = responder_company.as_deref().unwrap_or("the company");
+
+    // Fetch conversation history from this DM thread so the agent has context
+    let history_section = {
+        let recent_msgs: Vec<(Uuid, String)> = sqlx::query_as(
+            "SELECT sender_id, COALESCE(content->>'text', '') AS text FROM messages \
+             WHERE thread_id = $1 AND sender_type = 'AGENT' \
+             ORDER BY created_at DESC LIMIT 10"
+        ).bind(thread_id).fetch_all(&state.db).await.unwrap_or_default();
+
+        if recent_msgs.len() > 1 {
+            // Build name cache for sender IDs
+            let mut name_cache: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+            for (sid, _) in &recent_msgs {
+                if !name_cache.contains_key(sid) {
+                    let aname: Option<String> = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(sid).fetch_optional(&state.db).await.ok().flatten();
+                    if let Some(n) = aname { name_cache.insert(*sid, n); }
+                }
+            }
+
+            let mut transcript = String::from("Conversation so far (oldest first):\n---\n");
+            // Skip the most recent message (that's the current_text being responded to)
+            // and reverse to oldest-first
+            for (sid, text) in recent_msgs.iter().rev().take(recent_msgs.len() - 1) {
+                let name = name_cache.get(sid).cloned().unwrap_or_else(|| "Agent".to_string());
+                let text = text.as_str();
+                let truncated = if text.len() > 500 {
+                    let end = text.char_indices().take_while(|(i, _)| *i < 500)
+                        .last().map(|(i, c)| i + c.len_utf8()).unwrap_or(500);
+                    format!("{}...", &text[..end])
+                } else { text.to_string() };
+                transcript.push_str(&format!("{}: {}\n", name, truncated));
+            }
+            transcript.push_str("---\n\n");
+            transcript
+        } else {
+            String::new()
+        }
+    };
+
     let dm_ctx = format!(
-        "You are {} ({} at {}). You are in a DM with {} ({}). {} \
+        "{}You are {} ({} at {}). You are in a DM with {} ({}). {} \
          Before responding, use memory_search to recall relevant context about this person and topic. \
          After the conversation, save important decisions, agreements, or new information to MEMORY.md. \
          Communicate naturally — ask questions, share information, and respond as needed. \
@@ -444,6 +484,7 @@ async fn run_dm_turn(
          being exchanged (e.g., 'Understood', 'Got it', 'Sounds good', 'Will do'), that IS a natural conclusion — \
          use [END_CONVERSATION]. Do not keep exchanging acknowledgments back and forth. \
          Do NOT use this tag if {} asked you a question or if there are unresolved topics.",
+        history_section,
         responder_name, role_label(&responder_role), company_label,
         partner_name, role_label(&partner_role), relationship,
         partner_name, partner_name, partner_name, partner_name
@@ -461,8 +502,8 @@ async fn run_dm_turn(
                 scrub_secrets(&state.db, crypto, responder_id, &clean_response).await
             } else { clean_response.clone() };
 
-            // Redundancy check
-            if !scrubbed.trim().is_empty() {
+            // Redundancy check — detect if agent is repeating itself
+            let is_redundant = if !scrubbed.trim().is_empty() {
                 let prev_text: Option<String> = sqlx::query_scalar(
                     "SELECT content->>'text' FROM messages \
                      WHERE thread_id = $1 AND sender_id = $2 \
@@ -472,14 +513,12 @@ async fn run_dm_turn(
 
                 if let Some(prev) = prev_text {
                     let overlap = word_overlap_ratio(&prev, &scrubbed);
-                    if overlap > 0.6 {
-                        tracing::info!("DM thread {}: suppressed {}'s redundant re-statement (overlap {:.0}%)", thread_id, responder_id, overlap * 100.0);
-                        return DmTurnResult::End;
-                    }
-                }
-            }
+                    overlap > 0.6
+                } else { false }
+            } else { false };
 
-            // Store message if non-empty
+            // Store message if non-empty (always store, even if redundant —
+            // the message should be visible in the UI regardless)
             if !scrubbed.trim().is_empty() {
                 let resp_id = Uuid::new_v4();
                 let resp_content = json!({"text": scrubbed});
@@ -490,6 +529,12 @@ async fn run_dm_turn(
                 .fetch_one(&state.db).await {
                     let _ = state.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
                 }
+            }
+
+            // End conversation if redundant (after storing the message)
+            if is_redundant {
+                tracing::info!("DM thread {}: ending conversation — {}'s response was redundant", thread_id, responder_id);
+                return DmTurnResult::End;
             }
 
             // Check end conditions
