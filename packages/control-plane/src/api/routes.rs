@@ -2243,6 +2243,28 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
         serde_json::from_str(&scrubbed).unwrap_or(p.payload.clone())
     } else { p.payload.clone() };
 
+    // Reject duplicate REQUEST_TOOL submissions — same agent + same tool_name still PENDING/APPROVED
+    if p.r#type == "REQUEST_TOOL" {
+        if let Some(tool_name) = payload.get("tool_name").and_then(|v| v.as_str()) {
+            let existing: Option<Uuid> = sqlx::query_scalar(
+                "SELECT id FROM requests \
+                 WHERE created_by_agent_id = $1 AND type = 'REQUEST_TOOL' \
+                   AND status IN ('PENDING', 'APPROVED') \
+                   AND payload->>'tool_name' = $2 \
+                 LIMIT 1"
+            )
+            .bind(requester_id).bind(tool_name)
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if let Some(existing_id) = existing {
+                return (StatusCode::CONFLICT, Json(json!({
+                    "error": format!("You already have a pending request for '{}' (request {})", tool_name, existing_id),
+                    "existing_request_id": existing_id
+                })));
+            }
+        }
+    }
+
     // Route to requester's superior in the chain of command
     let (approver_type, approver_id) = match find_superior(&state.db, requester_id).await {
         Some(superior_id) => ("AGENT".to_string(), Some(superior_id)),
