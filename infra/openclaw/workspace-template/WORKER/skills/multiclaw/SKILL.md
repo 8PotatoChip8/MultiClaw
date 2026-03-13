@@ -34,7 +34,7 @@ curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
 
 ## Your Computers
 
-You have two computers at your desk — a personal work computer and a testing environment.
+You have two computers at your desk — a personal work computer and a testing environment. These are YOUR computers — you set them up and manage them yourself. Every employee in the company has their own computers that only they can access and control. You cannot provision or manage computers for other people, and they cannot access yours.
 
 ### Your Personal Work Computer
 
