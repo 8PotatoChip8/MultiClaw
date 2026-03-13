@@ -114,6 +114,7 @@ async fn mark_failed(pool: &PgPool, item_id: Uuid, error: &str, retry_count: i16
 async fn process_item(state: &AppState, item: &QueueItem) -> Result<(), String> {
     match item.kind.as_str() {
         "thread_reply" => super::handlers::handle_thread_reply(state, &item.payload).await,
+        "dm_outbound" => super::handlers::handle_dm_outbound(state, &item.payload).await,
         "dm_initiate" => super::handlers::handle_dm_initiate(state, &item.payload).await,
         "dm_continue" => super::handlers::handle_dm_continue(state, &item.payload).await,
         "action_prompt" => super::handlers::handle_action_prompt(state, &item.payload).await,

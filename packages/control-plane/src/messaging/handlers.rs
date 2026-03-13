@@ -369,6 +369,88 @@ pub async fn handle_dm_continue(state: &AppState, payload: &serde_json::Value) -
     }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// dm_outbound — Deferred sender-side INSERT for agent-to-agent DMs
+// ═══════════════════════════════════════════════════════════════
+
+/// Handles the deferred write of a sender's outbound DM message.
+/// The `agent_dm()` route enqueues this for the SENDER agent so that the DB
+/// INSERT is serialized through the queue worker's per-agent lock, preventing
+/// out-of-order writes when the sender has other work in flight.
+///
+/// Payload: { thread_id, sender_id, target_id, message_id, message_text, raw_message, pair_key_a, pair_key_b }
+pub async fn handle_dm_outbound(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
+    let thread_id = uuid_from_json(payload, "thread_id")?;
+    let sender_id = uuid_from_json(payload, "sender_id")?;
+    let target_id = uuid_from_json(payload, "target_id")?;
+    let msg_id = uuid_from_json(payload, "message_id")?;
+    let message_text = str_from_json(payload, "message_text")?;
+    let raw_message = str_from_json(payload, "raw_message")?;
+
+    // 1. INSERT the sender's message into the DB
+    let content = json!({"text": message_text});
+    match sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) VALUES ($1,$2,'AGENT',$3,$4,0) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(sender_id).bind(&content)
+    .fetch_one(&state.db).await {
+        Ok(msg) => {
+            // 2. Broadcast websocket event
+            let _ = state.tx.send(json!({"type": "new_message", "message": msg}).to_string());
+
+            // 3. Coalesce check: if a PENDING dm_initiate already exists for the
+            //    same (sender → target) pair, merge this message into it instead of
+            //    creating a second conversation.
+            let existing_qi: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, payload FROM message_queue \
+                 WHERE agent_id = $1 AND kind = 'dm_initiate' AND status = 'PENDING' \
+                   AND payload->>'sender_id' = $2 AND payload->>'target_id' = $3 \
+                 LIMIT 1"
+            )
+            .bind(target_id).bind(sender_id.to_string()).bind(target_id.to_string())
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if let Some((qi_id, mut qi_payload)) = existing_qi {
+                let existing_text = qi_payload["message_text"].as_str().unwrap_or("");
+                let combined = format!("{}\n\n{}", existing_text, raw_message);
+                qi_payload["message_text"] = serde_json::Value::String(combined);
+                let _ = sqlx::query("UPDATE message_queue SET payload = $1 WHERE id = $2")
+                    .bind(&qi_payload).bind(qi_id)
+                    .execute(&state.db).await;
+                tracing::info!("dm_outbound: coalesced DM from {} to {} into queue item {}", sender_id, target_id, qi_id);
+                return Ok(());
+            }
+
+            // 4. Enqueue dm_initiate for the TARGET agent
+            let _ = state.enqueue_message(
+                target_id,
+                3, // agent DM priority
+                "dm_initiate",
+                json!({
+                    "thread_id": thread_id.to_string(),
+                    "sender_id": sender_id.to_string(),
+                    "target_id": target_id.to_string(),
+                    "message_text": raw_message,
+                    "pair_key_a": payload.get("pair_key_a").and_then(|v| v.as_str()).unwrap_or(""),
+                    "pair_key_b": payload.get("pair_key_b").and_then(|v| v.as_str()).unwrap_or(""),
+                }),
+            ).await.map_err(|e| format!("Failed to enqueue dm_initiate: {}", e))?;
+
+            Ok(())
+        }
+        Err(e) => {
+            // Release active-conversation lock on failure
+            let pair_key_a = uuid_from_json(payload, "pair_key_a").ok();
+            let pair_key_b = uuid_from_json(payload, "pair_key_b").ok();
+            if let (Some(a), Some(b)) = (pair_key_a, pair_key_b) {
+                let mut active = state.active_dm_pairs.write().await;
+                active.remove(&(a, b));
+            }
+            Err(format!("Failed to insert outbound DM message: {}", e))
+        }
+    }
+}
+
 /// Result of a single DM turn.
 enum DmTurnResult {
     /// Conversation continues — contains the response text and next depth counter.
