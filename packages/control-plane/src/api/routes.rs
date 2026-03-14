@@ -21,11 +21,17 @@ const MAX_THREAD_REPLY_DEPTH: i32 = 5;
 /// Safety ceiling for agent-to-agent DM conversations.
 /// Default available models for agent selection.
 const DEFAULT_MODELS: &[&str] = &[
-    "glm-5:cloud",
+    "nemotron-3-super:cloud",
     "minimax-m2.5:cloud",
+    "minimax-m2:cloud",
+    "glm-5:cloud",
+    "kimi-k2-thinking:cloud",
     "kimi-k2.5:cloud",
-    "qwen3.5:397b-cloud",
-    "qwen3-coder-next:cloud",
+    "qwen3-coder:480b-cloud",
+    "devstral-2:123b-cloud",
+    "deepseek-v3.2:cloud",
+    "minimax-m2.1:cloud",
+    "glm-4.7:cloud",
 ];
 
 use crate::provisioning::cloudinit::{CloudInitArgs, render_cloud_init};
@@ -807,7 +813,7 @@ async fn handle_init(
 
     let holding_name = payload.holding_name.unwrap_or_else(|| "Main Holding".into());
     let agent_name = payload.main_agent_name.unwrap_or_else(|| "MainAgent".into());
-    let model = payload.default_model.unwrap_or_else(|| "glm-5:cloud".into());
+    let model = payload.default_model.unwrap_or_else(|| "nemotron-3-super:cloud".into());
 
     let holding_id = Uuid::new_v4();
     let owner_id = Uuid::new_v4();
@@ -1078,7 +1084,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
         .fetch_optional(&state.db).await.unwrap_or(None);
     let policy_id = ceo_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let system_default: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'default_model'")
-        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "glm-5:cloud".into());
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "minimax-m2.5:cloud".into());
     let model = payload.preferred_model.unwrap_or(system_default);
     let agent_id = Uuid::new_v4();
     let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
@@ -4595,7 +4601,7 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|| serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default());
     let default_model: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'default_model'")
         .fetch_optional(&state.db).await.ok().flatten()
-        .unwrap_or_else(|| "glm-5:cloud".to_string());
+        .unwrap_or_else(|| "nemotron-3-super:cloud".to_string());
     let models: Vec<String> = serde_json::from_str(&raw)
         .unwrap_or_else(|_| DEFAULT_MODELS.iter().map(|s| s.to_string()).collect());
     (StatusCode::OK, Json(json!({"models": models, "default": default_model})))
@@ -4728,7 +4734,7 @@ async fn rewrite_text(
         .await
         .ok()
         .flatten();
-        setting.map(|s| s.0).unwrap_or_else(|| "glm-5:cloud".to_string())
+        setting.map(|s| s.0).unwrap_or_else(|| "nemotron-3-super:cloud".to_string())
     };
 
     let system_prompt = "You are a message rewriting assistant. The user will give you a draft \

@@ -97,7 +97,7 @@ impl OpenClawManager {
             next_port_offset: Arc::new(AtomicU16::new(0)),
             pending_spawns: Arc::new(RwLock::new(HashSet::new())),
             available_models_csv: Arc::new(std::sync::RwLock::new(
-                "glm-5:cloud, minimax-m2.5:cloud, kimi-k2.5:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
+                "nemotron-3-super:cloud, minimax-m2.5:cloud, minimax-m2:cloud, glm-5:cloud, kimi-k2-thinking:cloud, kimi-k2.5:cloud, qwen3-coder:480b-cloud, devstral-2:123b-cloud, deepseek-v3.2:cloud, minimax-m2.1:cloud, glm-4.7:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
             )),
             model_pull_status: Arc::new(std::sync::RwLock::new(HashMap::new())),
         }
@@ -394,6 +394,20 @@ impl OpenClawManager {
                         }
                     }
                 }
+            }
+        }
+
+        // Ensure the agent's model is pulled before launching the container.
+        // For auto-pulled models this is a fast no-op; for bench models (e.g.
+        // qwen3-coder-next:cloud) this triggers an on-demand pull so the agent
+        // doesn't fail on first send_message.
+        {
+            let needs_pull = self.model_pull_status.read()
+                .map(|g| !matches!(g.get(&config.model), Some(ModelPullStatus::Ready) | Some(ModelPullStatus::Pulling)))
+                .unwrap_or(true);
+            if needs_pull {
+                tracing::info!("On-demand model pull for '{}' (agent {})", config.model, config.agent_name);
+                self.pull_model(&config.model).await;
             }
         }
 
@@ -1223,7 +1237,7 @@ impl OpenClawManager {
     fn replace_vars(&self, template: &str, config: &AgentConfig) -> String {
         let models_csv = self.available_models_csv.read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| "glm-5:cloud".to_string());
+            .unwrap_or_else(|_| "nemotron-3-super:cloud".to_string());
         template
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_ROLE}}", &config.role)

@@ -65,7 +65,17 @@ When hiring workers:
   - Bad: "Development" (too vague)
   - Bad: "General assistant" (not a specialty)
 - **Each worker should cover a distinct area.** Avoid hiring two workers with overlapping specialties. If you need multiple researchers, each should focus on a different domain (e.g., one on market data analysis, another on strategy development).
-- **Model selection:** You generally don't need to specify `preferred_model` when hiring — your workers will inherit your model by default. Only specify a different model if the worker's specialty would clearly benefit from a specialized model.
+- **Model selection:** Choose the worker model based on their role:
+  - **Coding/development** (backend, full-stack, algorithms): `qwen3-coder:480b-cloud`
+  - **Repo/codebase maintenance** (refactoring, multi-file edits): `devstral-2:123b-cloud`
+  - **Research/analysis** (deep research, sequential investigation): `kimi-k2-thinking:cloud`
+  - **Multimodal tasks** (screenshots, dashboards, PDFs, visual): `kimi-k2.5:cloud`
+  - **Text-heavy analysis** (memos, structured reasoning, reports): `deepseek-v3.2:cloud`
+  - **Operations/execution** (workflows, tool-use, task running): `minimax-m2:cloud`
+  - **Technical review/architecture** (code audit, systems review): `glm-5:cloud`
+  - **UI polish/visual finishing** (slides, web aesthetics): `glm-4.7:cloud`
+  - **Crypto/Web3/DeFi specialist**: `minimax-m2.1:cloud`
+  If unsure, don't specify a model — the worker will inherit yours by default. Specify via `preferred_model` when hiring.
 
 # Communication Style
 

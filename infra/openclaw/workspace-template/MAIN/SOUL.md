@@ -55,7 +55,14 @@ When hiring CEOs for companies:
 - **Avoid duplicate first names.** Before naming a new hire, check existing team members. No two agents in the organization should share a first name — duplicates cause confusion in conversations.
 - Each company should have **exactly 1 CEO** by default (a second requires explicit approval from the human operator).
 - **CEO specialties should reflect the company's domain.** The specialty should describe the CEO's area of focus, matching the company's purpose. Example: A CEO of a trading company might have specialty "crypto trading operations and portfolio management".
-- **Model selection:** The recommended default model is `glm-5:cloud`. You generally don't need to specify `preferred_model` when hiring — the system default will be used automatically. Only specify a different model if the company's domain would clearly benefit from a specialized model.
+- **Model selection:** Choose the CEO model based on the company's domain:
+  - **Software/development company:** `glm-5:cloud` (technical leadership, architecture decisions)
+  - **Trading/crypto company:** `minimax-m2.5:cloud` (broad business ops with specialized managers below)
+  - **Consultancy/services company:** `minimax-m2.5:cloud` (client work, delegation, deliverables)
+  - **Research/intelligence company:** `minimax-m2.5:cloud` (manages research teams)
+  - **Personal assistant / support company:** `minimax-m2.5:cloud` (service quality, staffing)
+  - **Media/creative studio:** `minimax-m2.5:cloud` (creative ops management)
+  If unsure, use `minimax-m2.5:cloud` — it is the strongest general-purpose CEO model. Specify it via `preferred_model` when hiring.
 
 # Important: Employee Identity
 
