@@ -15,14 +15,14 @@ struct QueueItem {
     max_retries: i16,
 }
 
-/// Reset any PROCESSING rows that have been stuck for more than 5 minutes.
-/// This handles process crashes — the items get retried. The per-item 300s
+/// Reset any PROCESSING rows that have been stuck for more than 15 minutes.
+/// This handles process crashes — the items get retried. The per-item 660s
 /// timeout in the spawned task is the primary defense; this is the backup
 /// for cases where the process itself dies.
 async fn recover_stale_claims(pool: &PgPool) {
     match sqlx::query(
         "UPDATE message_queue SET status = 'PENDING', claimed_at = NULL \
-         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '5 minutes'"
+         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '15 minutes'"
     )
     .execute(pool)
     .await
@@ -38,22 +38,22 @@ async fn recover_stale_claims(pool: &PgPool) {
 
 /// Claim up to N items from the queue — one per distinct agent, preferring
 /// agents that don't already have a PROCESSING item. Ordered by priority ASC
-/// (lower = higher priority), then created_at ASC (oldest first).
+/// (lower = higher priority), then seq ASC (strict insertion order).
 async fn claim_work(pool: &PgPool, limit: i64) -> Vec<QueueItem> {
     // Use nested CTEs: first lock candidate rows (FOR UPDATE requires no DISTINCT),
     // then pick one per agent_id with DISTINCT ON, then atomically mark PROCESSING.
     let items: Vec<QueueItem> = match sqlx::query_as::<_, QueueItem>(
         "WITH locked AS ( \
-            SELECT id, agent_id, kind, payload, retry_count, max_retries, priority, created_at \
+            SELECT id, agent_id, kind, payload, retry_count, max_retries, priority, seq \
             FROM message_queue \
             WHERE status = 'PENDING' \
               AND agent_id NOT IN (SELECT agent_id FROM message_queue WHERE status = 'PROCESSING') \
-            ORDER BY agent_id, priority ASC, created_at ASC \
+            ORDER BY agent_id, priority ASC, seq ASC \
             FOR UPDATE SKIP LOCKED \
         ), candidates AS ( \
             SELECT DISTINCT ON (agent_id) id, agent_id, kind, payload, retry_count, max_retries \
             FROM locked \
-            ORDER BY agent_id, priority ASC, created_at ASC \
+            ORDER BY agent_id, priority ASC, seq ASC \
         ) \
         UPDATE message_queue q \
         SET status = 'PROCESSING', claimed_at = NOW() \
@@ -175,11 +175,12 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                     kind, item_id, agent_id, item.retry_count, item.max_retries
                 );
 
-                // 5-minute timeout covers lock acquisition + handler execution.
-                // Normal send_message() completes in 5-60s; this catches hangs
-                // from unresponsive containers or stuck locks.
+                // 11-minute timeout covers lock acquisition + handler execution.
+                // Must exceed OpenClaw's 600s HTTP timeout so we never kill a
+                // handler while the upstream request is still legitimately running.
+                // The extra 60s covers DB queries, tag stripping, etc.
                 let result = tokio::time::timeout(
-                    std::time::Duration::from_secs(300),
+                    std::time::Duration::from_secs(660),
                     async {
                         let _agent_guard = state_clone.acquire_agent_turn(agent_id).await;
                         process_item(&state_clone, &item).await
@@ -200,14 +201,28 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                         // Timeout cancelled the handler before mark_agent_done() could run
                         state_clone.mark_agent_done(agent_id).await;
                         tracing::error!(
-                            "[queue_worker] {}:{} for agent {} timed out after 300s",
+                            "[queue_worker] {}:{} for agent {} timed out after 660s",
                             kind, item_id, agent_id
                         );
-                        mark_failed(
-                            &state_clone.db, item_id,
-                            "handler timed out after 300s",
-                            item.retry_count, item.max_retries,
-                        ).await;
+                        // DM handlers: the agent's OpenClaw likely already processed
+                        // the message and stored it in conversation history. Retrying
+                        // would send the same message again → stale/duplicate responses.
+                        let (err_msg, force_permanent) = if kind == "dm_initiate" || kind == "dm_continue" {
+                            ("handler timed out — skipping retry (DM already processed by agent)", true)
+                        } else {
+                            ("handler timed out after 660s", false)
+                        };
+                        if force_permanent {
+                            mark_failed(
+                                &state_clone.db, item_id, err_msg,
+                                item.max_retries, item.max_retries,
+                            ).await;
+                        } else {
+                            mark_failed(
+                                &state_clone.db, item_id, err_msg,
+                                item.retry_count, item.max_retries,
+                            ).await;
+                        }
                     }
                 }
 
