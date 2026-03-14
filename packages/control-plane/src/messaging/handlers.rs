@@ -592,6 +592,10 @@ async fn run_dm_turn(
          After the conversation, save important decisions, agreements, or new information to MEMORY.md. \
          Communicate naturally — ask questions, share information, and respond as needed. \
          Send ONLY your actual message to {}. \
+         IMPORTANT: Do NOT execute heavy actions during this conversation — no hiring, no provisioning, \
+         no sending DMs to other agents, no long-running API calls. Focus on responding: acknowledge, \
+         ask questions, share information, make decisions, and state what you PLAN to do. \
+         You will receive a separate action prompt after this conversation ends where you should execute. \
          Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
          NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
          NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
