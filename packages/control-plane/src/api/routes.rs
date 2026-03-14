@@ -420,8 +420,11 @@ fn strip_narration_lines(text: &str) -> String {
             if remainder.is_empty() || remainder.chars().all(|c| ".,;:!?…".contains(c)) {
                 return true;
             }
-            // Tier 2: extended narration — prefix + content that doesn't address anyone
-            !has_direct_address(remainder)
+            // Tier 2: extended narration — prefix + SHORT content that doesn't address anyone.
+            // Long remainders (8+ words) are likely real conversational content,
+            // not internal narration (e.g. "building my team immediately with two managers...").
+            let word_count = remainder.split_whitespace().count();
+            word_count < 8 && !has_direct_address(remainder)
         })
     }
 
