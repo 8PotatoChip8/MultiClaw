@@ -692,7 +692,7 @@ async fn run_dm_turn(
 }
 
 /// Post-DM cleanup: mark agents idle, record cooldowns, release active pair, optionally enqueue action prompt.
-async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, _payload: &serde_json::Value) {
+async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload: &serde_json::Value) {
     state.mark_agent_done(sender_id).await;
     state.mark_agent_done(target_id).await;
 
@@ -730,6 +730,8 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, _payload
                 .bind(sender_id).fetch_optional(&state.db).await.ok().flatten()
                 .unwrap_or_else(|| "your colleague".into());
 
+            let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+
             let _ = state.enqueue_message(
                 target_id,
                 5, // routine priority
@@ -737,6 +739,7 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, _payload
                 json!({
                     "agent_id": target_id.to_string(),
                     "sender_name": sender_name,
+                    "thread_id": thread_id_str,
                 }),
             ).await;
         }
@@ -751,6 +754,50 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
     let agent_id = uuid_from_json(payload, "agent_id")?;
     let sender_name = str_from_json(payload, "sender_name")?;
 
+    // Fetch what the agent already said during the DM so the prompt can
+    // prevent repetition. thread_id is optional (older payloads lack it).
+    let already_said = {
+        let thread_id = payload.get("thread_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .and_then(|s| Uuid::parse_str(s).ok());
+
+        if let Some(tid) = thread_id {
+            let msgs: Vec<Option<String>> = sqlx::query_scalar(
+                "SELECT content->>'text' FROM messages \
+                 WHERE thread_id = $1 AND sender_id = $2 AND sender_type = 'AGENT' \
+                 ORDER BY created_at DESC LIMIT 3"
+            ).bind(tid).bind(agent_id)
+            .fetch_all(&state.db).await.unwrap_or_default();
+
+            let texts: Vec<&str> = msgs.iter()
+                .filter_map(|m| m.as_deref())
+                .filter(|s| !s.trim().is_empty())
+                .collect();
+
+            if !texts.is_empty() {
+                let summary = texts.iter().map(|s| {
+                    if s.len() > 300 {
+                        let end = s.char_indices().take_while(|(i, _)| *i < 300)
+                            .last().map(|(i, c)| i + c.len_utf8()).unwrap_or(300);
+                        format!("- {}...", &s[..end])
+                    } else {
+                        format!("- {}", s)
+                    }
+                }).collect::<Vec<_>>().join("\n");
+                format!(
+                    " You already sent these messages during the conversation — \
+                     do NOT repeat, rephrase, or re-send any of this information:\n{}",
+                    summary
+                )
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        }
+    };
+
     let action_prompt = format!(
         "SYSTEM: The conversation with {} has concluded. \
          Based on what was discussed, take any NEW actions you need to. \
@@ -760,8 +807,8 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
          If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
          Do NOT repeat or summarize the conversation — just act on what is NEW. \
          After completing actions, save key outcomes and decisions to MEMORY.md (long-term) \
-         or today's daily log in memory/ (working notes).",
-        sender_name
+         or today's daily log in memory/ (working notes).{}",
+        sender_name, already_said
     );
 
     let action_instructions = "You just finished receiving a briefing or directive. \
