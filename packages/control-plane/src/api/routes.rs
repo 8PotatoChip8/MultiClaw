@@ -1193,9 +1193,11 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
                              -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                             ceo.name, new_count, payload.name, req_id, request_type, req_id, req_id
                         );
+                        let dm_thread = find_or_create_agent_dm_thread(&state.db, ceo_id, aid).await;
+                        insert_system_message_in_thread(&state, dm_thread, ceo_id, &dm_text).await;
                         let _ = state.enqueue_message(
                             aid, 2, "approval_escalate",
-                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request", "thread_id": dm_thread.to_string()}),
                         ).await;
                     }
                 } else {
@@ -1336,9 +1338,11 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
                              -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                             mgr.name, new_count, payload.name, req_id, request_type, req_id, req_id
                         );
+                        let dm_thread = find_or_create_agent_dm_thread(&state.db, mgr_id, aid).await;
+                        insert_system_message_in_thread(&state, dm_thread, mgr_id, &dm_text).await;
                         let _ = state.enqueue_message(
                             aid, 2, "approval_escalate",
-                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+                            json!({"agent_id": aid.to_string(), "message": dm_text, "task_label": "Processing approval request", "thread_id": dm_thread.to_string()}),
                         ).await;
                     }
                 } else {
@@ -2308,9 +2312,11 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
              -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
             requester_name, description, id, p.r#type, id, id
         );
+        let dm_thread = find_or_create_agent_dm_thread(&state.db, requester_id, superior_id).await;
+        insert_system_message_in_thread(&state, dm_thread, requester_id, &dm_text).await;
         let _ = state.enqueue_message(
             superior_id, 2, "approval_escalate",
-            json!({"agent_id": superior_id.to_string(), "message": dm_text, "task_label": "Processing approval request"}),
+            json!({"agent_id": superior_id.to_string(), "message": dm_text, "task_label": "Processing approval request", "thread_id": dm_thread.to_string()}),
         ).await;
     }
 
@@ -2460,9 +2466,31 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
             "Your request \"{}\" (ID: {}) has been {}.{}{}",
             req_type.replace('_', " "), request_id, decision, note_text, availability_caveat
         );
+
+        // Find the most recent AGENT approver to determine the DM thread
+        let last_agent_approver: Option<Uuid> = sqlx::query_scalar(
+            "SELECT approver_id FROM approvals \
+             WHERE request_id = $1 AND approver_type = 'AGENT' \
+             ORDER BY created_at DESC LIMIT 1"
+        ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+
+        let mut payload = json!({
+            "agent_id": agent_id.to_string(),
+            "message": msg,
+            "task_label": "Processing approval decision"
+        });
+
+        if let Some(approver_agent_id) = last_agent_approver {
+            let dm_thread = find_or_create_agent_dm_thread(&state.db, agent_id, approver_agent_id).await;
+            insert_system_message_in_thread(&state, dm_thread, approver_agent_id, &msg).await;
+            payload.as_object_mut().unwrap().insert(
+                "thread_id".to_string(),
+                json!(dm_thread.to_string()),
+            );
+        }
+
         let _ = state.enqueue_message(
-            agent_id, 2, "hire_notify",
-            json!({"agent_id": agent_id.to_string(), "message": msg, "task_label": "Processing approval decision"}),
+            agent_id, 2, "hire_notify", payload,
         ).await;
     }
 }
@@ -2542,9 +2570,11 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                      -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
                     approver_name, description, request_id, req_type, request_id, request_id
                 );
+                let dm_thread = find_or_create_agent_dm_thread(&state.db, p.agent_id, next_superior_id).await;
+                insert_system_message_in_thread(&state, dm_thread, p.agent_id, &dm_text).await;
                 let _ = state.enqueue_message(
                     next_superior_id, 2, "approval_escalate",
-                    json!({"agent_id": next_superior_id.to_string(), "message": dm_text, "task_label": "Processing escalated approval"}),
+                    json!({"agent_id": next_superior_id.to_string(), "message": dm_text, "task_label": "Processing escalated approval", "thread_id": dm_thread.to_string()}),
                 ).await;
                 (StatusCode::OK, Json(json!({"status":"escalated","next_approver_id": next_superior_id})))
             }
@@ -2871,6 +2901,55 @@ async fn get_agent_thread(State(state): State<AppState>, Path(id): Path<String>)
 // Agent-to-Agent DM
 // ═══════════════════════════════════════════════════════════════
 
+/// Find or create an agent-to-agent DM thread (no USER members).
+async fn find_or_create_agent_dm_thread(db: &sqlx::PgPool, agent_a: Uuid, agent_b: Uuid) -> Uuid {
+    let existing: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT t.id FROM threads t \
+         JOIN thread_members tm1 ON t.id = tm1.thread_id \
+         JOIN thread_members tm2 ON t.id = tm2.thread_id \
+         WHERE t.type = 'DM' \
+           AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+           AND tm2.member_type = 'AGENT' AND tm2.member_id = $2 \
+           AND NOT EXISTS ( \
+               SELECT 1 FROM thread_members tm3 \
+               WHERE tm3.thread_id = t.id AND tm3.member_type = 'USER' \
+           ) \
+         LIMIT 1"
+    ).bind(agent_a).bind(agent_b).fetch_optional(db).await.unwrap_or(None);
+
+    if let Some((tid,)) = existing {
+        tid
+    } else {
+        let name_a: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(agent_a).fetch_optional(db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+        let name_b: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(agent_b).fetch_optional(db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
+        let tid = Uuid::new_v4();
+        let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
+            .bind(tid).bind(format!("{} <-> {}", name_a, name_b))
+            .execute(db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+            .bind(tid).bind(agent_a).execute(db).await;
+        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
+            .bind(tid).bind(agent_b).execute(db).await;
+        tid
+    }
+}
+
+/// Insert a SYSTEM message into a thread and broadcast via WebSocket.
+async fn insert_system_message_in_thread(state: &AppState, thread_id: Uuid, sender_id: Uuid, text: &str) {
+    let msg_id = Uuid::new_v4();
+    let content = json!({"text": text});
+    if let Ok(msg) = sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+         VALUES ($1,$2,'SYSTEM',$3,$4,0) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(sender_id).bind(&content)
+    .fetch_one(&state.db).await {
+        let _ = state.tx.send(json!({"type":"new_message","message": msg}).to_string());
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AgentDmRequest {
     target: String,   // agent UUID or handle (e.g. "@ceo-acme")
@@ -2990,39 +3069,7 @@ async fn agent_dm(
         }
     }
 
-    // Find existing agent-to-agent DM (no USER members)
-    let existing: Option<(Uuid,)> = sqlx::query_as(
-        "SELECT t.id FROM threads t \
-         JOIN thread_members tm1 ON t.id = tm1.thread_id \
-         JOIN thread_members tm2 ON t.id = tm2.thread_id \
-         WHERE t.type = 'DM' \
-           AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
-           AND tm2.member_type = 'AGENT' AND tm2.member_id = $2 \
-           AND NOT EXISTS ( \
-               SELECT 1 FROM thread_members tm3 \
-               WHERE tm3.thread_id = t.id AND tm3.member_type = 'USER' \
-           ) \
-         LIMIT 1"
-    ).bind(sender_id).bind(target_id).fetch_optional(&state.db).await.unwrap_or(None);
-
-    let thread_id = if let Some((tid,)) = existing {
-        tid
-    } else {
-        // Create new agent-to-agent DM thread
-        let sender_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-            .bind(sender_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
-        let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
-            .bind(target_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Agent".into());
-        let tid = Uuid::new_v4();
-        let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'DM', $2)")
-            .bind(tid).bind(format!("{} <-> {}", sender_name, target_name))
-            .execute(&state.db).await;
-        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
-            .bind(tid).bind(sender_id).execute(&state.db).await;
-        let _ = sqlx::query("INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2)")
-            .bind(tid).bind(target_id).execute(&state.db).await;
-        tid
-    };
+    let thread_id = find_or_create_agent_dm_thread(&state.db, sender_id, target_id).await;
 
     // Suppress action-prompt re-narrations: if the sender already completed a
     // dm_outbound to this same target within the last 5 minutes, this new DM is
