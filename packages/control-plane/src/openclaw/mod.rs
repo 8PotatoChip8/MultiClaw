@@ -514,7 +514,7 @@ impl OpenClawManager {
 
     /// Send a message to an agent's OpenClaw instance and get the response.
     /// Uses the HTTP /v1/responses endpoint.
-    pub async fn send_message(&self, agent_id: Uuid, message: &str, instructions: Option<&str>) -> Result<String> {
+    pub async fn send_message(&self, agent_id: Uuid, message: &str, instructions: Option<&str>, timeout_secs: Option<u64>) -> Result<String> {
         // Wait for instance to be ready if it's still starting
         let instance = {
             let mut retries = 0;
@@ -582,7 +582,7 @@ impl OpenClawManager {
                 .header("Authorization", format!("Bearer {}", instance.gateway_token))
                 .header("Content-Type", "application/json")
                 .json(&body)
-                .timeout(std::time::Duration::from_secs(600))
+                .timeout(std::time::Duration::from_secs(timeout_secs.unwrap_or(600)))
                 .send()
                 .await;
 

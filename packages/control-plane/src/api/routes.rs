@@ -550,6 +550,25 @@ fn decode_html_entities(s: &str) -> String {
     result
 }
 
+/// Check if an agent is currently in a DM conversation turn. Returns a 409
+/// response if so, preventing heavy side-effect operations during DMs.
+async fn check_dm_mode(state: &AppState, agent_id: Uuid) -> Option<(StatusCode, Json<serde_json::Value>)> {
+    let in_dm = state.agents_in_dm.read().await.contains(&agent_id);
+    if in_dm {
+        Some((
+            StatusCode::CONFLICT,
+            Json(json!({
+                "error": "You are currently in a DM conversation. Focus on responding to the message. \
+                          Heavy actions (hiring, DMs, provisioning) are blocked during conversations. \
+                          You will receive a separate action prompt after this conversation ends \
+                          where you can execute these actions."
+            })),
+        ))
+    } else {
+        None
+    }
+}
+
 pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     let end_conv = {
         let normalized: String = response.chars()
@@ -1127,6 +1146,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
 
 async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let ceo_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, ceo_id).await { return resp; }
     let ceo: Option<Agent> = sqlx::query_as(
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
     ).bind(ceo_id).fetch_optional(&state.db).await.unwrap_or(None);
@@ -1269,6 +1289,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
 
 async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let mgr_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, mgr_id).await { return resp; }
     let mgr: Option<Agent> = sqlx::query_as(
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
     ).bind(mgr_id).fetch_optional(&state.db).await.unwrap_or(None);
@@ -1595,6 +1616,7 @@ async fn resolve_vm_ref(db: &sqlx::PgPool, agent_id: Uuid, target: &str) -> Opti
 
 async fn vm_start(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
     let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
@@ -1612,6 +1634,7 @@ async fn vm_start(State(state): State<AppState>, Path(id): Path<String>, Query(q
 
 async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
     let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
@@ -1629,6 +1652,7 @@ async fn vm_stop(State(state): State<AppState>, Path(id): Path<String>, Query(q)
 
 async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
 
     // Cannot wipe/rebuild the persistent desktop VM
@@ -1659,6 +1683,7 @@ async fn vm_rebuild(State(state): State<AppState>, Path(id): Path<String>, Query
 /// Provision a VM on-demand for an agent (their "workstation")
 async fn vm_provision(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
 
     // Check if agent already has a VM
     let existing_vm: Option<Uuid> = sqlx::query_scalar(
@@ -1687,6 +1712,7 @@ async fn vm_provision(State(state): State<AppState>, Path(id): Path<String>) -> 
 /// Provision a sandbox VM for an agent (lightweight temp environment)
 async fn vm_sandbox_provision(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
 
     // Check if agent already has a sandbox VM
     let existing: Option<Uuid> = sqlx::query_scalar(
@@ -1783,6 +1809,7 @@ struct VmExecRequest {
 
 async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmExecRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
     let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
@@ -1834,6 +1861,7 @@ struct VmFilePushRequest {
 
 async fn vm_file_push(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmFilePushRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
     let vm_ref = resolve_vm_ref(&state.db, uid, target).await;
     match vm_ref {
@@ -1867,6 +1895,7 @@ struct VmFilePullRequest {
 
 async fn vm_file_pull(State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<VmTargetQuery>, Json(body): Json<VmFilePullRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
     let target = q.target.as_deref().unwrap_or("desktop");
 
     // Sandbox is one-way: you can push files TO it, but not pull files FROM it.
@@ -1908,6 +1937,7 @@ struct VmCopyToSandboxRequest {
 
 async fn vm_copy_to_sandbox(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<VmCopyToSandboxRequest>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, uid).await { return resp; }
 
     let desktop_ref = resolve_vm_ref(&state.db, uid, "desktop").await;
     let sandbox_ref = resolve_vm_ref(&state.db, uid, "sandbox").await;
@@ -2300,6 +2330,7 @@ async fn find_superior(db: &sqlx::PgPool, agent_id: Uuid) -> Option<Uuid> {
 async fn create_request(State(state): State<AppState>, Json(p): Json<CreateRequestPayload>) -> impl IntoResponse {
     let id = Uuid::new_v4();
     let requester_id = p.requester_id;
+    if let Some(resp) = check_dm_mode(&state, requester_id).await { return resp; }
 
     // Scrub secrets from request payload
     let payload = if let Some(ref crypto) = state.crypto {
@@ -2546,6 +2577,7 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
 /// fully approved. Otherwise, it escalates to the next superior in the chain.
 async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentApprovalAction>) -> impl IntoResponse {
     let request_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, p.agent_id).await { return resp; }
 
     // Verify this agent is the current approver
     let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
@@ -2640,6 +2672,7 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
 /// Agent rejects a subordinate's request. The request is marked as rejected immediately.
 async fn agent_reject_request(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<AgentApprovalAction>) -> impl IntoResponse {
     let request_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    if let Some(resp) = check_dm_mode(&state, p.agent_id).await { return resp; }
 
     // Verify this agent is the current approver
     let current: Option<(String, Option<Uuid>)> = sqlx::query_as(
@@ -3010,6 +3043,7 @@ async fn agent_dm(
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid sender ID"}))),
     };
+    if let Some(resp) = check_dm_mode(&state, sender_id).await { return resp; }
 
     // Resolve target: UUID or @handle
     let target_id: Uuid = if p.target.starts_with('@') {
@@ -3354,6 +3388,7 @@ async fn agent_send_file(
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid sender ID"}))),
     };
+    if let Some(resp) = check_dm_mode(&state, sender_id).await { return resp; }
 
     // Resolve target: UUID or @handle
     let receiver_id: Uuid = if p.target.starts_with('@') {

@@ -56,6 +56,9 @@ pub struct AppState {
     pub agent_message_locks: Arc<RwLock<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>>,
     /// Notification channel to wake the message queue worker when new work is enqueued.
     pub queue_notify: Arc<Notify>,
+    /// Tracks agents currently inside a DM turn (run_dm_turn send_message in flight).
+    /// Heavy API endpoints check this and return 409 to prevent long-running side effects.
+    pub agents_in_dm: Arc<RwLock<HashSet<Uuid>>>,
 }
 
 impl AppState {

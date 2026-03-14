@@ -171,6 +171,7 @@ async fn main() -> anyhow::Result<()> {
         action_prompt_cooldowns: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         agent_message_locks: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         queue_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+        agents_in_dm: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
     };
 
     // Spawn the durable message queue worker

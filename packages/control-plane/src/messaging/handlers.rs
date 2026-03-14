@@ -174,7 +174,7 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
     }
 
     state.mark_agent_working(responding_agent_id, "Responding in thread").await;
-    let result: Result<String, String> = match state.openclaw.send_message(responding_agent_id, message_text, Some(&agent_context)).await {
+    let result: Result<String, String> = match state.openclaw.send_message(responding_agent_id, message_text, Some(&agent_context), None).await {
         Ok(response) => {
             tracing::info!("OpenClaw responded for agent {}", responding_agent_id);
             Ok(response)
@@ -400,9 +400,10 @@ pub async fn handle_dm_outbound(state: &AppState, payload: &serde_json::Value) -
             let newer_count: Option<i64> = sqlx::query_scalar(
                 "SELECT COUNT(*) FROM messages \
                  WHERE thread_id = $1 AND sender_type = 'AGENT' \
-                   AND created_at > $2"
+                   AND sender_id = $2 \
+                   AND created_at > $3"
             )
-            .bind(thread_id).bind(enqueued.naive_utc())
+            .bind(thread_id).bind(sender_id).bind(enqueued.naive_utc())
             .fetch_optional(&state.db).await.ok().flatten();
 
             if newer_count.unwrap_or(0) > 0 {
@@ -612,9 +613,17 @@ async fn run_dm_turn(
         partner_name, partner_name, partner_name, partner_name
     );
 
-    // Send message
+    // Send message — mark agent as "in DM" to block heavy API endpoints
     state.mark_agent_working(responder_id, "Chatting in DM").await;
-    let result = state.openclaw.send_message(responder_id, current_text, Some(&dm_ctx)).await;
+    {
+        let mut dm_set = state.agents_in_dm.write().await;
+        dm_set.insert(responder_id);
+    }
+    let result = state.openclaw.send_message(responder_id, current_text, Some(&dm_ctx), Some(90)).await;
+    {
+        let mut dm_set = state.agents_in_dm.write().await;
+        dm_set.remove(&responder_id);
+    }
     state.mark_agent_done(responder_id).await;
 
     match result {
@@ -699,6 +708,13 @@ async fn run_dm_turn(
 async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload: &serde_json::Value) {
     state.mark_agent_done(sender_id).await;
     state.mark_agent_done(target_id).await;
+
+    // Ensure DM-mode flags are cleared for both agents
+    {
+        let mut dm_set = state.agents_in_dm.write().await;
+        dm_set.remove(&sender_id);
+        dm_set.remove(&target_id);
+    }
 
     // Record cooldown
     let pair_key = if sender_id < target_id { (sender_id, target_id) } else { (target_id, sender_id) };
@@ -862,7 +878,7 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
     state.mark_agent_working(agent_id, "Acting on briefing").await;
-    match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions)).await {
+    match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), None).await {
         Ok(response) => {
             let (cleaned, _) = strip_agent_tags(&response);
             let normalized = cleaned.replace('[', "").replace(']', "").replace('\n', " ").replace(' ', "");
@@ -890,7 +906,7 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
     let instructions = payload.get("instructions").and_then(|v| v.as_str());
 
     state.mark_agent_working(agent_id, "Heartbeat").await;
-    let result = state.openclaw.send_message(agent_id, prompt, instructions).await;
+    let result = state.openclaw.send_message(agent_id, prompt, instructions, None).await;
     state.mark_agent_done(agent_id).await;
 
     match result {
@@ -951,7 +967,7 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
     let task_label = payload.get("task_label").and_then(|v| v.as_str()).unwrap_or("Processing message");
 
     state.mark_agent_working(agent_id, task_label).await;
-    let result = state.openclaw.send_message(agent_id, message, instructions).await;
+    let result = state.openclaw.send_message(agent_id, message, instructions, None).await;
     state.mark_agent_done(agent_id).await;
 
     match result {
@@ -1068,7 +1084,7 @@ pub async fn handle_recovery_prompt(state: &AppState, payload: &serde_json::Valu
     tracing::info!("Sending recovery prompt to {} ({})", agent_name, role);
 
     state.mark_agent_working(agent_id, "Post-restart recovery").await;
-    let result = state.openclaw.send_message(agent_id, &prompt, Some(instructions)).await;
+    let result = state.openclaw.send_message(agent_id, &prompt, Some(instructions), None).await;
     state.mark_agent_done(agent_id).await;
 
     match result {
