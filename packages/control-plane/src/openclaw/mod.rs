@@ -1329,7 +1329,7 @@ impl OpenClawManager {
     }
 
     fn default_agents_template(&self) -> String {
-        "# {{AGENT_NAME}}\nRole: {{AGENT_ROLE}}\nCompany: {{COMPANY_NAME}}\nHolding: {{HOLDING_NAME}}".to_string()
+        "# {{AGENT_NAME}}\nRole: {{AGENT_ROLE}}\nCompany: {{COMPANY_NAME}}\nHolding: {{HOLDING_NAME}}\nSpecialty: {{SPECIALTY}}".to_string()
     }
 
     fn default_skill_template(&self) -> String {

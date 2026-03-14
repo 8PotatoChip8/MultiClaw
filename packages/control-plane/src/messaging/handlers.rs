@@ -634,7 +634,7 @@ async fn run_dm_turn(
             } else { clean_response.clone() };
 
             // Redundancy check — detect if agent is repeating itself
-            let is_redundant = if !scrubbed.trim().is_empty() {
+            let (is_redundant, redundancy_overlap) = if !scrubbed.trim().is_empty() {
                 let prev_text: Option<String> = sqlx::query_scalar(
                     "SELECT content->>'text' FROM messages \
                      WHERE thread_id = $1 AND sender_id = $2 \
@@ -644,9 +644,9 @@ async fn run_dm_turn(
 
                 if let Some(prev) = prev_text {
                     let overlap = word_overlap_ratio(&prev, &scrubbed);
-                    overlap > 0.6
-                } else { false }
-            } else { false };
+                    (overlap > 0.6, overlap)
+                } else { (false, 0.0) }
+            } else { (false, 0.0) };
 
             // Store message if non-empty (always store, even if redundant —
             // the message should be visible in the UI regardless)
@@ -664,7 +664,7 @@ async fn run_dm_turn(
 
             // End conversation if redundant (after storing the message)
             if is_redundant {
-                tracing::info!("DM thread {}: ending conversation — {}'s response was redundant", thread_id, responder_id);
+                tracing::info!("DM thread {}: ending conversation — {}'s response was redundant (overlap {:.2})", thread_id, responder_id, redundancy_overlap);
                 return DmTurnResult::End;
             }
 
