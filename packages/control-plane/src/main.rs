@@ -86,7 +86,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
 
-    let (tx, _rx) = tokio::sync::broadcast::channel(256);
+    let (tx, _rx) = tokio::sync::broadcast::channel(1024);
     let tx_arc = std::sync::Arc::new(tx);
 
     tracing::info!("MainAgent: name={}, model={}", agent_name, agent_model);
