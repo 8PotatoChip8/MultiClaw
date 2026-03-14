@@ -192,9 +192,13 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                         tracing::info!("[queue_worker] completed {}:{}", kind, item_id);
                     }
                     Ok(Err(e)) => {
+                        // Handler returned an error — mark_agent_done() may not have been called
+                        state_clone.mark_agent_done(agent_id).await;
                         mark_failed(&state_clone.db, item_id, &e, item.retry_count, item.max_retries).await;
                     }
                     Err(_) => {
+                        // Timeout cancelled the handler before mark_agent_done() could run
+                        state_clone.mark_agent_done(agent_id).await;
                         tracing::error!(
                             "[queue_worker] {}:{} for agent {} timed out after 300s",
                             kind, item_id, agent_id
