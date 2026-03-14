@@ -2026,6 +2026,47 @@ async fn create_thread(State(state): State<AppState>, Json(p): Json<CreateThread
         }
     }
 
+    // Enforce communication hierarchy for GROUP threads with agent members
+    if p.r#type == "GROUP" {
+        if let Some(ref member_ids) = p.member_ids {
+            // Load role, company_id, parent_agent_id for each agent member
+            let mut agents: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>)> = Vec::new();
+            for mid in member_ids {
+                if let Ok(Some(row)) = sqlx::query_as::<_, (String, Option<Uuid>, Option<Uuid>)>(
+                    "SELECT role, company_id, parent_agent_id FROM agents WHERE id = $1"
+                ).bind(mid).fetch_optional(&state.db).await {
+                    agents.push((*mid, row.0, row.1, row.2));
+                }
+            }
+            // Check every pair: each must be allowed to DM the other
+            for i in 0..agents.len() {
+                for j in (i+1)..agents.len() {
+                    let (id_a, ref role_a, company_a, parent_a) = agents[i];
+                    let (id_b, ref role_b, company_b, parent_b) = agents[j];
+                    let allowed =
+                        role_a == "MAIN" || role_b == "MAIN"
+                        // Direct parent-child
+                        || parent_a == Some(id_b)
+                        || parent_b == Some(id_a)
+                        // CEO can reach managers in their company
+                        || (role_a == "CEO" && role_b == "MANAGER" && company_a == company_b && company_a.is_some())
+                        || (role_b == "CEO" && role_a == "MANAGER" && company_a == company_b && company_a.is_some())
+                        // Peers under the same parent in the same company
+                        || (company_a == company_b && parent_a == parent_b && company_a.is_some() && parent_a.is_some());
+                    if !allowed {
+                        let name_a: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                            .bind(id_a).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+                        let name_b: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                            .bind(id_b).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+                        return (StatusCode::FORBIDDEN, Json(json!({
+                            "error": format!("{} and {} are not in the same chain of command. Group chats can only include agents who are allowed to communicate directly.", name_a, name_b)
+                        })));
+                    }
+                }
+            }
+        }
+    }
+
     let id = Uuid::new_v4();
     let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, $2, $3)")
         .bind(id).bind(&p.r#type).bind(&p.title).execute(&state.db).await;
