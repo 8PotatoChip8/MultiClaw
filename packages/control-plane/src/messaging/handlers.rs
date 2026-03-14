@@ -597,7 +597,7 @@ async fn run_dm_turn(
          ask questions, share information, make decisions, and state what you PLAN to do. \
          You will receive a separate action prompt after this conversation ends where you should execute. \
          Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
-         NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...'). \
+         NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...', 'Memory updated', 'Saved to MEMORY.md', 'Notes recorded'). \
          NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
          Do NOT include approval prompts, action requests, or instructions meant for the human operator — {} cannot act on those. Use the dm-user API to reach the operator separately. \
          When the conversation has reached a natural conclusion and you have nothing more to add, \
@@ -743,6 +743,44 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
                 json!({
                     "agent_id": target_id.to_string(),
                     "sender_name": sender_name,
+                    "thread_id": thread_id_str,
+                }),
+            ).await;
+        }
+    }
+
+    // Post-conversation action prompt for the sender too (MAIN, CEO, or MANAGER).
+    // The sender may need to update memory, report upward, or take follow-up actions
+    // based on the target's responses during the DM.
+    let sender_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM agents WHERE id = $1 AND status = 'ACTIVE'"
+    ).bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+
+    if matches!(sender_role.as_deref(), Some("MAIN") | Some("CEO") | Some("MANAGER")) {
+        let should_skip_sender = {
+            let cooldowns = state.action_prompt_cooldowns.read().await;
+            cooldowns.get(&sender_id)
+                .map(|t| t.elapsed() < std::time::Duration::from_secs(120))
+                .unwrap_or(false)
+        };
+
+        if !should_skip_sender {
+            state.action_prompt_cooldowns.write().await
+                .insert(sender_id, tokio::time::Instant::now());
+
+            let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| "your colleague".into());
+
+            let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+
+            let _ = state.enqueue_message(
+                sender_id,
+                5, // routine priority
+                "action_prompt",
+                json!({
+                    "agent_id": sender_id.to_string(),
+                    "sender_name": target_name,
                     "thread_id": thread_id_str,
                 }),
             ).await;

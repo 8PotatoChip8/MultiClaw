@@ -516,8 +516,12 @@ impl OpenClawManager {
                     InstanceStatus::Starting if retries < 30 => {
                         drop(instances);
                         retries += 1;
+                        // Poll faster for the first 5 attempts (1s), then back off to 3s.
+                        // Containers typically become ready within 3-10s, so fast initial
+                        // polling reduces first-response latency without meaningful overhead.
+                        let wait = if retries <= 5 { 1 } else { 3 };
                         tracing::info!("Waiting for OpenClaw instance for {} to be ready (attempt {}/30)", inst.agent_name, retries);
-                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
                     }
                     _ => {
                         return Err(anyhow!(
