@@ -188,6 +188,8 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/dm \
 The target agent will receive your message and respond. Use `@handle` (e.g. `@manager-acme`) or a UUID.
 If the target is unavailable, you'll be notified — retry later.
 
+**Who you can DM:** You can message your manager, and other workers in your department (who share the same manager). You cannot DM managers or workers in other departments — if you need cross-department coordination, ask your manager to handle it.
+
 ### Send a Direct Message to the Human Operator
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/dm-user \
