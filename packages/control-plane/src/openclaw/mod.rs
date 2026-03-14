@@ -1237,7 +1237,7 @@ impl OpenClawManager {
     fn replace_vars(&self, template: &str, config: &AgentConfig) -> String {
         let models_csv = self.available_models_csv.read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| "nemotron-3-super:cloud".to_string());
+            .unwrap_or_else(|_| "glm-5:cloud".to_string());
         template
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_ROLE}}", &config.role)

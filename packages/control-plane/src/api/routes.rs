@@ -832,7 +832,7 @@ async fn handle_init(
 
     let holding_name = payload.holding_name.unwrap_or_else(|| "Main Holding".into());
     let agent_name = payload.main_agent_name.unwrap_or_else(|| "MainAgent".into());
-    let model = payload.default_model.unwrap_or_else(|| "nemotron-3-super:cloud".into());
+    let model = payload.default_model.unwrap_or_else(|| "glm-5:cloud".into());
 
     let holding_id = Uuid::new_v4();
     let owner_id = Uuid::new_v4();
@@ -4636,7 +4636,7 @@ async fn list_models(State(state): State<AppState>) -> impl IntoResponse {
         .unwrap_or_else(|| serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default());
     let default_model: String = sqlx::query_scalar("SELECT value FROM system_meta WHERE key = 'default_model'")
         .fetch_optional(&state.db).await.ok().flatten()
-        .unwrap_or_else(|| "nemotron-3-super:cloud".to_string());
+        .unwrap_or_else(|| "glm-5:cloud".to_string());
     let models: Vec<String> = serde_json::from_str(&raw)
         .unwrap_or_else(|_| DEFAULT_MODELS.iter().map(|s| s.to_string()).collect());
     (StatusCode::OK, Json(json!({"models": models, "default": default_model})))
@@ -4769,7 +4769,7 @@ async fn rewrite_text(
         .await
         .ok()
         .flatten();
-        setting.map(|s| s.0).unwrap_or_else(|| "nemotron-3-super:cloud".to_string())
+        setting.map(|s| s.0).unwrap_or_else(|| "glm-5:cloud".to_string())
     };
 
     let system_prompt = "You are a message rewriting assistant. The user will give you a draft \

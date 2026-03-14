@@ -215,7 +215,7 @@ read -r -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT </dev/
 if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
 # ── Pull all default models ──
-BUILTIN_MODELS=("glm-5:cloud" "minimax-m2.5:cloud" "kimi-k2.5:cloud" "qwen3.5:397b-cloud" "qwen3-coder-next:cloud")
+BUILTIN_MODELS=("glm-5:cloud" "nemotron-3-super:cloud" "minimax-m2.5:cloud" "minimax-m2:cloud" "kimi-k2-thinking:cloud" "kimi-k2.5:cloud" "qwen3-coder:480b-cloud" "devstral-2:123b-cloud" "deepseek-v3.2:cloud" "minimax-m2.1:cloud" "glm-4.7:cloud")
 
 log "Pulling ${#BUILTIN_MODELS[@]} default models via Ollama..."
 for m in "${BUILTIN_MODELS[@]}"; do
