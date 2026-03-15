@@ -279,6 +279,27 @@ pub async fn handle_dm_initiate(state: &AppState, payload: &serde_json::Value) -
 
     match turn_result {
         DmTurnResult::Continue { response_text, next_depth } => {
+            // Auto-end briefing conversations: if the sender is the target's
+            // parent (superior briefing subordinate) and the response is a short
+            // acknowledgment with no questions, end here — no round-trip needed.
+            let target_parent: Option<Uuid> = sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT parent_agent_id FROM agents WHERE id = $1"
+            ).bind(target_id)
+            .fetch_optional(&state.db).await.ok().flatten().flatten();
+
+            let is_briefing_ack = target_parent == Some(sender_id)
+                && response_text.len() < 300
+                && !response_text.contains('?');
+
+            if is_briefing_ack {
+                tracing::info!(
+                    "DM thread {}: ending after briefing ack ({}B response, no questions)",
+                    thread_id, response_text.len()
+                );
+                dm_cleanup(state, sender_id, target_id, payload).await;
+                return Ok(());
+            }
+
             // Enqueue the next turn with swapped roles
             let _ = state.enqueue_message(
                 other_id, // now the other agent responds
