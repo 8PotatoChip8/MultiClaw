@@ -942,6 +942,40 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
                 tracing::debug!("Post-DM: {} has no immediate actions", agent_id);
             } else {
                 tracing::info!("Post-DM: {} took action ({} chars)", agent_id, cleaned.len());
+
+                // Re-check for unbriefed subordinates after the agent took action.
+                // The agent may have hired new people during this action_prompt.
+                let new_unbriefed: Vec<String> = sqlx::query_scalar(
+                    "SELECT a.name FROM agents a \
+                     WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
+                       AND NOT EXISTS ( \
+                           SELECT 1 FROM thread_members tm1 \
+                           JOIN thread_members tm2 ON tm1.thread_id = tm2.thread_id \
+                           JOIN threads t ON t.id = tm1.thread_id \
+                           WHERE t.type = 'DM' \
+                             AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+                             AND tm2.member_type = 'AGENT' AND tm2.member_id = a.id \
+                       )"
+                ).bind(agent_id)
+                .fetch_all(&state.db).await.unwrap_or_default();
+
+                if !new_unbriefed.is_empty() {
+                    tracing::info!(
+                        "Post-action: {} has {} unbriefed subordinates: {:?}",
+                        agent_id, new_unbriefed.len(), new_unbriefed
+                    );
+                    let _ = state.enqueue_message(
+                        agent_id,
+                        3, // higher priority — briefing is important
+                        "action_prompt",
+                        serde_json::json!({
+                            "agent_id": agent_id.to_string(),
+                            "sender_name": "system",
+                            "thread_id": "",
+                            "unbriefed": new_unbriefed,
+                        }),
+                    ).await;
+                }
             }
         }
         Err(e) => {
