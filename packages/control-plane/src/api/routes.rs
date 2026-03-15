@@ -2606,10 +2606,15 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
 
         if let Some(approver_agent_id) = last_agent_approver {
             let dm_thread = find_or_create_agent_dm_thread(&state.db, agent_id, approver_agent_id).await;
-            insert_system_message_in_thread(&state, dm_thread, approver_agent_id, &msg).await;
+            // SYSTEM message insertion moved to handle_hire_notify so it appears
+            // after the approver's response (which is stored by handle_generic_send).
             payload.as_object_mut().unwrap().insert(
                 "thread_id".to_string(),
                 json!(dm_thread.to_string()),
+            );
+            payload.as_object_mut().unwrap().insert(
+                "approver_id".to_string(),
+                json!(approver_agent_id.to_string()),
             );
         }
 
@@ -3063,7 +3068,7 @@ async fn find_or_create_agent_dm_thread(db: &sqlx::PgPool, agent_a: Uuid, agent_
 }
 
 /// Insert a SYSTEM message into a thread and broadcast via WebSocket.
-async fn insert_system_message_in_thread(state: &AppState, thread_id: Uuid, sender_id: Uuid, text: &str) {
+pub(crate) async fn insert_system_message_in_thread(state: &AppState, thread_id: Uuid, sender_id: Uuid, text: &str) {
     let msg_id = Uuid::new_v4();
     let content = json!({"text": text});
     if let Ok(msg) = sqlx::query_as::<_, Message>(

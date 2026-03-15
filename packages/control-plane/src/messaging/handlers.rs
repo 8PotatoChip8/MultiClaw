@@ -8,7 +8,7 @@
 //! IMPORTANT: The queue worker already holds the per-agent turn lock before
 //! calling these handlers. Do NOT call `acquire_agent_turn()` inside handlers.
 
-use crate::api::routes::{strip_agent_tags, scrub_secrets, word_overlap_ratio};
+use crate::api::routes::{strip_agent_tags, scrub_secrets, word_overlap_ratio, insert_system_message_in_thread};
 use crate::api::ws::AppState;
 use crate::db::models::Message;
 use serde_json::json;
@@ -1104,25 +1104,21 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
 /// These currently just call generic_send or do minimal work.
 
 pub async fn handle_hire_notify(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
-    // Deliver the notification (e.g. "Your request has been APPROVED")
-    handle_generic_send(state, payload).await?;
+    // Insert SYSTEM notification into the DM thread.
+    // This runs after the approver's response is already stored (by approval_escalate → handle_generic_send),
+    // so the notification appears in correct chronological order.
+    if let (Some(thread_id_str), Some(approver_id_str), Some(msg)) = (
+        payload.get("thread_id").and_then(|v| v.as_str()),
+        payload.get("approver_id").and_then(|v| v.as_str()),
+        payload.get("message").and_then(|v| v.as_str()),
+    ) {
+        if let (Ok(thread_id), Ok(approver_id)) = (Uuid::parse_str(thread_id_str), Uuid::parse_str(approver_id_str)) {
+            insert_system_message_in_thread(state, thread_id, approver_id, msg).await;
+        }
+    }
 
-    // Trigger an action_prompt so the agent acts on the approval immediately
-    // (e.g. retries the hire-manager command now that the limit is increased).
-    let agent_id = uuid_from_json(payload, "agent_id")?;
-    let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
-    let _ = state.enqueue_message(
-        agent_id,
-        3, // higher priority — acting on approval is time-sensitive
-        "action_prompt",
-        serde_json::json!({
-            "agent_id": agent_id.to_string(),
-            "sender_name": "system",
-            "thread_id": thread_id_str,
-        }),
-    ).await;
-
-    Ok(())
+    // Deliver the notification to the agent (agent acts via tool calls during send_message)
+    handle_generic_send(state, payload).await
 }
 
 pub async fn handle_approval_escalate(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
