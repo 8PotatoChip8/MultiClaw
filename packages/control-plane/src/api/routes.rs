@@ -424,7 +424,7 @@ fn strip_narration_lines(text: &str) -> String {
             // Long remainders (8+ words) are likely real conversational content,
             // not internal narration (e.g. "building my team immediately with two managers...").
             let word_count = remainder.split_whitespace().count();
-            word_count < 8 && !has_direct_address(remainder)
+            word_count < 12 && !has_direct_address(remainder)
         })
     }
 
@@ -501,10 +501,49 @@ fn dedup_content_blocks(text: &str) -> String {
         }
     }
     if deduped.len() < paragraphs.len() {
-        deduped.join("\n\n")
-    } else {
-        text.to_string()
+        return deduped.join("\n\n");
     }
+
+    // Strategy 3: fuzzy paragraph dedup — detect revised/paraphrased content.
+    // When a model uses tools mid-response, it often drafts text before tools,
+    // narrates "Let me check...", then drafts a revised version after tools.
+    // The later version is more informed and should be kept.
+    if paragraphs.len() >= 3 {
+        let mut remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for i in 0..paragraphs.len() {
+            if remove.contains(&i) || paragraphs[i].trim().len() < 20 { continue; }
+            for j in (i + 1)..paragraphs.len() {
+                if remove.contains(&j) || paragraphs[j].trim().len() < 20 { continue; }
+                let overlap = word_overlap_ratio(paragraphs[i].trim(), paragraphs[j].trim());
+                if overlap > 0.6 {
+                    // Later paragraph is a revision — drop earlier + narration between
+                    remove.insert(i);
+                    for k in (i + 1)..j {
+                        let lower = paragraphs[k].trim().to_lowercase();
+                        let is_narration = lower.starts_with("let me ")
+                            || lower.starts_with("i'll ")
+                            || lower.starts_with("i will ")
+                            || lower.starts_with("now let me")
+                            || lower.starts_with("checking ")
+                            || lower.starts_with("looking ");
+                        if is_narration || paragraphs[k].trim().len() < 60 {
+                            remove.insert(k);
+                        }
+                    }
+                    break; // para i handled, move on
+                }
+            }
+        }
+        if !remove.is_empty() {
+            let kept: Vec<&str> = paragraphs.iter().enumerate()
+                .filter(|(idx, _)| !remove.contains(idx))
+                .map(|(_, p)| *p)
+                .collect();
+            return kept.join("\n\n");
+        }
+    }
+
+    text.to_string()
 }
 
 /// Compute word-overlap ratio between two texts.

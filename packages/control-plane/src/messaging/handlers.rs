@@ -811,6 +811,21 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
 
             let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
 
+            // Find direct subordinates the sender hasn't DM'd yet (no DM thread exists)
+            let unbriefed: Vec<String> = sqlx::query_scalar(
+                "SELECT a.name FROM agents a \
+                 WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' AND a.id != $2 \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM thread_members tm1 \
+                       JOIN thread_members tm2 ON tm1.thread_id = tm2.thread_id \
+                       JOIN threads t ON t.id = tm1.thread_id \
+                       WHERE t.type = 'DM' \
+                         AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+                         AND tm2.member_type = 'AGENT' AND tm2.member_id = a.id \
+                   )"
+            ).bind(sender_id).bind(target_id)
+            .fetch_all(&state.db).await.unwrap_or_default();
+
             let _ = state.enqueue_message(
                 sender_id,
                 5, // routine priority
@@ -819,6 +834,7 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
                     "agent_id": sender_id.to_string(),
                     "sender_name": target_name,
                     "thread_id": thread_id_str,
+                    "unbriefed": unbriefed,
                 }),
             ).await;
         }
@@ -885,6 +901,17 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         }
     };
 
+    let unbriefed_hint = payload.get("unbriefed")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
+        .filter(|names| !names.is_empty())
+        .map(|names| format!(
+            "\n\nREMINDER: You have team members who have NOT been briefed yet: {}. \
+             Brief them now — send each a DM with their role, responsibilities, and first tasks.",
+            names.join(", ")
+        ))
+        .unwrap_or_default();
+
     let action_prompt = format!(
         "SYSTEM: The conversation with {} has concluded. \
          Based on what was discussed, take any NEW actions you need to. \
@@ -894,8 +921,8 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
          If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
          Do NOT repeat or summarize the conversation — just act on what is NEW. \
          After completing actions, save key outcomes and decisions to MEMORY.md (long-term) \
-         or today's daily log in memory/ (working notes).{}",
-        sender_name, conversation_context
+         or today's daily log in memory/ (working notes).{}{}",
+        sender_name, conversation_context, unbriefed_hint
     );
 
     let action_instructions = "You just finished receiving a briefing or directive. \
