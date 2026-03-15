@@ -934,7 +934,7 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
     state.mark_agent_working(agent_id, "Acting on briefing").await;
-    match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(180)).await {
+    match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(300)).await {
         Ok(response) => {
             let (cleaned, _) = strip_agent_tags(&response);
             let normalized = cleaned.replace('[', "").replace(']', "").replace('\n', " ").replace(' ', "");

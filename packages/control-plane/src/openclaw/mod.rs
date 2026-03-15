@@ -700,6 +700,15 @@ impl OpenClawManager {
                     return Err(anyhow!("OpenClaw HTTP {}: {}", status, err_body));
                 }
                 Err(e) if attempt < max_retries - 1 => {
+                    // Timeout means the OpenClaw run is still executing inside the container.
+                    // Retrying would create a duplicate ghost run. Fail immediately.
+                    if e.is_timeout() {
+                        tracing::warn!(
+                            "OpenClaw request timed out for {} after {}s (run may still be active inside container): {}",
+                            instance.agent_name, timeout_secs.unwrap_or(600), e
+                        );
+                        return Err(anyhow!("OpenClaw request timed out: {}", e));
+                    }
                     tracing::warn!(
                         "OpenClaw connection error for {}, retrying in 3s ({}/{}): {}",
                         instance.agent_name, attempt + 1, max_retries, e
