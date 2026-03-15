@@ -3232,27 +3232,60 @@ async fn agent_dm(
     if scrubbed_msg.trim().is_empty() {
         return (StatusCode::OK, Json(json!({"thread_id": thread_id, "message_id": msg_id, "status": "empty_after_cleaning"})));
     }
-    // Enqueue dm_outbound for the SENDER agent instead of writing directly to DB.
-    // This ensures the message INSERT is serialized through the queue worker's
-    // per-agent lock, preventing out-of-order writes when the sender is busy
-    // (e.g. during an action_prompt that triggers multiple DMs).
-    match state.enqueue_message(
-        sender_id, // sender's queue — waits for any in-flight action_prompt to finish
-        3, // agent DM priority
-        "dm_outbound",
-        json!({
-            "thread_id": thread_id.to_string(),
-            "sender_id": sender_id.to_string(),
-            "target_id": target_id.to_string(),
-            "message_id": msg_id.to_string(),
-            "message_text": scrubbed_msg,
-            "raw_message": p.message,
-            "pair_key_a": pair_key.0.to_string(),
-            "pair_key_b": pair_key.1.to_string(),
-            "enqueued_at": chrono::Utc::now().to_rfc3339(),
-        }),
-    ).await {
-        Ok(_) => {
+    // Process dm_outbound inline instead of enqueueing on sender's queue.
+    // The sender may have an action_prompt running (which holds the per-agent
+    // queue lock for up to 300s). Processing inline avoids that delay — the
+    // dm_outbound work is just fast DB operations (INSERT + WS broadcast).
+    let content = json!({"text": scrubbed_msg});
+    match sqlx::query_as::<_, Message>(
+        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+         VALUES ($1,$2,'AGENT',$3,$4,0) \
+         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+    ).bind(msg_id).bind(thread_id).bind(sender_id).bind(&content)
+    .fetch_one(&state.db).await {
+        Ok(msg) => {
+            // Broadcast websocket event
+            let _ = state.tx.send(json!({"type": "new_message", "message": msg}).to_string());
+
+            // Coalesce check: if a PENDING dm_initiate already exists for the
+            // same (sender → target) pair, merge this message into it instead of
+            // creating a second conversation.
+            let existing_qi: Option<(Uuid, serde_json::Value)> = sqlx::query_as(
+                "SELECT id, payload FROM message_queue \
+                 WHERE agent_id = $1 AND kind = 'dm_initiate' AND status = 'PENDING' \
+                   AND payload->>'sender_id' = $2 AND payload->>'target_id' = $3 \
+                 LIMIT 1"
+            )
+            .bind(target_id).bind(sender_id.to_string()).bind(target_id.to_string())
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if let Some((qi_id, mut qi_payload)) = existing_qi {
+                let existing_text = qi_payload["message_text"].as_str().unwrap_or("");
+                let combined = format!("{}\n\n{}", existing_text, p.message);
+                qi_payload["message_text"] = serde_json::Value::String(combined);
+                let _ = sqlx::query("UPDATE message_queue SET payload = $1 WHERE id = $2")
+                    .bind(&qi_payload).bind(qi_id)
+                    .execute(&state.db).await;
+                tracing::info!("agent_dm: coalesced DM from {} to {} into queue item {}", sender_id, target_id, qi_id);
+            } else {
+                // Enqueue dm_initiate for the TARGET agent
+                if let Err(e) = state.enqueue_message(
+                    target_id,
+                    3, // agent DM priority
+                    "dm_initiate",
+                    json!({
+                        "thread_id": thread_id.to_string(),
+                        "sender_id": sender_id.to_string(),
+                        "target_id": target_id.to_string(),
+                        "message_text": p.message,
+                        "pair_key_a": pair_key.0.to_string(),
+                        "pair_key_b": pair_key.1.to_string(),
+                    }),
+                ).await {
+                    tracing::error!("agent_dm: failed to enqueue dm_initiate: {}", e);
+                }
+            }
+
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
         }
         Err(e) => {
