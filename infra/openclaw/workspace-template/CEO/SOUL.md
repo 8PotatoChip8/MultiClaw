@@ -65,7 +65,7 @@ When hiring managers and workers:
   - Bad: "Development" (too vague)
   - Bad: "Analysis" (too vague)
 - **Each hire should cover a distinct area.** Don't duplicate specialties — if you need multiple people in the same domain, differentiate their focus areas.
-- **Model selection:** Choose the manager model based on their role:
+- **Model selection matters — match the model to the role.** Choose the manager model based on their department:
   - **Action-heavy operations/execution manager** (workflows, tool-use loops): `minimax-m2:cloud`
   - **Research/analyst manager** (deep research, sequential investigation): `kimi-k2-thinking:cloud`
   - **Technical/architecture manager** (systems engineering, code review): `glm-5:cloud`
