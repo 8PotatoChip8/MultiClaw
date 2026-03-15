@@ -861,7 +861,7 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         if let Some(tid) = thread_id {
             let rows: Vec<(Uuid, String)> = sqlx::query_as(
                 "SELECT sender_id, COALESCE(content->>'text', '') AS text FROM messages \
-                 WHERE thread_id = $1 AND sender_type = 'AGENT' \
+                 WHERE thread_id = $1 AND sender_type IN ('AGENT', 'SYSTEM') \
                  ORDER BY created_at ASC LIMIT 8"
             ).bind(tid)
             .fetch_all(&state.db).await.unwrap_or_default();
@@ -1104,7 +1104,25 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
 /// These currently just call generic_send or do minimal work.
 
 pub async fn handle_hire_notify(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
-    handle_generic_send(state, payload).await
+    // Deliver the notification (e.g. "Your request has been APPROVED")
+    handle_generic_send(state, payload).await?;
+
+    // Trigger an action_prompt so the agent acts on the approval immediately
+    // (e.g. retries the hire-manager command now that the limit is increased).
+    let agent_id = uuid_from_json(payload, "agent_id")?;
+    let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
+    let _ = state.enqueue_message(
+        agent_id,
+        3, // higher priority — acting on approval is time-sensitive
+        "action_prompt",
+        serde_json::json!({
+            "agent_id": agent_id.to_string(),
+            "sender_name": "system",
+            "thread_id": thread_id_str,
+        }),
+    ).await;
+
+    Ok(())
 }
 
 pub async fn handle_approval_escalate(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
