@@ -982,25 +982,34 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
                 tracing::debug!("[heartbeat] agent {} response was empty after cleaning", agent_id);
             } else {
                 tracing::info!("[heartbeat] agent {} has a report ({}B)", agent_id, cleaned.len());
-                // Store the cleaned response in the MAIN agent's human-operator DM thread
-                let thread_id: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT tm.thread_id FROM thread_members tm \
-                     JOIN threads t ON t.id = tm.thread_id \
-                     JOIN thread_members tm2 ON t.id = tm2.thread_id \
-                     WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
-                       AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
+
+                // Only store heartbeat reports in operator thread for MAIN agent.
+                // Non-MAIN agents act via tool calls during send_message() above;
+                // their reports are logged at info level and don't need thread storage.
+                let agent_role: Option<String> = sqlx::query_scalar(
+                    "SELECT role FROM agents WHERE id = $1"
                 ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
 
-                if let Some(tid) = thread_id {
-                    let msg_id = Uuid::new_v4();
-                    let content = json!({"text": cleaned});
-                    if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
-                        "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
-                         VALUES ($1,$2,'AGENT',$3,$4,0) \
-                         RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
-                    ).bind(msg_id).bind(tid).bind(agent_id).bind(&content)
-                    .fetch_one(&state.db).await {
-                        let _ = state.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                if agent_role.as_deref() == Some("MAIN") {
+                    let thread_id: Option<Uuid> = sqlx::query_scalar(
+                        "SELECT tm.thread_id FROM thread_members tm \
+                         JOIN threads t ON t.id = tm.thread_id \
+                         JOIN thread_members tm2 ON t.id = tm2.thread_id \
+                         WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                           AND tm2.member_type = 'USER' AND t.type = 'DM' LIMIT 1"
+                    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+                    if let Some(tid) = thread_id {
+                        let msg_id = Uuid::new_v4();
+                        let content = json!({"text": cleaned});
+                        if let Ok(agent_msg) = sqlx::query_as::<_, Message>(
+                            "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+                             VALUES ($1,$2,'AGENT',$3,$4,0) \
+                             RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+                        ).bind(msg_id).bind(tid).bind(agent_id).bind(&content)
+                        .fetch_one(&state.db).await {
+                            let _ = state.tx.send(json!({"type":"new_message","message": agent_msg}).to_string());
+                        }
                     }
                 }
             }

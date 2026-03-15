@@ -391,7 +391,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("Post-restart recovery prompts all enqueued");
     });
 
-    // MainAgent heartbeat: periodic check-in loop — enqueues heartbeat via message queue
+    // All-agent heartbeat: periodic check-in loop — enqueues heartbeats via message queue
     let pool_hb = pool.clone();
     let app_state_hb = app_state.clone();
     let mut hb_rx = recovery_rx.clone();
@@ -399,7 +399,7 @@ async fn main() -> anyhow::Result<()> {
         // Wait for recovery + recovery prompts to finish before starting heartbeat.
         let _ = hb_rx.changed().await;
         tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-        tracing::info!("MainAgent heartbeat loop started (post-recovery)");
+        tracing::info!("Heartbeat loop started (all agents, post-recovery)");
 
         loop {
             let interval_secs: u64 = sqlx::query_scalar::<_, String>(
@@ -415,17 +415,32 @@ async fn main() -> anyhow::Result<()> {
 
             tokio::time::sleep(std::time::Duration::from_secs(interval_secs)).await;
 
-            let main_agent: Option<(Uuid, String)> = sqlx::query_as(
-                "SELECT id, name FROM agents WHERE role = 'MAIN' AND status != 'QUARANTINED' LIMIT 1"
-            ).fetch_optional(&pool_hb).await.ok().flatten();
+            // Fetch ALL active agents (not just MAIN)
+            let agents: Vec<(Uuid, String, String)> = sqlx::query_as(
+                "SELECT id, name, role FROM agents WHERE status = 'ACTIVE'"
+            ).fetch_all(&pool_hb).await.unwrap_or_default();
 
-            let (main_id, main_name) = match main_agent {
-                Some(a) => a,
-                None => {
-                    tracing::debug!("Heartbeat skipped: no active MAIN agent found");
-                    continue;
-                }
-            };
+            if agents.is_empty() {
+                tracing::debug!("Heartbeat skipped: no active agents found");
+                continue;
+            }
+
+            // Skip agents that are currently busy (have PROCESSING queue items)
+            let busy: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT agent_id FROM message_queue WHERE status = 'PROCESSING'"
+            ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
+
+            // Skip agents that completed a queue item recently (still in action_prompt chain)
+            let recent: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT agent_id FROM message_queue \
+                 WHERE status = 'COMPLETED' AND completed_at > NOW() - INTERVAL '120 seconds'"
+            ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
+
+            // Skip agents that already have a pending heartbeat in the queue
+            let pending_hb: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT agent_id FROM message_queue \
+                 WHERE kind = 'heartbeat' AND status = 'PENDING'"
+            ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
 
             let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
                 Read HEARTBEAT.md and follow the checklist. \
@@ -435,16 +450,33 @@ async fn main() -> anyhow::Result<()> {
                 Follow the HEARTBEAT.md checklist. Do not narrate — just check and report. \
                 If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else.";
 
-            match app_state_hb.enqueue_message(
-                main_id, 5, "heartbeat",
-                serde_json::json!({
-                    "agent_id": main_id.to_string(),
-                    "prompt": heartbeat_prompt,
-                    "instructions": instructions,
-                }),
-            ).await {
-                Ok(queue_id) => tracing::debug!("Heartbeat enqueued for {} (queue_id={})", main_name, queue_id),
-                Err(e) => tracing::warn!("Failed to enqueue heartbeat for {}: {}", main_name, e),
+            let mut enqueued = 0u32;
+            for (agent_id, agent_name, _role) in &agents {
+                if busy.contains(agent_id) || recent.contains(agent_id) || pending_hb.contains(agent_id) {
+                    continue;
+                }
+
+                match app_state_hb.enqueue_message(
+                    *agent_id, 5, "heartbeat",
+                    serde_json::json!({
+                        "agent_id": agent_id.to_string(),
+                        "prompt": heartbeat_prompt,
+                        "instructions": instructions,
+                    }),
+                ).await {
+                    Ok(queue_id) => {
+                        tracing::debug!("Heartbeat enqueued for {} (queue_id={})", agent_name, queue_id);
+                        enqueued += 1;
+                    }
+                    Err(e) => tracing::warn!("Failed to enqueue heartbeat for {}: {}", agent_name, e),
+                }
+
+                // Stagger: 2s between enqueues to avoid thundering herd
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+
+            if enqueued > 0 {
+                tracing::info!("Heartbeat cycle: enqueued {} of {} agents", enqueued, agents.len());
             }
         }
     });
