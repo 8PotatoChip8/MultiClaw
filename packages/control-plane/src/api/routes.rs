@@ -510,7 +510,7 @@ fn dedup_content_blocks(text: &str) -> String {
     // When a model uses tools mid-response, it often drafts text before tools,
     // narrates "Let me check...", then drafts a revised version after tools.
     // The later version is more informed and should be kept.
-    if paragraphs.len() >= 3 {
+    if paragraphs.len() >= 2 {
         let mut remove: std::collections::HashSet<usize> = std::collections::HashSet::new();
         for i in 0..paragraphs.len() {
             if remove.contains(&i) || paragraphs[i].trim().len() < 20 { continue; }
