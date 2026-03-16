@@ -195,7 +195,18 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                     Ok(Err(e)) => {
                         // Handler returned an error — mark_agent_done() may not have been called
                         state_clone.mark_agent_done(agent_id).await;
-                        mark_failed(&state_clone.db, item_id, &e, item.retry_count, item.max_retries).await;
+                        // DM handlers already ran dm_cleanup (enqueued action_prompts,
+                        // released locks). Retrying would create a duplicate DM while
+                        // the action_prompt is already handling recovery.
+                        let force_permanent = kind == "dm_initiate" || kind == "dm_continue";
+                        if force_permanent {
+                            mark_failed(
+                                &state_clone.db, item_id, &e,
+                                item.max_retries, item.max_retries,
+                            ).await;
+                        } else {
+                            mark_failed(&state_clone.db, item_id, &e, item.retry_count, item.max_retries).await;
+                        }
                     }
                     Err(_) => {
                         // Timeout cancelled the handler before mark_agent_done() could run

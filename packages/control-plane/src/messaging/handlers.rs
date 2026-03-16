@@ -640,7 +640,8 @@ async fn run_dm_turn(
         let mut dm_set = state.agents_in_dm.write().await;
         dm_set.insert(responder_id);
     }
-    let result = state.openclaw.send_message(responder_id, current_text, Some(&dm_ctx), Some(90)).await;
+    let timeout = if current_depth == 0 { 150 } else { 90 };
+    let result = state.openclaw.send_message(responder_id, current_text, Some(&dm_ctx), Some(timeout)).await;
     {
         let mut dm_set = state.agents_in_dm.write().await;
         dm_set.remove(&responder_id);

@@ -267,6 +267,8 @@ fn fix_broken_words(s: &str) -> String {
         ("acknowled ged", "acknowledged"),
         ("Con firmed", "Confirmed"),
         ("con firmed", "confirmed"),
+        ("Appro ving", "Approving"),
+        ("appro ving", "approving"),
         ("Ap proved", "Approved"),
         ("ap proved", "approved"),
         ("App reciate", "Appreciate"),
