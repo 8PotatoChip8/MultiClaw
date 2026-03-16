@@ -73,6 +73,7 @@ pub struct AgentConfig {
     pub agent_name: String,
     pub role: String,
     pub company_name: String,
+    pub company_type: Option<String>,  // "INTERNAL" or "EXTERNAL"
     pub holding_name: String,
     pub specialty: Option<String>,
     pub model: String,
@@ -892,16 +893,16 @@ impl OpenClawManager {
             .unwrap_or_else(|| "MultiClaw Holdings".to_string());
 
         for (agent_id, name, role, specialty, system_prompt, company_id, model) in agents {
-            let company_name = if let Some(cid) = company_id {
-                sqlx::query_scalar::<_, String>("SELECT name FROM companies WHERE id = $1")
-                    .bind(cid)
-                    .fetch_optional(db_pool)
-                    .await
-                    .ok()
-                    .flatten()
-                    .unwrap_or_else(|| holding_name.clone())
+            let (company_name, company_type) = if let Some(cid) = company_id {
+                let row: Option<(String, String)> = sqlx::query_as(
+                    "SELECT name, type FROM companies WHERE id = $1"
+                ).bind(cid).fetch_optional(db_pool).await.ok().flatten();
+                match row {
+                    Some((n, t)) => (n, Some(t)),
+                    None => (holding_name.clone(), None),
+                }
             } else {
-                holding_name.clone()
+                (holding_name.clone(), None)
             };
 
             let config = AgentConfig {
@@ -909,6 +910,7 @@ impl OpenClawManager {
                 agent_name: name.clone(),
                 role: role.clone(),
                 company_name,
+                company_type,
                 holding_name: holding_name.clone(),
                 specialty,
                 model,
@@ -1013,16 +1015,16 @@ impl OpenClawManager {
                 .await?;
 
             if let Some((id, name, role, specialty, system_prompt, company_id, model)) = row {
-                let company_name = if let Some(cid) = company_id {
-                    sqlx::query_scalar::<_, String>("SELECT name FROM companies WHERE id = $1")
-                        .bind(cid)
-                        .fetch_optional(db_pool)
-                        .await
-                        .ok()
-                        .flatten()
-                        .unwrap_or_else(|| holding_name.clone())
+                let (company_name, company_type) = if let Some(cid) = company_id {
+                    let row: Option<(String, String)> = sqlx::query_as(
+                        "SELECT name, type FROM companies WHERE id = $1"
+                    ).bind(cid).fetch_optional(db_pool).await.ok().flatten();
+                    match row {
+                        Some((n, t)) => (n, Some(t)),
+                        None => (holding_name.clone(), None),
+                    }
                 } else {
-                    holding_name.clone()
+                    (holding_name.clone(), None)
                 };
 
                 let config = AgentConfig {
@@ -1030,6 +1032,7 @@ impl OpenClawManager {
                     agent_name: name.clone(),
                     role,
                     company_name,
+                    company_type,
                     holding_name: holding_name.clone(),
                     specialty,
                     model,
@@ -1247,19 +1250,47 @@ impl OpenClawManager {
         let models_csv = self.available_models_csv.read()
             .map(|g| g.clone())
             .unwrap_or_else(|_| "glm-5:cloud".to_string());
-        template
+
+        // Build set of truthy condition names for {{#if COND}}...{{/if}} blocks
+        let mut truthy: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        if config.specialty.is_some() { truthy.insert("SPECIALTY"); }
+        let ct = config.company_type.as_deref().unwrap_or("INTERNAL");
+        if ct == "INTERNAL" { truthy.insert("INTERNAL"); }
+        if ct == "EXTERNAL" { truthy.insert("EXTERNAL"); }
+
+        // Process conditional blocks: {{#if NAME}}...{{/if}}
+        let mut result = template.to_string();
+        loop {
+            let Some(start) = result.find("{{#if ") else { break };
+            let Some(tag_end) = result[start..].find("}}") else { break };
+            let tag_end = start + tag_end + 2;
+            let cond_name = result[start + 6..tag_end - 2].trim();
+            let end_tag = "{{/if}}";
+            let Some(block_end) = result[tag_end..].find(end_tag) else { break };
+            let block_end = tag_end + block_end;
+            let content = &result[tag_end..block_end];
+            if truthy.contains(cond_name) {
+                // Keep content, remove the tags
+                let replacement = content.to_string();
+                result = format!("{}{}{}", &result[..start], replacement, &result[block_end + end_tag.len()..]);
+            } else {
+                // Remove entire block including tags
+                result = format!("{}{}", &result[..start], &result[block_end + end_tag.len()..]);
+            }
+        }
+
+        // Simple variable substitution
+        result
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_ROLE}}", &config.role)
             .replace("{{COMPANY_NAME}}", &config.company_name)
+            .replace("{{COMPANY_TYPE}}", ct)
             .replace("{{HOLDING_NAME}}", &config.holding_name)
             .replace("{{SPECIALTY}}", config.specialty.as_deref().unwrap_or("general operations"))
             .replace("{{MULTICLAW_API_URL}}", &self.multiclaw_api_url)
             .replace("{{AGENT_ID}}", &config.agent_id.to_string())
             .replace("{{MODEL}}", &config.model)
             .replace("{{AVAILABLE_MODELS}}", &models_csv)
-            // Handle conditional blocks (simple approach)
-            .replace("{{#if SPECIALTY}}", "")
-            .replace("{{/if}}", "")
     }
 
     fn find_template_path(&self, filename: &str) -> Result<PathBuf> {
