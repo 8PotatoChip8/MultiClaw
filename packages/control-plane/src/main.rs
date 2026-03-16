@@ -450,17 +450,53 @@ async fn main() -> anyhow::Result<()> {
                 Follow the HEARTBEAT.md checklist. Do not narrate — just check and report. \
                 If nothing needs attention, respond with exactly [HEARTBEAT_OK] and nothing else.";
 
+            // For MAIN agents: build a CEO activity report to append to the heartbeat prompt
+            let mut main_ceo_reports: std::collections::HashMap<Uuid, String> = std::collections::HashMap::new();
+            for (agent_id, _agent_name, role) in &agents {
+                if role != "MAIN" { continue; }
+                let rows: Vec<(String, Option<String>, Option<String>, Option<i64>)> = sqlx::query_as(
+                    "SELECT a.name, c.name AS company_name, c.type AS company_type, \
+                     EXTRACT(EPOCH FROM (NOW() - COALESCE( \
+                         (SELECT MAX(m.created_at) FROM messages m \
+                          WHERE m.sender_id = a.id AND m.sender_type = 'AGENT'), \
+                         a.created_at \
+                     )))::BIGINT AS idle_seconds \
+                     FROM agents a \
+                     LEFT JOIN companies c ON a.company_id = c.id \
+                     WHERE a.parent_agent_id = $1 \
+                       AND a.status = 'ACTIVE' AND a.role = 'CEO' \
+                     ORDER BY idle_seconds DESC"
+                ).bind(agent_id)
+                .fetch_all(&pool_hb).await.unwrap_or_default();
+
+                if !rows.is_empty() {
+                    let mut lines = vec!["CEO Activity Report:".to_string()];
+                    for (name, company, ctype, idle_secs) in &rows {
+                        let co = company.as_deref().unwrap_or("unknown");
+                        let ct = ctype.as_deref().unwrap_or("EXTERNAL");
+                        let mins = idle_secs.unwrap_or(0) / 60;
+                        lines.push(format!("- {} ({}, {}): idle {} min", name, co, ct, mins));
+                    }
+                    main_ceo_reports.insert(*agent_id, lines.join("\n"));
+                }
+            }
+
             let mut enqueued = 0u32;
             for (agent_id, agent_name, _role) in &agents {
                 if busy.contains(agent_id) || recent.contains(agent_id) || pending_hb.contains(agent_id) {
                     continue;
                 }
 
+                let prompt = match main_ceo_reports.get(agent_id) {
+                    Some(report) => format!("{}\n\n{}", heartbeat_prompt, report),
+                    None => heartbeat_prompt.to_string(),
+                };
+
                 match app_state_hb.enqueue_message(
                     *agent_id, 5, "heartbeat",
                     serde_json::json!({
                         "agent_id": agent_id.to_string(),
-                        "prompt": heartbeat_prompt,
+                        "prompt": prompt,
                         "instructions": instructions,
                     }),
                 ).await {
