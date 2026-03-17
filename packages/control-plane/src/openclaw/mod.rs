@@ -74,6 +74,7 @@ pub struct AgentConfig {
     pub role: String,
     pub company_name: String,
     pub company_type: Option<String>,  // "INTERNAL" or "EXTERNAL"
+    pub company_description: Option<String>,
     pub holding_name: String,
     pub specialty: Option<String>,
     pub model: String,
@@ -893,16 +894,16 @@ impl OpenClawManager {
             .unwrap_or_else(|| "MultiClaw Holdings".to_string());
 
         for (agent_id, name, role, specialty, system_prompt, company_id, model) in agents {
-            let (company_name, company_type) = if let Some(cid) = company_id {
-                let row: Option<(String, String)> = sqlx::query_as(
-                    "SELECT name, type FROM companies WHERE id = $1"
+            let (company_name, company_type, company_description) = if let Some(cid) = company_id {
+                let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+                    "SELECT name, type, description FROM companies WHERE id = $1"
                 ).bind(cid).fetch_optional(db_pool).await.ok().flatten();
                 match row {
-                    Some((n, t)) => (n, Some(t)),
-                    None => (holding_name.clone(), None),
+                    Some((n, t, d)) => (n, Some(t), d),
+                    None => (holding_name.clone(), None, None),
                 }
             } else {
-                (holding_name.clone(), None)
+                (holding_name.clone(), None, None)
             };
 
             let config = AgentConfig {
@@ -911,6 +912,7 @@ impl OpenClawManager {
                 role: role.clone(),
                 company_name,
                 company_type,
+                company_description,
                 holding_name: holding_name.clone(),
                 specialty,
                 model,
@@ -1015,16 +1017,16 @@ impl OpenClawManager {
                 .await?;
 
             if let Some((id, name, role, specialty, system_prompt, company_id, model)) = row {
-                let (company_name, company_type) = if let Some(cid) = company_id {
-                    let row: Option<(String, String)> = sqlx::query_as(
-                        "SELECT name, type FROM companies WHERE id = $1"
+                let (company_name, company_type, company_description) = if let Some(cid) = company_id {
+                    let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+                        "SELECT name, type, description FROM companies WHERE id = $1"
                     ).bind(cid).fetch_optional(db_pool).await.ok().flatten();
                     match row {
-                        Some((n, t)) => (n, Some(t)),
-                        None => (holding_name.clone(), None),
+                        Some((n, t, d)) => (n, Some(t), d),
+                        None => (holding_name.clone(), None, None),
                     }
                 } else {
-                    (holding_name.clone(), None)
+                    (holding_name.clone(), None, None)
                 };
 
                 let config = AgentConfig {
@@ -1033,6 +1035,7 @@ impl OpenClawManager {
                     role,
                     company_name,
                     company_type,
+                    company_description,
                     holding_name: holding_name.clone(),
                     specialty,
                     model,
@@ -1254,6 +1257,7 @@ impl OpenClawManager {
         // Build set of truthy condition names for {{#if COND}}...{{/if}} blocks
         let mut truthy: std::collections::HashSet<&str> = std::collections::HashSet::new();
         if config.specialty.is_some() { truthy.insert("SPECIALTY"); }
+        if config.company_description.is_some() { truthy.insert("COMPANY_DESCRIPTION"); }
         let ct = config.company_type.as_deref().unwrap_or("INTERNAL");
         if ct == "INTERNAL" { truthy.insert("INTERNAL"); }
         if ct == "EXTERNAL" { truthy.insert("EXTERNAL"); }
@@ -1287,6 +1291,7 @@ impl OpenClawManager {
             .replace("{{COMPANY_TYPE}}", ct)
             .replace("{{HOLDING_NAME}}", &config.holding_name)
             .replace("{{SPECIALTY}}", config.specialty.as_deref().unwrap_or("general operations"))
+            .replace("{{COMPANY_DESCRIPTION}}", config.company_description.as_deref().unwrap_or(""))
             .replace("{{MULTICLAW_API_URL}}", &self.multiclaw_api_url)
             .replace("{{AGENT_ID}}", &config.agent_id.to_string())
             .replace("{{MODEL}}", &config.model)

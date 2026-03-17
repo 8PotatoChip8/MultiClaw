@@ -1071,6 +1071,7 @@ async fn handle_init(
             role: "MAIN".to_string(),
             company_name: holding_name_clone.clone(),
             company_type: None,
+            company_description: None,
             holding_name: holding_name_clone,
             specialty: Some("Holding Company Management".to_string()),
             model: model_clone,
@@ -1290,8 +1291,10 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
-    let (company_name, company_type): (String, String) = sqlx::query_as("SELECT name, type FROM companies WHERE id = $1").bind(company_id)
-        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into()));
+    let (company_name, company_type, company_description): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT name, type, description FROM companies WHERE id = $1"
+    ).bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into(), None));
     let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
         .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
     let model_clone = model.clone();
@@ -1299,7 +1302,8 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     tokio::spawn(async move {
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "CEO".to_string(),
-            company_name, company_type: Some(company_type), holding_name, specialty: specialty_clone,
+            company_name, company_type: Some(company_type), company_description,
+            holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
         if let Err(e) = openclaw.spawn_instance(&config).await {
@@ -1434,8 +1438,10 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
-    let (company_name, company_type): (String, String) = sqlx::query_as("SELECT name, type FROM companies WHERE id = $1").bind(company_id)
-        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into()));
+    let (company_name, company_type, company_description): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT name, type, description FROM companies WHERE id = $1"
+    ).bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into(), None));
     let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
         .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
     let model_clone = model.clone();
@@ -1443,7 +1449,8 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     tokio::spawn(async move {
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "MANAGER".to_string(),
-            company_name, company_type: Some(company_type), holding_name, specialty: specialty_clone,
+            company_name, company_type: Some(company_type), company_description,
+            holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
         if let Err(e) = openclaw.spawn_instance(&config).await {
@@ -1581,8 +1588,10 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     state.openclaw.register_pending_spawn(agent_id).await;
     let openclaw = state.openclaw.clone();
     let name_clone = payload.name.clone();
-    let (company_name, company_type): (String, String) = sqlx::query_as("SELECT name, type FROM companies WHERE id = $1").bind(company_id)
-        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into()));
+    let (company_name, company_type, company_description): (String, String, Option<String>) = sqlx::query_as(
+        "SELECT name, type, description FROM companies WHERE id = $1"
+    ).bind(company_id)
+        .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| ("Company".into(), "INTERNAL".into(), None));
     let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
         .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "Holdings".into());
     let model_clone = model.clone();
@@ -1590,7 +1599,8 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     tokio::spawn(async move {
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "WORKER".to_string(),
-            company_name, company_type: Some(company_type), holding_name, specialty: specialty_clone,
+            company_name, company_type: Some(company_type), company_description,
+            holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
         if let Err(e) = openclaw.spawn_instance(&config).await {
