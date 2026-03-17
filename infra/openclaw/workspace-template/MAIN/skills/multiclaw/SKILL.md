@@ -325,6 +325,26 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/engagements/ENGAGEMENT_ID/complete
 ```
 Completing auto-records paired ledger entries (EXPENSE for client, REVENUE for provider).
 
+## Fund a Company — Capital Injection
+
+Inject capital into a company to fund its operations (e.g., trading budget). This creates a CAPITAL_INJECTION ledger entry and automatically updates the company's spending budget.
+
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "type": "CAPITAL_INJECTION",
+    "amount": "50.00",
+    "currency": "USDT",
+    "description": "Initial trading capital"
+  }'
+```
+- `amount`: the amount to inject (as a string for precision)
+- `currency`: the currency (e.g., "USDT", "USD")
+- `description`: a note explaining the injection
+
+The company's budget is automatically updated — no separate budget API call needed. Trading companies need capital injected before their workers can execute BUY orders.
+
 ## Trading Oversight — Monitor Company Trading Activity
 
 As the holding's leader, you can monitor any company's trading activity.

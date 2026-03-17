@@ -39,12 +39,12 @@ The `preferred_model` field is optional. If omitted, the worker inherits your mo
 
 ### View Company Org Tree
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/org-tree
 ```
 
 ### View Financial Ledger
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/ledger
 ```
 
 ## Your Computers
@@ -348,7 +348,7 @@ The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). 
 
 ### Record a Trade Order
 ```bash
-curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_id": "{{AGENT_ID}}",
@@ -372,17 +372,17 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
 
 ### List Orders
 ```bash
-curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?status=FILLED&limit=50"
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders?status=FILLED&limit=50"
 ```
 
 ### Check Positions (Current Holdings)
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/positions
 ```
 
 ### Check Budget
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/budget
 ```
 
 ## Important Notes

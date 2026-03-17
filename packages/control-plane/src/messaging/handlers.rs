@@ -332,6 +332,19 @@ pub async fn handle_dm_initiate(state: &AppState, payload: &serde_json::Value) -
         }
         DmTurnResult::Error(e) => {
             dm_cleanup(state, sender_id, target_id, payload).await;
+
+            // Notify the sender that their depth-0 DM was not delivered
+            let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| "the target agent".into());
+            let notification = format!(
+                "[SYSTEM] Your DM to {} was NOT delivered — they are currently unavailable. \
+                 The message was not received. If this was a briefing or important instruction, \
+                 you should retry the DM later.",
+                target_name
+            );
+            let _ = state.openclaw.send_message(sender_id, &notification, None, Some(90)).await;
+
             Err(e)
         }
     }

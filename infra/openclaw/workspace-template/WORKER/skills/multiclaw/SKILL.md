@@ -29,7 +29,7 @@ curl -s {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}
 
 ### View Company Org Tree
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/org-tree
 ```
 
 ## Your Computers
@@ -304,7 +304,7 @@ The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). 
 
 ### Record a Trade Order
 ```bash
-curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_id": "{{AGENT_ID}}",
@@ -331,25 +331,25 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
 
 ### List Orders
 ```bash
-curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?status=FILLED&symbol=BTC/USDT&limit=50"
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders?status=FILLED&symbol=BTC/USDT&limit=50"
 ```
 
 ### Update Order Status
 ```bash
-curl -s -X PATCH {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders/ORDER_ID \
+curl -s -X PATCH {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders/ORDER_ID \
   -H 'Content-Type: application/json' \
   -d '{"status": "FILLED", "fill_price": 65000.0, "fill_quantity": 0.001, "fee": 0.05}'
 ```
 
 ### Check Positions (Current Holdings)
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/positions
 ```
 Returns net quantities per symbol/exchange based on filled orders.
 
 ### Check Budget
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/budget
 ```
 Returns available spending budget per currency. Budget is funded by CAPITAL_INJECTION ledger entries.
 

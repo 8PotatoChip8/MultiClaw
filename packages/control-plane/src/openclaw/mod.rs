@@ -79,6 +79,7 @@ pub struct AgentConfig {
     pub agent_id: Uuid,
     pub agent_name: String,
     pub role: String,
+    pub company_id: Option<Uuid>,
     pub company_name: String,
     pub company_type: Option<String>,  // "INTERNAL" or "EXTERNAL"
     pub company_description: Option<String>,
@@ -934,6 +935,7 @@ impl OpenClawManager {
                 agent_id,
                 agent_name: name.clone(),
                 role: role.clone(),
+                company_id,
                 company_name,
                 company_type,
                 company_description,
@@ -1083,6 +1085,7 @@ impl OpenClawManager {
                     agent_id: id,
                     agent_name: name.clone(),
                     role,
+                    company_id,
                     company_name,
                     company_type,
                     company_description,
@@ -1346,6 +1349,7 @@ impl OpenClawManager {
         result
             .replace("{{AGENT_NAME}}", &config.agent_name)
             .replace("{{AGENT_ROLE}}", &config.role)
+            .replace("{{COMPANY_ID}}", &config.company_id.map(|u| u.to_string()).unwrap_or_default())
             .replace("{{COMPANY_NAME}}", &config.company_name)
             .replace("{{COMPANY_TYPE}}", ct)
             .replace("{{HOLDING_NAME}}", &config.holding_name)

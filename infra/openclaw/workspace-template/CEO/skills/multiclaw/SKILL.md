@@ -34,7 +34,7 @@ curl -s {{MULTICLAW_API_URL}}/v1/companies
 
 ### View Your Company Org Tree
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/org-tree
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/org-tree
 ```
 
 ### Hire a Manager
@@ -57,7 +57,7 @@ The `preferred_model` field is optional. If omitted, the worker inherits your mo
 
 ### View Financial Ledger
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/ledger
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/ledger
 ```
 
 ## Your Computers
@@ -350,7 +350,7 @@ Returns all active services across the holding. Each service has a `provider_com
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/services \
   -H 'Content-Type: application/json' \
   -d '{
-    "provider_company_id": "YOUR_COMPANY_ID",
+    "provider_company_id": "{{COMPANY_ID}}",
     "name": "Custom Tool Development",
     "description": "We build scripts, bots, and integrations for your team",
     "pricing_model": "per_project",
@@ -365,7 +365,7 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/engagements \
   -d '{
     "service_id": "SERVICE_UUID",
     "client_company_id": "CLIENT_COMPANY_ID",
-    "scope": {"deliverable": "CoinEx trading bot", "deadline": "2 days"},
+    "scope": {"deliverable": "CoinEx API wrapper script", "deadline": "2 days"},
     "created_by_agent_id": "{{AGENT_ID}}"
   }'
 ```
@@ -396,25 +396,25 @@ The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). 
 
 ### List All Orders
 ```bash
-curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?limit=100"
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders?limit=100"
 ```
 Filter by: `?status=FILLED`, `?symbol=BTC/USDT`, or combine.
 
 ### Check Positions (Current Holdings)
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/positions
 ```
 Returns net quantities per symbol/exchange based on filled orders.
 
 ### Check Budget
 ```bash
-curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/budget
 ```
 Returns available spending budget per currency. Budget is automatically funded when CAPITAL_INJECTION ledger entries are created. BUY orders are checked against this budget — workers cannot overspend.
 
 ### Record a Trade Order (if needed)
 ```bash
-curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/orders \
   -H 'Content-Type: application/json' \
   -d '{
     "agent_id": "{{AGENT_ID}}",
@@ -434,7 +434,7 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
 
 ## Important Notes
 
-1. Replace `COMPANY_ID`, `MANAGER_NAME`, etc. with actual values.
+1. Your company ID is: `{{COMPANY_ID}}`
 2. Your agent ID is: `{{AGENT_ID}}`
 3. You **cannot** create companies or hire CEOs — those are leadership-only operations.
 4. Always check the response status. A 2xx status means success.

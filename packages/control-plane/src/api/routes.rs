@@ -1081,6 +1081,7 @@ async fn handle_init(
             company_name: holding_name_clone.clone(),
             company_type: None,
             company_description: None,
+            company_id: None,
             holding_name: holding_name_clone,
             specialty: Some("Holding Company Management".to_string()),
             model: model_clone,
@@ -1312,6 +1313,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "CEO".to_string(),
             company_name, company_type: Some(company_type), company_description,
+            company_id: Some(company_id),
             holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
@@ -1459,6 +1461,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "MANAGER".to_string(),
             company_name, company_type: Some(company_type), company_description,
+            company_id: Some(company_id),
             holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
@@ -1615,6 +1618,7 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
         let config = crate::openclaw::AgentConfig {
             agent_id, agent_name: name_clone, role: "WORKER".to_string(),
             company_name, company_type: Some(company_type), company_description,
+            company_id: Some(company_id),
             holding_name, specialty: specialty_clone,
             model: model_clone, system_prompt: None,
         };
@@ -6316,6 +6320,7 @@ async fn restart_agent_container(State(state): State<AppState>, Path(id): Path<S
         company_name,
         company_type,
         company_description,
+        company_id,
         holding_name,
         specialty,
         model,
