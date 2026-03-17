@@ -384,13 +384,29 @@ fn strip_narration_lines(text: &str) -> String {
         "let me see", "let me find", "let me get", "let me pull", "let me search",
         "let me read", "let me also", "let me start", "let me create",
         "let me set", "let me prepare", "let me reach out",
+        "let me now", "let me proceed",
         "now let me", "now i'll", "now i will",
-        "i'll check", "i'll review", "i'll look", "i'll send",
-        "i'll search", "i'll find", "i'll get",
+        "now briefing", "now hiring", "now proceeding",
+        "i'll now", "i'll check", "i'll review", "i'll look", "i'll send",
+        "i'll search", "i'll find", "i'll get", "i'll proceed",
         "i'll read", "i'll prepare", "i'll create", "i'll start", "i'll set up",
-        "i will check", "i will review", "i will look",
-        "i will send", "i will read",
+        "i'll hire", "i'll brief", "i'll assign", "i'll reach out",
+        "i will now", "i will check", "i will review", "i will look",
+        "i will send", "i will read", "i will proceed", "i will hire", "i will brief",
+        "will proceed with", "will now proceed", "proceeding to", "proceeding with",
         "sending now", "checking now", "looking now", "reviewing now", "searching now",
+        "hiring now", "briefing now",
+    ];
+
+    // Housekeeping phrases that models leak despite instructions.
+    // A line is stripped if it EQUALS or STARTS WITH one of these (case-insensitive).
+    const HOUSEKEEPING_EXACT: &[&str] = &[
+        "memory updated", "memory saved", "saved to memory",
+        "notes recorded", "notes saved", "notes updated",
+        "updated my log", "updated my notes", "updated my memory",
+        "saved to memory.md", "saved to memory/", "written to memory",
+        "dm sent", "message sent", "briefing sent",
+        "logged to memory", "recorded in memory",
     ];
 
     // Short filler phrases that can precede narration (e.g. "Good. Let me check...")
@@ -441,6 +457,19 @@ fn strip_narration_lines(text: &str) -> String {
         }
         let lower = trimmed.to_lowercase();
 
+        // Strip pure housekeeping lines ("Memory updated.", "Notes recorded.", etc.)
+        let is_housekeeping = HOUSEKEEPING_EXACT.iter().any(|phrase| {
+            // Match exact phrase or phrase + punctuation
+            lower == *phrase
+                || lower.strip_suffix('.').map_or(false, |s| s == *phrase)
+                || lower.strip_suffix('!').map_or(false, |s| s == *phrase)
+                || (lower.starts_with(phrase) && {
+                    let after = lower[phrase.len()..].trim();
+                    after.is_empty() || after.chars().all(|c| ".,;:!?…".contains(c))
+                })
+        });
+        if is_housekeeping { continue; }
+
         // Check the line as-is against narration prefixes
         if is_narration(&lower, NARRATION_PREFIXES) {
             continue;
@@ -451,7 +480,18 @@ fn strip_narration_lines(text: &str) -> String {
         let filler_narration = FILLER_PREFIXES.iter().any(|filler| {
             if let Some(after) = lower.strip_prefix(filler) {
                 let after = after.trim_start();
-                !after.is_empty() && is_narration(after, NARRATION_PREFIXES)
+                if after.is_empty() { return false; }
+                // Filler + narration prefix
+                if is_narration(after, NARRATION_PREFIXES) { return true; }
+                // Filler + housekeeping phrase
+                HOUSEKEEPING_EXACT.iter().any(|phrase| {
+                    after == *phrase
+                        || after.strip_suffix('.').map_or(false, |s| s == *phrase)
+                        || (after.starts_with(phrase) && {
+                            let rest = after[phrase.len()..].trim();
+                            rest.is_empty() || rest.chars().all(|c| ".,;:!?…".contains(c))
+                        })
+                })
             } else {
                 false
             }
@@ -1255,16 +1295,16 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     match can_hire_manager(new_count, Role::Ceo) {
         Decision::AllowedImmediate => {},
         Decision::RequiresRequest { request_type, approver_chain } => {
-            // Check for an existing APPROVED request that can be consumed to allow this hire
+            // Check for an existing APPROVED request that can be fulfilled to allow this hire
             let approved_req: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'APPROVED' ORDER BY updated_at DESC LIMIT 1"
             ).bind(&request_type).bind(ceo_id).fetch_optional(&state.db).await.ok().flatten();
 
             if let Some(approved_id) = approved_req {
-                // Consume the approval so it can't be reused for future limit increases
-                let _ = sqlx::query("UPDATE requests SET status = 'CONSUMED', updated_at = NOW() WHERE id = $1")
+                // Mark the approval as fulfilled so it can't be reused for future limit increases
+                let _ = sqlx::query("UPDATE requests SET status = 'FULFILLED', updated_at = NOW() WHERE id = $1")
                     .bind(approved_id).execute(&state.db).await;
-                tracing::info!("Consumed approved request {} for {} hire by CEO {}", approved_id, request_type, ceo_id);
+                tracing::info!("Fulfilled approved request {} for {} hire by CEO {}", approved_id, request_type, ceo_id);
                 // Fall through to the hire logic below
             } else {
                 // Check for an existing PENDING request (deduplication)
@@ -1399,16 +1439,16 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     match can_hire_worker(new_count, Role::Manager) {
         Decision::AllowedImmediate => {},
         Decision::RequiresRequest { request_type, approver_chain } => {
-            // Check for an existing APPROVED request that can be consumed to allow this hire
+            // Check for an existing APPROVED request that can be fulfilled to allow this hire
             let approved_req: Option<Uuid> = sqlx::query_scalar(
                 "SELECT id FROM requests WHERE type = $1 AND created_by_agent_id = $2 AND status = 'APPROVED' ORDER BY updated_at DESC LIMIT 1"
             ).bind(&request_type).bind(mgr_id).fetch_optional(&state.db).await.ok().flatten();
 
             if let Some(approved_id) = approved_req {
-                // Consume the approval so it can't be reused for future limit increases
-                let _ = sqlx::query("UPDATE requests SET status = 'CONSUMED', updated_at = NOW() WHERE id = $1")
+                // Mark the approval as fulfilled so it can't be reused for future limit increases
+                let _ = sqlx::query("UPDATE requests SET status = 'FULFILLED', updated_at = NOW() WHERE id = $1")
                     .bind(approved_id).execute(&state.db).await;
-                tracing::info!("Consumed approved request {} for {} hire by Manager {}", approved_id, request_type, mgr_id);
+                tracing::info!("Fulfilled approved request {} for {} hire by Manager {}", approved_id, request_type, mgr_id);
                 // Fall through to the hire logic below
             } else {
                 // Check for an existing PENDING request (deduplication)
@@ -5466,6 +5506,37 @@ mod tests {
     fn narration_preserves_normal_text() {
         let input = "The market is up 5% today. We should consider increasing our position.";
         assert_eq!(strip_narration_lines(input), input);
+    }
+
+    #[test]
+    fn narration_new_patterns() {
+        // "I'll now" pattern
+        assert_eq!(strip_narration_lines("I'll now complete the hire for Rachel Foster."), "");
+        assert_eq!(strip_narration_lines("I'll now brief the team."), "");
+        // "Now briefing" pattern
+        assert_eq!(strip_narration_lines("Now briefing her on her role."), "");
+        // "Will proceed" pattern
+        assert_eq!(strip_narration_lines("Will proceed with hiring Elena Rodriguez."), "");
+        assert_eq!(strip_narration_lines("Proceeding to brief the new hire."), "");
+    }
+
+    #[test]
+    fn housekeeping_lines_stripped() {
+        assert_eq!(strip_narration_lines("Memory updated."), "");
+        assert_eq!(strip_narration_lines("Memory updated"), "");
+        assert_eq!(strip_narration_lines("Notes recorded."), "");
+        assert_eq!(strip_narration_lines("Saved to MEMORY.md"), "");
+        assert_eq!(strip_narration_lines("DM sent."), "");
+        assert_eq!(strip_narration_lines("Updated my log."), "");
+        // Preserve lines where housekeeping is part of a longer sentence
+        let line = "Memory updated with the latest trade data — all positions are green.";
+        assert_eq!(strip_narration_lines(line), line);
+    }
+
+    #[test]
+    fn housekeeping_with_filler() {
+        assert_eq!(strip_narration_lines("Done. Memory updated."), "");
+        assert_eq!(strip_narration_lines("Good. Notes recorded."), "");
     }
 
     // ── dedup_content_blocks ───────────────────────────────────────

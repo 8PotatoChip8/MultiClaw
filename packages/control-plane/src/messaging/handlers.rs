@@ -74,7 +74,7 @@ async fn build_thread_context(
         format!(
             "You are responding in the group thread '{}' (participants: {}). The message is from {}. \
              Send ONLY your direct response. \
-             Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
+             Do NOT narrate your actions or announce what you will do — no 'Let me check...', 'I'll now...', 'Proceeding to...', 'Now briefing...', 'Memory updated'. \
              Do NOT include internal thoughts, planning steps, or tool-use commentary. \
              The other participants see everything you write.",
             title, members, sender_label
@@ -83,7 +83,7 @@ async fn build_thread_context(
         format!(
             "You are in a direct message with {}. \
              Send ONLY your direct response. \
-             Do NOT narrate your actions (e.g., 'Let me check...', 'I'll look into...', 'Sending a DM now...'). \
+             Do NOT narrate your actions or announce what you will do — no 'Let me check...', 'I'll now...', 'Proceeding to...', 'Now briefing...', 'Memory updated'. \
              Do NOT include internal thoughts, planning steps, or tool-use commentary. \
              {} sees everything you write.",
             sender_label, sender_label
@@ -619,7 +619,8 @@ async fn run_dm_turn(
          ask questions, share information, make decisions, and state what you PLAN to do. \
          You will receive a separate action prompt after this conversation ends where you should execute. \
          Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
-         NEVER narrate your actions or thinking (e.g., 'Let me check...', 'I'll review...', 'Sending now...', 'Memory updated', 'Saved to MEMORY.md', 'Notes recorded'). \
+         NEVER narrate your actions or thinking — no announcing what you will do, no step-by-step play-by-play, no internal housekeeping. \
+         Forbidden patterns: 'Let me check...', 'I'll now...', 'Proceeding to...', 'Now briefing...', 'X hired successfully. Now briefing them.', 'Memory updated', 'Saved to MEMORY.md', 'Notes recorded'. \
          NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
          Do NOT include approval prompts, action requests, or instructions meant for the human operator — {} cannot act on those. Use the dm-user API to reach the operator separately. \
          When the conversation has reached a natural conclusion and you have nothing more to add, \
@@ -932,7 +933,9 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         IMPORTANT: When messaging other agents (workers, managers, etc.), use the `dm` endpoint \
         (POST /v1/agents/{YOUR_ID}/dm with {\"target\": \"AGENT_ID_OR_HANDLE\", \"message\": \"...\"}). \
         The `dm-user` endpoint is ONLY for contacting the human operator — never use it to message agents. \
-        Be concise. Only respond with actions taken or [NO_ACTION_NEEDED].";
+        Be concise. Report only results, not your process. \
+        Do NOT narrate step-by-step (no 'I'll now hire X', 'Now briefing Y', 'Memory updated'). \
+        Just execute silently, then state the outcome. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
     state.mark_agent_working(agent_id, "Acting on briefing").await;
     match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(300)).await {
