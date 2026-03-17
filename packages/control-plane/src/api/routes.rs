@@ -1378,6 +1378,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     // Auto-provision desktop VM in background
     provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "manager_policy").await;
 
+    let _ = state.tx.send(json!({"type":"agent_hired","agent_id": agent_id,"company_id": company_id,"role":"MANAGER"}).to_string());
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -1524,6 +1525,7 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     // Auto-provision desktop VM in background
     provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "worker_policy").await;
 
+    let _ = state.tx.send(json!({"type":"agent_hired","agent_id": agent_id,"company_id": company_id,"role":"WORKER"}).to_string());
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 

@@ -60,6 +60,10 @@ export default function AgentPOVPage() {
     const [rightTab, setRightTab] = useState<RightTab>('conversations');
     const [autoScroll, setAutoScroll] = useState(true);
     const feedRef = useRef<HTMLDivElement>(null);
+    const selectedAgentIdRef = useRef<string | null>(null);
+    const selectedThreadIdRef = useRef<string | null>(null);
+    selectedAgentIdRef.current = selectedAgentId;
+    selectedThreadIdRef.current = selectedThreadId;
 
     const [activityTimeline, setActivityTimeline] = useState<Record<string, ActivityBlock[]>>({});
 
@@ -79,7 +83,7 @@ export default function AgentPOVPage() {
         }).catch(() => setLoading(false));
     }, []);
 
-    // --- Load data when agent changes ---
+    // --- Load data for selected agent (no dependency on agents array) ---
     const loadAgentData = useCallback((agentId: string) => {
         api.getAgentThreads(agentId).then(d => setAgentThreads(Array.isArray(d) ? d : []));
         api.getAgentRecentMessages(agentId, 50).then(d => setRecentMessages(Array.isArray(d) ? d : []));
@@ -87,13 +91,18 @@ export default function AgentPOVPage() {
         api.getRequests().then(d => setRequests(Array.isArray(d) ? d : []));
         api.getMeetings().then(d => setMeetings(Array.isArray(d) ? d : []));
 
-        const agent = agents.find(a => a.id === agentId);
-        if (agent?.vm_id) api.vmInfo(agentId, 'desktop').then(d => setVmInfo(prev => ({ ...prev, desktop: d?.error ? null : d })));
-        else setVmInfo(prev => ({ ...prev, desktop: null }));
-        if (agent?.sandbox_vm_id) api.vmInfo(agentId, 'sandbox').then(d => setVmInfo(prev => ({ ...prev, sandbox: d?.error ? null : d })));
-        else setVmInfo(prev => ({ ...prev, sandbox: null }));
-    }, [agents]);
+        // Fetch agent detail for VM info (avoids depending on agents state)
+        api.getAgent(agentId).then(a => {
+            if (a && !a.error) {
+                if (a.vm_id) api.vmInfo(agentId, 'desktop').then((d: any) => setVmInfo(prev => ({ ...prev, desktop: d?.error ? null : d })));
+                else setVmInfo(prev => ({ ...prev, desktop: null }));
+                if (a.sandbox_vm_id) api.vmInfo(agentId, 'sandbox').then((d: any) => setVmInfo(prev => ({ ...prev, sandbox: d?.error ? null : d })));
+                else setVmInfo(prev => ({ ...prev, sandbox: null }));
+            }
+        });
+    }, []);
 
+    // Reset thread selection only when switching agents
     useEffect(() => {
         if (selectedAgentId) {
             loadAgentData(selectedAgentId);
@@ -118,19 +127,24 @@ export default function AgentPOVPage() {
 
     // --- Real-time events ---
     useEffect(() => {
-        if (!lastEvent || !selectedAgentId) return;
+        if (!lastEvent) return;
+        const curAgentId = selectedAgentIdRef.current;
+        const curThreadId = selectedThreadIdRef.current;
 
         if (lastEvent.type === 'new_message' && lastEvent.message) {
             const msg = lastEvent.message;
-            if (msg.thread_id === selectedThreadId) {
+            if (curThreadId && msg.thread_id === curThreadId) {
                 setThreadMessages(prev => {
                     if (prev.some(m => m.id === msg.id)) return prev;
                     return [...prev, msg];
                 });
             }
-            if (msg.sender_id === selectedAgentId) {
-                api.getAgentRecentMessages(selectedAgentId, 50).then(d =>
+            if (curAgentId && msg.sender_id === curAgentId) {
+                api.getAgentRecentMessages(curAgentId, 50).then(d =>
                     setRecentMessages(Array.isArray(d) ? d : []));
+                // Refresh thread list too (new threads may appear)
+                api.getAgentThreads(curAgentId).then(d =>
+                    setAgentThreads(Array.isArray(d) ? d : []));
             }
         }
 
@@ -165,6 +179,13 @@ export default function AgentPOVPage() {
 
         if (lastEvent.type === 'meeting_created' || lastEvent.type === 'meeting_closed' || lastEvent.type === 'meeting_started') {
             api.getMeetings().then(d => setMeetings(Array.isArray(d) ? d : []));
+        }
+
+        // New agent hired — refresh agent list so sidebar updates
+        if (lastEvent.type === 'ceo_hired' || lastEvent.type === 'agent_hired') {
+            api.getAgents().then(a => {
+                if (Array.isArray(a)) setAgents(a);
+            });
         }
     }, [lastEvent]);
 
