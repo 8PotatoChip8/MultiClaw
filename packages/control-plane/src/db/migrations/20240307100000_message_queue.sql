@@ -5,9 +5,9 @@ CREATE TABLE message_queue (
     -- Priority levels:
     --   1 = USER message (operator)
     --   2 = Critical notification (hire approval, credential update)
-    --   3 = Agent-to-agent DM (initial message)
-    --   4 = Recovery prompt
-    --   5 = Routine (heartbeat, post-DM action prompt)
+    --   3 = Agent-to-agent DM (initial message), urgent briefing
+    --   4 = Post-DM action prompt, recovery prompt
+    --   5 = Routine (heartbeat)
 
     kind TEXT NOT NULL,
     -- Kind identifies the handler: 'thread_reply', 'dm_initiate', 'dm_continue',

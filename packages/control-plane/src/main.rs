@@ -473,10 +473,11 @@ async fn main() -> anyhow::Result<()> {
                  WHERE status = 'COMPLETED' AND completed_at > NOW() - INTERVAL '120 seconds'"
             ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
 
-            // Skip agents that already have a pending heartbeat in the queue
-            let pending_hb: std::collections::HashSet<Uuid> = sqlx::query_scalar(
-                "SELECT DISTINCT agent_id FROM message_queue \
-                 WHERE kind = 'heartbeat' AND status = 'PENDING'"
+            // Skip agents that have ANY pending queue items (not just heartbeats).
+            // This prevents heartbeats from preempting delayed action prompts
+            // or other pending work waiting in the queue.
+            let pending_any: std::collections::HashSet<Uuid> = sqlx::query_scalar(
+                "SELECT DISTINCT agent_id FROM message_queue WHERE status = 'PENDING'"
             ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
 
             let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
@@ -520,7 +521,7 @@ async fn main() -> anyhow::Result<()> {
 
             let mut enqueued = 0u32;
             for (agent_id, agent_name, _role) in &agents {
-                if busy.contains(agent_id) || recent.contains(agent_id) || pending_hb.contains(agent_id) {
+                if busy.contains(agent_id) || recent.contains(agent_id) || pending_any.contains(agent_id) {
                     continue;
                 }
 

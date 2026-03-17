@@ -47,6 +47,7 @@ async fn claim_work(pool: &PgPool, limit: i64) -> Vec<QueueItem> {
             SELECT id, agent_id, kind, payload, retry_count, max_retries, priority, seq \
             FROM message_queue \
             WHERE status = 'PENDING' \
+              AND (run_after IS NULL OR run_after <= NOW()) \
               AND agent_id NOT IN (SELECT agent_id FROM message_queue WHERE status = 'PROCESSING') \
             ORDER BY agent_id, priority ASC, seq ASC \
             FOR UPDATE SKIP LOCKED \

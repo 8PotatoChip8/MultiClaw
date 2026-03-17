@@ -831,41 +831,39 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
         None
     };
 
-    // Spawn delayed enqueueing so DM messages have time to settle before
-    // action prompts fire and trigger new activity (hires, new DMs, etc.).
-    if target_prompt_data.is_some() || sender_prompt_data.is_some() {
-        let state = state.clone();
-        tokio::spawn(async move {
-            tracing::debug!("[dm_cleanup] delaying action prompts 5s for sender={} target={}", sender_id, target_id);
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    // Enqueue action prompts with a queue-level delay (run_after) so the queue
+    // worker physically cannot pick them up until DM messages have settled.
+    // This replaces the previous tokio::spawn + sleep approach which was a
+    // wall-clock race with no ordering guarantee.
+    let run_after = Some(chrono::Utc::now() + chrono::Duration::seconds(5));
 
-            if let Some((agent_id, sender_name, tid)) = target_prompt_data {
-                let _ = state.enqueue_message(
-                    agent_id,
-                    5,
-                    "action_prompt",
-                    json!({
-                        "agent_id": agent_id.to_string(),
-                        "sender_name": sender_name,
-                        "thread_id": tid,
-                    }),
-                ).await;
-            }
+    if let Some((agent_id, sender_name, tid)) = target_prompt_data {
+        let _ = state.enqueue_message_delayed(
+            agent_id,
+            4, // action_prompt priority (higher than heartbeat=5)
+            "action_prompt",
+            json!({
+                "agent_id": agent_id.to_string(),
+                "sender_name": sender_name,
+                "thread_id": tid,
+            }),
+            run_after,
+        ).await;
+    }
 
-            if let Some((agent_id, target_name, tid, unbriefed)) = sender_prompt_data {
-                let _ = state.enqueue_message(
-                    agent_id,
-                    5,
-                    "action_prompt",
-                    json!({
-                        "agent_id": agent_id.to_string(),
-                        "sender_name": target_name,
-                        "thread_id": tid,
-                        "unbriefed": unbriefed,
-                    }),
-                ).await;
-            }
-        });
+    if let Some((agent_id, target_name, tid, unbriefed)) = sender_prompt_data {
+        let _ = state.enqueue_message_delayed(
+            agent_id,
+            4, // action_prompt priority (higher than heartbeat=5)
+            "action_prompt",
+            json!({
+                "agent_id": agent_id.to_string(),
+                "sender_name": target_name,
+                "thread_id": tid,
+                "unbriefed": unbriefed,
+            }),
+            run_after,
+        ).await;
     }
 }
 

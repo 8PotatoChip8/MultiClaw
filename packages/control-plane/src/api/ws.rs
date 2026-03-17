@@ -105,7 +105,7 @@ impl AppState {
         mutex.lock_owned().await
     }
 
-    /// Enqueue a message for background processing by the queue worker.
+    /// Enqueue a message for immediate background processing by the queue worker.
     /// Returns the queue item ID. The worker will pick it up and deliver it.
     pub async fn enqueue_message(
         &self,
@@ -114,21 +114,40 @@ impl AppState {
         kind: &str,
         payload: serde_json::Value,
     ) -> Result<Uuid, sqlx::Error> {
+        self.enqueue_message_delayed(agent_id, priority, kind, payload, None).await
+    }
+
+    /// Enqueue a message with an optional delay. When `run_after` is Some, the queue
+    /// worker will not pick up the item until that timestamp has passed. This provides
+    /// a queue-level scheduling guarantee (no wall-clock races).
+    pub async fn enqueue_message_delayed(
+        &self,
+        agent_id: Uuid,
+        priority: i16,
+        kind: &str,
+        payload: serde_json::Value,
+        run_after: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<Uuid, sqlx::Error> {
         let id: Uuid = sqlx::query_scalar(
-            "INSERT INTO message_queue (agent_id, priority, kind, payload) \
-             VALUES ($1, $2, $3, $4) RETURNING id"
+            "INSERT INTO message_queue (agent_id, priority, kind, payload, run_after) \
+             VALUES ($1, $2, $3, $4, $5) RETURNING id"
         )
         .bind(agent_id)
         .bind(priority)
         .bind(kind)
         .bind(&payload)
+        .bind(run_after)
         .fetch_one(&self.db)
         .await?;
 
         // Wake the queue worker
         self.queue_notify.notify_one();
 
-        tracing::debug!("[queue] enqueued {}:{} for agent {} (priority {})", kind, id, agent_id, priority);
+        if run_after.is_some() {
+            tracing::debug!("[queue] enqueued {}:{} for agent {} (priority {}, run_after {:?})", kind, id, agent_id, priority, run_after);
+        } else {
+            tracing::debug!("[queue] enqueued {}:{} for agent {} (priority {})", kind, id, agent_id, priority);
+        }
         Ok(id)
     }
 
