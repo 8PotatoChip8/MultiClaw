@@ -836,6 +836,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/send-file", post(agent_send_file))
         .route("/v1/agents/:id/file-transfers", get(agent_file_transfers))
         .route("/v1/agents/:id/threads", get(get_agent_threads))
+        .route("/v1/agents/:id/recent-messages", get(get_agent_recent_messages))
         .route("/v1/agents/:id/memories", get(get_agent_memories).post(create_agent_memory))
         .route("/v1/agents/:id/memories/:mid", delete(delete_agent_memory))
         .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
@@ -4086,6 +4087,35 @@ async fn get_agent_threads(State(state): State<AppState>, Path(id): Path<String>
     ).bind(agent_id).fetch_all(&state.db).await {
         Ok(t) => (StatusCode::OK, Json(json!(t))),
         Err(_) => (StatusCode::OK, Json(json!([])))
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent's Recent Messages (cross-thread)
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct RecentMessagesQuery { limit: Option<i64> }
+
+async fn get_agent_recent_messages(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<RecentMessagesQuery>,
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))),
+    };
+    let limit = q.limit.unwrap_or(50).min(100);
+    match sqlx::query_as::<_, Message>(
+        "SELECT id, thread_id, sender_type, sender_id, content, reply_depth, created_at \
+         FROM messages \
+         WHERE sender_id = $1 AND sender_type = 'AGENT' \
+         ORDER BY created_at DESC \
+         LIMIT $2"
+    ).bind(agent_id).bind(limit).fetch_all(&state.db).await {
+        Ok(msgs) => (StatusCode::OK, Json(json!(msgs))),
+        Err(_) => (StatusCode::OK, Json(json!([]))),
     }
 }
 

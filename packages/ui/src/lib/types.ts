@@ -104,3 +104,16 @@ export interface LedgerEntry {
     is_virtual: boolean;
     created_at: string;
 }
+
+export interface FileTransfer {
+    id: string;
+    sender_id: string;
+    receiver_id: string;
+    filename: string;
+    size_bytes: number;
+    encoding: string;
+    dest_path: string;
+    status: string;
+    error: string | null;
+    created_at: string;
+}

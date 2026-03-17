@@ -114,6 +114,10 @@ export const api = {
 
     // Agent Thread (get or create DM)
     getAgentThread: (agentId: string) => request(`/agents/${agentId}/thread`),
+    getAgentThreads: (agentId: string) => request(`/agents/${agentId}/threads`),
+    getAgentFileTransfers: (agentId: string) => request(`/agents/${agentId}/file-transfers`),
+    getAgentRecentMessages: (agentId: string, limit?: number) =>
+        request(`/agents/${agentId}/recent-messages?limit=${limit || 50}`),
     getThreadParticipants: (threadId: string) => request(`/threads/${threadId}/participants`),
 
     // System Updates

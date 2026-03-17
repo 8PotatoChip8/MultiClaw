@@ -2,7 +2,7 @@
 import '../styles/globals.css';
 import Link from 'next/link';
 import { useEffect, useState } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar } from 'lucide-react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar, Eye } from 'lucide-react';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
@@ -12,6 +12,7 @@ const navItems = [
     { href: '/chats', icon: MessageSquare, label: 'My Chats' },
     { href: '/messaging', icon: Radio, label: 'Agent Comms' },
     { href: '/meetings', icon: Calendar, label: 'Meetings' },
+    { href: '/pov', icon: Eye, label: 'Agent POV' },
     { href: '/infrastructure', icon: Server, label: 'Infrastructure' },
     { href: '/approvals', icon: CheckSquare, label: 'Approvals' },
     { href: '/services', icon: Briefcase, label: 'Services' },
