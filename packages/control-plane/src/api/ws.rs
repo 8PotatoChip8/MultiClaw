@@ -59,6 +59,9 @@ pub struct AppState {
     /// Tracks agents currently inside a DM turn (run_dm_turn send_message in flight).
     /// Heavy API endpoints check this and return 409 to prevent long-running side effects.
     pub agents_in_dm: Arc<RwLock<HashSet<Uuid>>>,
+    /// Tracks consecutive empty responses per agent. After 3 consecutive empties,
+    /// the container is restarted. Reset on any successful (non-empty) response.
+    pub empty_response_counts: Arc<RwLock<HashMap<Uuid, u32>>>,
 }
 
 impl AppState {
@@ -157,6 +160,50 @@ impl AppState {
         let data_dir = self.openclaw.data_dir();
         crate::messaging::status::refresh_agent_status(&self.db, data_dir, agent_id).await;
         crate::messaging::status::refresh_team_knowledge(&self.db, data_dir, agent_id).await;
+    }
+
+    /// Track an agent's response for consecutive empty response detection.
+    /// Call after every send_message(). If the response is empty 3 times in a row,
+    /// triggers a `docker restart` on the container.
+    pub async fn track_response_health(&self, agent_id: Uuid, response: &str) {
+        let is_empty = response.trim().is_empty()
+            || response == "[Agent produced no text output]"
+            || response.contains("Request timed out before a response was generated");
+
+        if is_empty {
+            let mut counts = self.empty_response_counts.write().await;
+            let count = counts.entry(agent_id).or_insert(0);
+            *count += 1;
+            let current = *count;
+            if current >= 3 {
+                *count = 0;
+                drop(counts);
+                tracing::error!(
+                    "Agent {} returned {} consecutive empty responses — restarting container",
+                    agent_id, current
+                );
+                // Get container name and restart it
+                let instances = self.openclaw.list_instances().await;
+                if let Some(inst) = instances.iter().find(|i| i.agent_id == agent_id) {
+                    let name = inst.container_name.clone();
+                    tokio::spawn(async move {
+                        let _ = tokio::process::Command::new("docker")
+                            .args(["restart", &name])
+                            .output()
+                            .await;
+                        tracing::info!("Container {} restarted after consecutive empty responses", name);
+                    });
+                }
+            }
+        } else {
+            let mut counts = self.empty_response_counts.write().await;
+            counts.remove(&agent_id);
+        }
+    }
+
+    /// Returns the consecutive empty response count for an agent (for health endpoint).
+    pub async fn get_empty_response_count(&self, agent_id: Uuid) -> u32 {
+        self.empty_response_counts.read().await.get(&agent_id).copied().unwrap_or(0)
     }
 
     /// Mark an agent as done with a request. Decrements pending_requests; if 0, sets IDLE.

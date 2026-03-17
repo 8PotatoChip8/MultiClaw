@@ -126,7 +126,12 @@ async fn main() -> anyhow::Result<()> {
     // MultiClaw API URL from inside containers (host networking = localhost:8080)
     let multiclaw_api_url = format!("http://127.0.0.1:{}", cfg.port);
     tracing::info!("Ollama concurrency: max_concurrent_ollama={}", cfg.max_concurrent_ollama);
-    let openclaw_mgr = OpenClawManager::new(data_dir, ollama_url_for_containers, multiclaw_api_url, cfg.max_concurrent_ollama);
+    let openclaw_mgr = OpenClawManager::new(
+        data_dir, ollama_url_for_containers, multiclaw_api_url,
+        cfg.max_concurrent_ollama,
+        cfg.container_memory_limit.clone(),
+        cfg.container_cpu_limit.clone(),
+    );
     openclaw_mgr.refresh_available_models(&pool).await;
 
     // Background: ensure all available models are pulled in Ollama
@@ -172,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         agent_message_locks: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         queue_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         agents_in_dm: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        empty_response_counts: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Spawn the durable message queue worker
@@ -480,9 +486,23 @@ async fn main() -> anyhow::Result<()> {
                 "SELECT DISTINCT agent_id FROM message_queue WHERE status = 'PENDING'"
             ).fetch_all(&pool_hb).await.unwrap_or_default().into_iter().collect();
 
-            let heartbeat_prompt = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
+            // Role-specific heartbeat prompts
+            let default_heartbeat = "SYSTEM HEARTBEAT: Time for your periodic check-in. \
                 Read HEARTBEAT.md and follow the checklist. \
                 If everything is running smoothly, respond with just: [HEARTBEAT_OK]";
+
+            let worker_heartbeat = "SYSTEM HEARTBEAT: Periodic check-in. \
+                Read HEARTBEAT.md and follow the checklist. \
+                If you are blocked on any task (waiting for credentials, missing access, \
+                unclear instructions, dependencies on other teams), report the blocker with: \
+                [HEARTBEAT_BLOCKED] <description of what you're blocked on>. \
+                If everything is fine, respond with just: [HEARTBEAT_OK]";
+
+            let manager_heartbeat = "SYSTEM HEARTBEAT: Periodic check-in. \
+                Read HEARTBEAT.md and follow the checklist. \
+                Check on your team's progress. If any worker is blocked or unresponsive, escalate. \
+                If you are blocked, report with: [HEARTBEAT_BLOCKED] <description>. \
+                If everything is fine, respond with just: [HEARTBEAT_OK]";
 
             let instructions = "This is an automated periodic check-in. Be extremely concise. \
                 Follow the HEARTBEAT.md checklist. Do not narrate — just check and report. \
@@ -520,14 +540,41 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let mut enqueued = 0u32;
-            for (agent_id, agent_name, _role) in &agents {
+            for (agent_id, agent_name, role) in &agents {
                 if busy.contains(agent_id) || recent.contains(agent_id) || pending_any.contains(agent_id) {
                     continue;
                 }
 
+                // F1: Stuck agent detection — check idle time for non-MAIN agents
+                let last_activity: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+                    "SELECT MAX(created_at) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT'"
+                ).bind(agent_id).fetch_optional(&pool_hb).await.ok().flatten();
+                let idle_minutes = last_activity
+                    .map(|t| (chrono::Utc::now() - t).num_minutes())
+                    .unwrap_or(0); // 0 if no messages yet (newly created agent)
+
+                // Select the right prompt based on role + idle status
+                let base_prompt = if idle_minutes > 30 && role != "MAIN" {
+                    // Stuck agent: override with check-in prompt
+                    format!(
+                        "SYSTEM CHECK-IN: You haven't produced any messages in {} minutes. \
+                         Review your DIRECTIVES.md and STATUS.md. What should you be working on? \
+                         If you're waiting on something, report the blocker with: \
+                         [HEARTBEAT_BLOCKED] <description>. \
+                         If you have tasks to do, resume work now.",
+                        idle_minutes
+                    )
+                } else {
+                    match role.as_str() {
+                        "WORKER" => worker_heartbeat.to_string(),
+                        "MANAGER" => manager_heartbeat.to_string(),
+                        _ => default_heartbeat.to_string(),
+                    }
+                };
+
                 let prompt = match main_ceo_reports.get(agent_id) {
-                    Some(report) => format!("{}\n\n{}", heartbeat_prompt, report),
-                    None => heartbeat_prompt.to_string(),
+                    Some(report) => format!("{}\n\n{}", base_prompt, report),
+                    None => base_prompt,
                 };
 
                 match app_state_hb.enqueue_message(

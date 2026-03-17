@@ -15,14 +15,16 @@ struct QueueItem {
     max_retries: i16,
 }
 
-/// Reset any PROCESSING rows that have been stuck for more than 15 minutes.
+/// Reset any PROCESSING rows that have been stuck for more than 3 minutes.
 /// This handles process crashes — the items get retried. The per-item 660s
 /// timeout in the spawned task is the primary defense; this is the backup
-/// for cases where the process itself dies.
+/// for cases where the process itself dies. 3 minutes is safely above the
+/// 660s handler timeout (clean timeouts write FAILED, not PROCESSING) but
+/// recovers actual crashes (OOM, process death) much faster than 15 min.
 async fn recover_stale_claims(pool: &PgPool) {
     match sqlx::query(
         "UPDATE message_queue SET status = 'PENDING', claimed_at = NULL \
-         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '15 minutes'"
+         WHERE status = 'PROCESSING' AND claimed_at < NOW() - INTERVAL '3 minutes'"
     )
     .execute(pool)
     .await

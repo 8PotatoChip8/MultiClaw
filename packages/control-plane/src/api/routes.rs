@@ -919,6 +919,9 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/secrets", get(list_agent_secrets))
         .route("/v1/agents/:id/secrets/:name", get(get_agent_secret))
         .route("/v1/agents/:id/knowledge", post(post_agent_knowledge))
+        .route("/v1/agents/:id/health", get(agent_health))
+        .route("/v1/agents/:id/queue", get(agent_queue_status))
+        .route("/v1/agents/:id/restart", post(restart_agent_container))
         // Secrets
         .route("/v1/secrets", get(list_secrets).post(create_secret))
         .route("/v1/secrets/:id", delete(delete_secret))
@@ -5566,6 +5569,249 @@ async fn post_agent_knowledge(
         Err(e) => {
             tracing::error!("[knowledge] insert failed for {}: {}", agent_id, e);
             (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to save knowledge entry"})))
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent Health
+// ═══════════════════════════════════════════════════════════════
+
+async fn agent_health(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent ID"}))),
+    };
+
+    // Agent info
+    let agent_row: Option<(String, String)> = sqlx::query_as(
+        "SELECT name, status FROM agents WHERE id = $1"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (agent_name, agent_status) = match agent_row {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found"}))),
+    };
+
+    // Container info
+    let instances = state.openclaw.list_instances().await;
+    let container_info = if let Some(inst) = instances.iter().find(|i| i.agent_id == agent_id) {
+        // Check if docker container is actually running
+        let running = tokio::process::Command::new("docker")
+            .args(["inspect", "--format", "{{.State.Running}}", &inst.container_name])
+            .output()
+            .await
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "true")
+            .unwrap_or(false);
+        let healthy = state.openclaw.check_health(agent_id).await;
+        json!({
+            "exists": true,
+            "running": running,
+            "healthy": healthy,
+            "name": inst.container_name,
+            "status": format!("{:?}", inst.status),
+        })
+    } else {
+        json!({
+            "exists": false,
+            "running": false,
+            "healthy": false,
+            "name": null,
+            "status": null,
+        })
+    };
+
+    // Queue stats
+    let pending: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_queue WHERE agent_id = $1 AND status = 'PENDING'"
+    ).bind(agent_id).fetch_one(&state.db).await.unwrap_or(0);
+    let processing: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_queue WHERE agent_id = $1 AND status = 'PROCESSING'"
+    ).bind(agent_id).fetch_one(&state.db).await.unwrap_or(0);
+    let failed_recent: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM message_queue WHERE agent_id = $1 AND status = 'FAILED' \
+         AND completed_at > NOW() - INTERVAL '1 hour'"
+    ).bind(agent_id).fetch_one(&state.db).await.unwrap_or(0);
+
+    // Last activity
+    let last_activity: Option<chrono::DateTime<chrono::Utc>> = sqlx::query_scalar(
+        "SELECT MAX(created_at) FROM messages WHERE sender_id = $1 AND sender_type = 'AGENT'"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let empty_count = state.get_empty_response_count(agent_id).await;
+
+    (StatusCode::OK, Json(json!({
+        "agent_id": agent_id,
+        "agent_name": agent_name,
+        "status": agent_status,
+        "container": container_info,
+        "queue": {
+            "pending": pending,
+            "processing": processing,
+            "failed_recent": failed_recent,
+        },
+        "last_activity": last_activity,
+        "consecutive_empty_responses": empty_count,
+    })))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent Queue Status
+// ═══════════════════════════════════════════════════════════════
+
+async fn agent_queue_status(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent ID"}))),
+    };
+
+    // Non-completed items + last 10 completed
+    let items: Vec<(Uuid, String, String, i16, i16, i16, chrono::DateTime<chrono::Utc>, Option<chrono::DateTime<chrono::Utc>>, Option<String>)> = sqlx::query_as(
+        "( \
+            SELECT id, kind, status, priority, retry_count, max_retries, created_at, run_after, error \
+            FROM message_queue WHERE agent_id = $1 AND status IN ('PENDING', 'PROCESSING') \
+            ORDER BY priority ASC, seq ASC \
+        ) UNION ALL ( \
+            SELECT id, kind, status, priority, retry_count, max_retries, created_at, run_after, error \
+            FROM message_queue WHERE agent_id = $1 AND status IN ('COMPLETED', 'FAILED') \
+            ORDER BY completed_at DESC LIMIT 10 \
+        )"
+    ).bind(agent_id).fetch_all(&state.db).await.unwrap_or_default();
+
+    let mut pending = 0i64;
+    let mut processing = 0i64;
+    let mut completed_recent = 0i64;
+    let mut failed_recent = 0i64;
+
+    let item_list: Vec<serde_json::Value> = items.iter().map(|row| {
+        match row.2.as_str() {
+            "PENDING" => pending += 1,
+            "PROCESSING" => processing += 1,
+            "COMPLETED" => completed_recent += 1,
+            "FAILED" => failed_recent += 1,
+            _ => {}
+        }
+        json!({
+            "id": row.0,
+            "kind": row.1,
+            "status": row.2,
+            "priority": row.3,
+            "retry_count": row.4,
+            "max_retries": row.5,
+            "created_at": row.6,
+            "run_after": row.7,
+            "error": row.8,
+        })
+    }).collect();
+
+    (StatusCode::OK, Json(json!({
+        "agent_id": agent_id,
+        "items": item_list,
+        "summary": {
+            "pending": pending,
+            "processing": processing,
+            "completed_recent": completed_recent,
+            "failed_recent": failed_recent,
+        },
+    })))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Agent Container Restart
+// ═══════════════════════════════════════════════════════════════
+
+async fn restart_agent_container(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent ID"}))),
+    };
+
+    // Verify agent exists and is ACTIVE
+    let agent_row: Option<(Uuid, String, String, Option<String>, Option<String>, Option<Uuid>, String)> =
+        sqlx::query_as(
+            "SELECT a.id, a.name, a.role, a.specialty, a.system_prompt, a.company_id, a.effective_model \
+             FROM agents a WHERE a.id = $1 AND a.status = 'ACTIVE'"
+        )
+        .bind(agent_id)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+
+    let (id, name, role, specialty, system_prompt, company_id, model) = match agent_row {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found or not ACTIVE"}))),
+    };
+
+    // Stop existing container
+    if let Err(e) = state.openclaw.stop_instance(agent_id).await {
+        tracing::warn!("restart_agent_container: stop_instance for {}: {} (continuing)", name, e);
+    }
+    // Force remove (stop_instance only stops, doesn't remove)
+    {
+        let instances = state.openclaw.list_instances().await;
+        if let Some(inst) = instances.iter().find(|i| i.agent_id == agent_id) {
+            let _ = tokio::process::Command::new("docker")
+                .args(["rm", "-f", &inst.container_name])
+                .output()
+                .await;
+        }
+    }
+
+    // Remove from tracked instances so spawn_instance won't early-return
+    {
+        let mut instances = state.openclaw.instances_mut().await;
+        instances.remove(&agent_id);
+    }
+
+    // Build config
+    let holding_name: String = sqlx::query_scalar("SELECT name FROM holdings LIMIT 1")
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| "MultiClaw Holdings".to_string());
+
+    let (company_name, company_type, company_description) = if let Some(cid) = company_id {
+        let row: Option<(String, String, Option<String>)> = sqlx::query_as(
+            "SELECT name, type, description FROM companies WHERE id = $1"
+        ).bind(cid).fetch_optional(&state.db).await.ok().flatten();
+        match row {
+            Some((n, t, d)) => (n, Some(t), d),
+            None => (holding_name.clone(), None, None),
+        }
+    } else {
+        (holding_name.clone(), None, None)
+    };
+
+    let config = crate::openclaw::AgentConfig {
+        agent_id: id,
+        agent_name: name.clone(),
+        role,
+        company_name,
+        company_type,
+        company_description,
+        holding_name,
+        specialty,
+        model,
+        system_prompt,
+    };
+
+    match state.openclaw.spawn_instance(&config).await {
+        Ok(inst) => {
+            tracing::info!("Container restarted for agent {} ({})", name, agent_id);
+            (StatusCode::OK, Json(json!({
+                "status": "restarted",
+                "agent_name": name,
+                "container_name": inst.container_name,
+                "port": inst.port,
+            })))
+        }
+        Err(e) => {
+            tracing::error!("Failed to restart container for {}: {}", name, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "error": format!("Failed to spawn container: {}", e),
+            })))
         }
     }
 }

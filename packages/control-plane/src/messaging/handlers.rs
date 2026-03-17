@@ -198,6 +198,11 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
     };
     state.mark_agent_done(responding_agent_id).await;
 
+    // Track consecutive empty responses for auto-restart
+    if let Ok(ref resp) = result {
+        state.track_response_health(responding_agent_id, resp).await;
+    }
+
     match result {
         Ok(response) => {
             let (cleaned, _) = strip_agent_tags(&response);
@@ -653,6 +658,11 @@ async fn run_dm_turn(
     }
     state.mark_agent_done(responder_id).await;
 
+    // Track consecutive empty responses for auto-restart
+    if let Ok(ref resp) = result {
+        state.track_response_health(responder_id, resp).await;
+    }
+
     match result {
         Ok(response) => {
             let (clean_response, conversation_complete) = strip_agent_tags(&response);
@@ -979,7 +989,11 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
 
     state.refresh_agent_status(agent_id).await;
     state.mark_agent_working(agent_id, "Acting on briefing").await;
-    match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(300)).await {
+    let action_result = state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(300)).await;
+    if let Ok(ref resp) = action_result {
+        state.track_response_health(agent_id, resp).await;
+    }
+    match action_result {
         Ok(response) => {
             let (cleaned, _) = strip_agent_tags(&response);
             let normalized = cleaned.replace('[', "").replace(']', "").replace('\n', " ").replace(' ', "");
@@ -1045,6 +1059,11 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
     let result = state.openclaw.send_message(agent_id, prompt, instructions, Some(90)).await;
     state.mark_agent_done(agent_id).await;
 
+    // Track consecutive empty responses for auto-restart
+    if let Ok(ref resp) = result {
+        state.track_response_health(agent_id, resp).await;
+    }
+
     match result {
         Ok(response) => {
             let trimmed = response.trim();
@@ -1055,6 +1074,42 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
                     .collect();
                 normalized.contains("HEARTBEAT_OK") || normalized.contains("HEARTBEATOK")
             };
+
+            // Check for blocker escalation ([HEARTBEAT_BLOCKED])
+            let has_blocker = {
+                let normalized: String = trimmed.chars()
+                    .filter(|c| !c.is_whitespace() && *c != '[' && *c != ']')
+                    .collect();
+                normalized.contains("HEARTBEAT_BLOCKED") || normalized.contains("HEARTBEATBLOCKED")
+            };
+
+            if has_blocker {
+                tracing::info!("[heartbeat] agent {} reported a blocker — escalating", agent_id);
+                // Find parent agent and send them a notification
+                let parent_id: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT parent_agent_id FROM agents WHERE id = $1"
+                ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+                let agent_name: String = sqlx::query_scalar(
+                    "SELECT name FROM agents WHERE id = $1"
+                ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten()
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                if let Some(pid) = parent_id {
+                    let escalation_msg = format!(
+                        "SYSTEM ALERT: Your team member {} is blocked. Their report: {}",
+                        agent_name, cleaned
+                    );
+                    let _ = state.enqueue_message(
+                        pid, 3, "generic_send",
+                        json!({
+                            "agent_id": pid.to_string(),
+                            "message": escalation_msg,
+                            "instructions": "One of your team members is blocked. Review the blocker and take action to unblock them. Be concise.",
+                            "task_label": "Blocker escalation",
+                        }),
+                    ).await;
+                }
+            }
 
             if has_heartbeat_tag {
                 tracing::debug!("[heartbeat] agent {} reports all clear", agent_id);
@@ -1115,6 +1170,11 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
     state.mark_agent_working(agent_id, task_label).await;
     let result = state.openclaw.send_message(agent_id, message, instructions, None).await;
     state.mark_agent_done(agent_id).await;
+
+    // Track consecutive empty responses for auto-restart
+    if let Ok(ref resp) = result {
+        state.track_response_health(agent_id, resp).await;
+    }
 
     match result {
         Ok(response) => {
@@ -1247,6 +1307,11 @@ pub async fn handle_recovery_prompt(state: &AppState, payload: &serde_json::Valu
     state.mark_agent_working(agent_id, "Post-restart recovery").await;
     let result = state.openclaw.send_message(agent_id, &prompt, Some(instructions), None).await;
     state.mark_agent_done(agent_id).await;
+
+    // Track consecutive empty responses for auto-restart
+    if let Ok(ref resp) = result {
+        state.track_response_health(agent_id, resp).await;
+    }
 
     match result {
         Ok(response) => {

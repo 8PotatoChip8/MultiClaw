@@ -39,6 +39,13 @@ pub struct OpenClawManager {
     available_models_csv: Arc<std::sync::RwLock<String>>,
     /// In-memory pull status for each model (transient, not persisted).
     model_pull_status: Arc<std::sync::RwLock<HashMap<String, ModelPullStatus>>>,
+    /// Docker --memory limit for containers (e.g. "4g").
+    container_memory_limit: String,
+    /// Docker --cpus limit for containers (e.g. "2.0").
+    container_cpu_limit: String,
+    /// Tracks respawn attempts per agent for exponential backoff.
+    /// Maps agent_id → (attempt_count, last_attempt_time).
+    respawn_attempts: Arc<RwLock<HashMap<Uuid, (u32, tokio::time::Instant)>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -87,6 +94,8 @@ impl OpenClawManager {
         ollama_url: String,
         multiclaw_api_url: String,
         max_concurrent_ollama: usize,
+        container_memory_limit: String,
+        container_cpu_limit: String,
     ) -> Self {
         Self {
             instances: Arc::new(RwLock::new(HashMap::new())),
@@ -102,12 +111,20 @@ impl OpenClawManager {
                 "nemotron-3-super:cloud, minimax-m2.5:cloud, minimax-m2:cloud, glm-5:cloud, kimi-k2-thinking:cloud, kimi-k2.5:cloud, qwen3-coder:480b-cloud, devstral-2:123b-cloud, deepseek-v3.2:cloud, minimax-m2.1:cloud, glm-4.7:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
             )),
             model_pull_status: Arc::new(std::sync::RwLock::new(HashMap::new())),
+            container_memory_limit,
+            container_cpu_limit,
+            respawn_attempts: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
     /// Returns the base data directory for agent workspaces.
     pub fn data_dir(&self) -> &std::path::Path {
         &self.data_dir
+    }
+
+    /// Returns a mutable write guard to the instances map (for restart endpoint).
+    pub async fn instances_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, HashMap<Uuid, OpenClawInstance>> {
+        self.instances.write().await
     }
 
     /// Fire `count` concurrent 1-token requests to Ollama and return the number of successes.
@@ -458,6 +475,8 @@ impl OpenClawManager {
             docker_args.extend(["-v", vol.as_str()]);
         }
         docker_args.extend([
+            "--memory", &self.container_memory_limit,
+            "--cpus", &self.container_cpu_limit,
             "--restart", "unless-stopped",
             &self.image,
             "openclaw", "gateway",
@@ -1012,6 +1031,32 @@ impl OpenClawManager {
             .unwrap_or_else(|| "MultiClaw Holdings".to_string());
 
         for agent_id in needs_respawn {
+            // Backoff: check if we've failed to respawn this agent recently
+            {
+                let attempts = self.respawn_attempts.read().await;
+                if let Some((count, last)) = attempts.get(&agent_id) {
+                    let delay = match count {
+                        0 => std::time::Duration::from_secs(0),
+                        1 => std::time::Duration::from_secs(30),
+                        2 => std::time::Duration::from_secs(120),
+                        _ => {
+                            tracing::error!(
+                                "Watchdog: agent {} failed to respawn after {} attempts, giving up (manual restart needed)",
+                                agent_id, count
+                            );
+                            continue;
+                        }
+                    };
+                    if last.elapsed() < delay {
+                        tracing::debug!(
+                            "Watchdog: skipping agent {} respawn (backoff: attempt {}, {}s remaining)",
+                            agent_id, count, delay.as_secs().saturating_sub(last.elapsed().as_secs())
+                        );
+                        continue;
+                    }
+                }
+            }
+
             let row: Option<(Uuid, String, String, Option<String>, Option<String>, Option<Uuid>, String)> =
                 sqlx::query_as(
                     "SELECT a.id, a.name, a.role, a.specialty, a.system_prompt, a.company_id, a.effective_model \
@@ -1048,8 +1093,17 @@ impl OpenClawManager {
                 };
 
                 match self.spawn_instance(&config).await {
-                    Ok(_) => tracing::info!("Watchdog: respawned OpenClaw instance for {}", name),
-                    Err(e) => tracing::error!("Watchdog: failed to respawn instance for {}: {}", name, e),
+                    Ok(_) => {
+                        tracing::info!("Watchdog: respawned OpenClaw instance for {}", name);
+                        self.respawn_attempts.write().await.remove(&agent_id);
+                    }
+                    Err(e) => {
+                        tracing::error!("Watchdog: failed to respawn instance for {}: {}", name, e);
+                        let mut attempts = self.respawn_attempts.write().await;
+                        let entry = attempts.entry(agent_id).or_insert((0, tokio::time::Instant::now()));
+                        entry.0 += 1;
+                        entry.1 = tokio::time::Instant::now();
+                    }
                 }
             }
         }

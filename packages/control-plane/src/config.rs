@@ -16,6 +16,10 @@ pub struct Config {
     /// Seconds between periodic concurrency re-probes. Default: 300 (5 min).
     /// Also readable at runtime from system_meta key 'concurrency_probe_interval_secs'.
     pub probe_interval_secs: u64,
+    /// Docker --memory limit for OpenClaw containers. Default: "4g".
+    pub container_memory_limit: String,
+    /// Docker --cpus limit for OpenClaw containers. Default: "2.0".
+    pub container_cpu_limit: String,
 }
 
 impl Config {
@@ -37,6 +41,10 @@ impl Config {
             .unwrap_or_else(|_| "300".to_string())
             .parse()
             .unwrap_or(300);
+        let container_memory_limit = env::var("MULTICLAW_CONTAINER_MEMORY")
+            .unwrap_or_else(|_| "4g".to_string());
+        let container_cpu_limit = env::var("MULTICLAW_CONTAINER_CPUS")
+            .unwrap_or_else(|_| "2.0".to_string());
 
         Ok(Self {
             database_url,
@@ -47,6 +55,8 @@ impl Config {
             max_concurrent_ollama,
             probe_ceiling,
             probe_interval_secs,
+            container_memory_limit,
+            container_cpu_limit,
         })
     }
 }
