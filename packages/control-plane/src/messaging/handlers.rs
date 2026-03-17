@@ -751,12 +751,18 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
         active.remove(&pair_key);
     }
 
-    // Post-conversation action prompt for CEO/MANAGER targets
+    // Gather data for action prompts before spawning the delayed task.
+    // Cooldown checks and name lookups happen now (synchronous with cleanup),
+    // but actual enqueueing is deferred so DM messages settle in the UI first.
+
+    let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+    // --- Target action prompt (CEO/MANAGER) ---
     let target_role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM agents WHERE id = $1 AND status = 'ACTIVE'"
     ).bind(target_id).fetch_optional(&state.db).await.ok().flatten();
 
-    if matches!(target_role.as_deref(), Some("CEO") | Some("MANAGER")) {
+    let target_prompt_data = if matches!(target_role.as_deref(), Some("CEO") | Some("MANAGER")) {
         let should_skip = {
             let cooldowns = state.action_prompt_cooldowns.read().await;
             cooldowns.get(&target_id)
@@ -765,7 +771,7 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
         };
 
         if !should_skip {
-            // Record cooldown before enqueuing (so concurrent DMs see it immediately)
+            // Record cooldown immediately (so concurrent DMs see it)
             state.action_prompt_cooldowns.write().await
                 .insert(target_id, tokio::time::Instant::now());
 
@@ -773,29 +779,20 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
                 .bind(sender_id).fetch_optional(&state.db).await.ok().flatten()
                 .unwrap_or_else(|| "your colleague".into());
 
-            let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
-
-            let _ = state.enqueue_message(
-                target_id,
-                5, // routine priority
-                "action_prompt",
-                json!({
-                    "agent_id": target_id.to_string(),
-                    "sender_name": sender_name,
-                    "thread_id": thread_id_str,
-                }),
-            ).await;
+            Some((target_id, sender_name, thread_id_str.clone()))
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
 
-    // Post-conversation action prompt for the sender too (MAIN, CEO, or MANAGER).
-    // The sender may need to update memory, report upward, or take follow-up actions
-    // based on the target's responses during the DM.
+    // --- Sender action prompt (MAIN/CEO/MANAGER) ---
     let sender_role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM agents WHERE id = $1 AND status = 'ACTIVE'"
     ).bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
 
-    if matches!(sender_role.as_deref(), Some("MAIN") | Some("CEO") | Some("MANAGER")) {
+    let sender_prompt_data = if matches!(sender_role.as_deref(), Some("MAIN") | Some("CEO") | Some("MANAGER")) {
         let should_skip_sender = {
             let cooldowns = state.action_prompt_cooldowns.read().await;
             cooldowns.get(&sender_id)
@@ -810,8 +807,6 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
             let target_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
                 .bind(target_id).fetch_optional(&state.db).await.ok().flatten()
                 .unwrap_or_else(|| "your colleague".into());
-
-            let thread_id_str = payload.get("thread_id").and_then(|v| v.as_str()).unwrap_or("");
 
             // Find direct subordinates the sender hasn't DM'd yet (no DM thread exists)
             let unbriefed: Vec<String> = sqlx::query_scalar(
@@ -828,18 +823,49 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
             ).bind(sender_id).bind(target_id)
             .fetch_all(&state.db).await.unwrap_or_default();
 
-            let _ = state.enqueue_message(
-                sender_id,
-                5, // routine priority
-                "action_prompt",
-                json!({
-                    "agent_id": sender_id.to_string(),
-                    "sender_name": target_name,
-                    "thread_id": thread_id_str,
-                    "unbriefed": unbriefed,
-                }),
-            ).await;
+            Some((sender_id, target_name, thread_id_str.clone(), unbriefed))
+        } else {
+            None
         }
+    } else {
+        None
+    };
+
+    // Spawn delayed enqueueing so DM messages have time to settle before
+    // action prompts fire and trigger new activity (hires, new DMs, etc.).
+    if target_prompt_data.is_some() || sender_prompt_data.is_some() {
+        let state = state.clone();
+        tokio::spawn(async move {
+            tracing::debug!("[dm_cleanup] delaying action prompts 5s for sender={} target={}", sender_id, target_id);
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            if let Some((agent_id, sender_name, tid)) = target_prompt_data {
+                let _ = state.enqueue_message(
+                    agent_id,
+                    5,
+                    "action_prompt",
+                    json!({
+                        "agent_id": agent_id.to_string(),
+                        "sender_name": sender_name,
+                        "thread_id": tid,
+                    }),
+                ).await;
+            }
+
+            if let Some((agent_id, target_name, tid, unbriefed)) = sender_prompt_data {
+                let _ = state.enqueue_message(
+                    agent_id,
+                    5,
+                    "action_prompt",
+                    json!({
+                        "agent_id": agent_id.to_string(),
+                        "sender_name": target_name,
+                        "thread_id": tid,
+                        "unbriefed": unbriefed,
+                    }),
+                ).await;
+            }
+        });
     }
 }
 
