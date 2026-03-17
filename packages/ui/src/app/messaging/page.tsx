@@ -2,7 +2,7 @@
 import { useEffect, useState, useRef } from 'react';
 import { api } from '../../lib/api';
 import { Thread, Message, Agent } from '../../lib/types';
-import { Radio, Eye, Users, MessageSquare, ArrowDownToLine } from 'lucide-react';
+import { Radio, Eye, Users, MessageSquare, ArrowDownToLine, Calendar } from 'lucide-react';
 import MarkdownText from '../../components/MarkdownText';
 import { useMultiClawEvents } from '../../lib/ws';
 
@@ -106,6 +106,8 @@ export default function AgentCommsPage() {
                             <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                                 {t.type === 'DM' ? (
                                     <MessageSquare size={12} style={{ color: 'var(--accent)' }} />
+                                ) : t.type === 'MEETING' ? (
+                                    <Calendar size={12} style={{ color: 'var(--accent)' }} />
                                 ) : (
                                     <Users size={12} style={{ color: 'var(--accent)' }} />
                                 )}

@@ -309,6 +309,43 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Auto-start scheduled meetings — check every 30 seconds
+    let pool_mtg = pool.clone();
+    let tx_mtg = app_state.tx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+
+            let due_meetings: Vec<(Uuid, Uuid, String, Uuid)> = sqlx::query_as(
+                "SELECT id, thread_id, topic, organizer_id FROM meetings \
+                 WHERE status = 'SCHEDULED' AND scheduled_for <= NOW()"
+            ).fetch_all(&pool_mtg).await.unwrap_or_default();
+
+            for (meeting_id, thread_id, topic, organizer_id) in &due_meetings {
+                let _ = sqlx::query("UPDATE meetings SET status = 'ACTIVE' WHERE id = $1")
+                    .bind(meeting_id).execute(&pool_mtg).await;
+
+                // Post SYSTEM announcement to the meeting thread
+                let msg_id = Uuid::new_v4();
+                let content = serde_json::json!({"text": format!("Meeting now starting: {}", topic)});
+                if let Ok(msg) = sqlx::query_as::<_, crate::db::models::Message>(
+                    "INSERT INTO messages (id, thread_id, sender_type, sender_id, content, reply_depth) \
+                     VALUES ($1,$2,'SYSTEM',$3,$4,0) \
+                     RETURNING id, thread_id, sender_type, sender_id, content, reply_depth, created_at"
+                ).bind(msg_id).bind(thread_id).bind(organizer_id).bind(&content)
+                .fetch_one(&pool_mtg).await {
+                    let _ = tx_mtg.send(serde_json::json!({"type":"new_message","message": msg}).to_string());
+                }
+
+                let _ = tx_mtg.send(serde_json::json!({
+                    "type": "meeting_started", "meeting_id": meeting_id, "thread_id": thread_id
+                }).to_string());
+
+                tracing::info!("[meetings] Auto-started meeting {} ({})", meeting_id, topic);
+            }
+        }
+    });
+
     // Post-restart recovery prompts: cascade top-down so agents resume work
     let pool_rp = pool.clone();
     let app_state_rp = app_state.clone();

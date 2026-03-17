@@ -100,6 +100,14 @@ export const api = {
     activateEngagement: (id: string) => request(`/engagements/${id}/activate`, { method: 'POST' }),
     completeEngagement: (id: string) => request(`/engagements/${id}/complete`, { method: 'POST' }),
 
+    // Meetings
+    getMeetings: () => request('/meetings'),
+    getMeeting: (id: string) => request(`/meetings/${id}`),
+    createMeeting: (data: { topic: string; organizer_id: string; participant_ids: string[] }) =>
+        request('/meetings', { method: 'POST', body: JSON.stringify(data) }),
+    closeMeeting: (id: string, data: { closed_by_id: string }) =>
+        request(`/meetings/${id}/close`, { method: 'POST', body: JSON.stringify(data) }),
+
     // Company Editing
     updateCompany: (id: string, data: { name?: string; type?: string; description?: string; status?: string }) =>
         request(`/companies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),

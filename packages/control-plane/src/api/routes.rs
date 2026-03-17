@@ -861,6 +861,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/engagements", post(create_engagement))
         .route("/v1/engagements/:id/activate", post(activate_engagement))
         .route("/v1/engagements/:id/complete", post(complete_engagement))
+        // Meetings
+        .route("/v1/meetings", get(list_meetings).post(create_meeting))
+        .route("/v1/meetings/:id", get(get_meeting))
+        .route("/v1/meetings/:id/close", post(close_meeting))
         // Agentd
         .route("/v1/agentd/register", post(agentd_register))
         .route("/v1/agentd/heartbeat", post(agentd_heartbeat))
@@ -2220,6 +2224,24 @@ async fn send_message(
     State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateMessageRequest>
 ) -> impl IntoResponse {
     let thread_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Block messages to closed/scheduled MEETING threads
+    {
+        let meeting_status: Option<String> = sqlx::query_scalar(
+            "SELECT m.status FROM meetings m JOIN threads t ON m.thread_id = t.id \
+             WHERE t.id = $1 AND t.type = 'MEETING'"
+        ).bind(thread_id).fetch_optional(&state.db).await.ok().flatten();
+        match meeting_status.as_deref() {
+            Some("CLOSED") => return (StatusCode::FORBIDDEN, Json(json!({
+                "error": "This meeting has been closed. No further messages can be sent."
+            }))),
+            Some("SCHEDULED") => return (StatusCode::FORBIDDEN, Json(json!({
+                "error": "This meeting has not started yet."
+            }))),
+            _ => {}
+        }
+    }
+
     let msg_id = Uuid::new_v4();
     let mut sender_id = p.sender_id.unwrap_or_else(Uuid::new_v4);
     // Auto-detect sender_type: if sender_id matches a known agent, force "AGENT".
@@ -2313,7 +2335,7 @@ async fn send_message(
                         "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
                     ).bind(thread_id).fetch_all(&state.db).await.unwrap_or_default();
 
-                    let mut responding_agents: Vec<Uuid> = if thread_type == "GROUP" {
+                    let mut responding_agents: Vec<Uuid> = if thread_type == "GROUP" || thread_type == "MEETING" {
                         let mut mentioned: Vec<Uuid> = Vec::new();
                         for aid in &agent_ids {
                             let agent_info: Option<(String, Option<String>)> = sqlx::query_as(
@@ -2878,6 +2900,282 @@ async fn complete_engagement(State(state): State<AppState>, Path(id): Path<Strin
     }
 
     (StatusCode::OK, Json(json!({"status":"completed"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Meetings
+// ═══════════════════════════════════════════════════════════════
+
+async fn create_meeting(State(state): State<AppState>, Json(p): Json<CreateMeetingRequest>) -> impl IntoResponse {
+    // Validate organizer exists
+    let organizer_name: Option<String> = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(p.organizer_id).fetch_optional(&state.db).await.ok().flatten();
+    if organizer_name.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid organizer_id"})));
+    }
+
+    // Build participant list, auto-include organizer
+    let mut all_participants = p.participant_ids.clone();
+    if !all_participants.contains(&p.organizer_id) {
+        all_participants.push(p.organizer_id);
+    }
+    all_participants.sort();
+    all_participants.dedup();
+
+    if all_participants.len() < 2 {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Meetings require at least 2 participants"})));
+    }
+
+    // Pairwise hierarchy check (same logic as GROUP thread creation)
+    {
+        let mut agents_info: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>)> = Vec::new();
+        for mid in &all_participants {
+            if let Ok(Some(row)) = sqlx::query_as::<_, (String, Option<Uuid>, Option<Uuid>)>(
+                "SELECT role, company_id, parent_agent_id FROM agents WHERE id = $1"
+            ).bind(mid).fetch_optional(&state.db).await {
+                agents_info.push((*mid, row.0, row.1, row.2));
+            }
+        }
+        for i in 0..agents_info.len() {
+            for j in (i+1)..agents_info.len() {
+                let (id_a, ref role_a, company_a, parent_a) = agents_info[i];
+                let (id_b, ref role_b, company_b, parent_b) = agents_info[j];
+                let allowed =
+                    role_a == "MAIN" || role_b == "MAIN"
+                    || parent_a == Some(id_b)
+                    || parent_b == Some(id_a)
+                    || (role_a == "CEO" && role_b == "MANAGER" && company_a == company_b && company_a.is_some())
+                    || (role_b == "CEO" && role_a == "MANAGER" && company_a == company_b && company_a.is_some())
+                    || (company_a == company_b && parent_a == parent_b && company_a.is_some() && parent_a.is_some());
+                if !allowed {
+                    let name_a: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(id_a).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+                    let name_b: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                        .bind(id_b).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+                    return (StatusCode::FORBIDDEN, Json(json!({
+                        "error": format!("{} and {} are not in the same chain of command.", name_a, name_b)
+                    })));
+                }
+            }
+        }
+    }
+
+    // Determine status
+    let status = match p.scheduled_for {
+        Some(t) if t > chrono::Utc::now() => "SCHEDULED",
+        _ => "ACTIVE",
+    };
+
+    // Create thread
+    let thread_id = Uuid::new_v4();
+    let _ = sqlx::query("INSERT INTO threads (id, type, title) VALUES ($1, 'MEETING', $2)")
+        .bind(thread_id).bind(&p.topic).execute(&state.db).await;
+
+    // Add participants as thread members
+    for mid in &all_participants {
+        let _ = sqlx::query(
+            "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING"
+        ).bind(thread_id).bind(mid).execute(&state.db).await;
+    }
+
+    // Create meeting
+    let meeting_id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO meetings (id, thread_id, topic, organizer_id, status, scheduled_for) VALUES ($1,$2,$3,$4,$5,$6)"
+    ).bind(meeting_id).bind(thread_id).bind(&p.topic).bind(p.organizer_id)
+     .bind(status).bind(p.scheduled_for)
+     .execute(&state.db).await;
+
+    // Build participant names for announcement
+    let mut participant_names: Vec<String> = Vec::new();
+    for mid in &all_participants {
+        let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(mid).fetch_optional(&state.db).await.ok().flatten()
+            .unwrap_or_else(|| mid.to_string());
+        participant_names.push(name);
+    }
+
+    // Post announcement
+    let announcement = if status == "SCHEDULED" {
+        let time_str = p.scheduled_for.map(|t| t.format("%Y-%m-%d %H:%M UTC").to_string()).unwrap_or_default();
+        format!("Meeting scheduled for {}: {}. Participants: {}", time_str, p.topic, participant_names.join(", "))
+    } else {
+        format!("Meeting started: {}. Participants: {}", p.topic, participant_names.join(", "))
+    };
+    insert_system_message_in_thread(&state, thread_id, p.organizer_id, &announcement).await;
+
+    // Fetch the created meeting to return it
+    let meeting: Option<Meeting> = sqlx::query_as(
+        "SELECT id, thread_id, topic, organizer_id, status, scheduled_for, summary, closed_at, closed_by_id, created_at \
+         FROM meetings WHERE id = $1"
+    ).bind(meeting_id).fetch_optional(&state.db).await.ok().flatten();
+
+    // Broadcast WebSocket event
+    let _ = state.tx.send(json!({"type": "meeting_created", "meeting": &meeting}).to_string());
+
+    (StatusCode::CREATED, Json(json!(meeting)))
+}
+
+async fn list_meetings(State(state): State<AppState>) -> impl IntoResponse {
+    match sqlx::query_as::<_, Meeting>(
+        "SELECT id, thread_id, topic, organizer_id, status, scheduled_for, summary, closed_at, closed_by_id, created_at \
+         FROM meetings ORDER BY created_at DESC"
+    ).fetch_all(&state.db).await {
+        Ok(m) => (StatusCode::OK, Json(json!(m))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+async fn get_meeting(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    match sqlx::query_as::<_, Meeting>(
+        "SELECT id, thread_id, topic, organizer_id, status, scheduled_for, summary, closed_at, closed_by_id, created_at \
+         FROM meetings WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await {
+        Ok(Some(m)) => (StatusCode::OK, Json(json!(m))),
+        Ok(None) => (StatusCode::NOT_FOUND, Json(json!({"error": "Meeting not found"}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+async fn close_meeting(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CloseMeetingRequest>) -> impl IntoResponse {
+    let meeting_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Fetch meeting
+    let meeting: Option<Meeting> = sqlx::query_as(
+        "SELECT id, thread_id, topic, organizer_id, status, scheduled_for, summary, closed_at, closed_by_id, created_at \
+         FROM meetings WHERE id = $1"
+    ).bind(meeting_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let meeting = match meeting {
+        Some(m) => m,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Meeting not found"}))),
+    };
+
+    if meeting.status == "CLOSED" {
+        return (StatusCode::CONFLICT, Json(json!({"error": "Meeting is already closed"})));
+    }
+    if meeting.status == "SCHEDULED" {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Cannot close a meeting that has not started yet"})));
+    }
+
+    // Verify closer is a participant
+    let is_member: bool = sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM thread_members WHERE thread_id = $1 AND member_id = $2)"
+    ).bind(meeting.thread_id).bind(p.closed_by_id).fetch_one(&state.db).await.unwrap_or(false);
+    if !is_member {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "Only meeting participants can close a meeting"})));
+    }
+
+    // Close the meeting
+    let _ = sqlx::query("UPDATE meetings SET status = 'CLOSED', closed_at = NOW(), closed_by_id = $1 WHERE id = $2")
+        .bind(p.closed_by_id).bind(meeting_id).execute(&state.db).await;
+
+    // Post SYSTEM close message
+    let closer_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(p.closed_by_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_default();
+    insert_system_message_in_thread(&state, meeting.thread_id, p.closed_by_id,
+        &format!("Meeting closed by {}", closer_name)).await;
+
+    // Build transcript for summarization
+    let messages: Vec<Message> = sqlx::query_as(
+        "SELECT id, thread_id, sender_type, sender_id, content, reply_depth, created_at \
+         FROM messages WHERE thread_id = $1 ORDER BY created_at ASC"
+    ).bind(meeting.thread_id).fetch_all(&state.db).await.unwrap_or_default();
+
+    let mut transcript_lines: Vec<String> = Vec::new();
+    for msg in &messages {
+        let time = msg.created_at.format("%H:%M");
+        let sender_name: String = if msg.sender_type == "SYSTEM" {
+            "SYSTEM".to_string()
+        } else {
+            sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+                .bind(msg.sender_id).fetch_optional(&state.db).await.ok().flatten()
+                .unwrap_or_else(|| "Unknown".to_string())
+        };
+        let text = msg.content.get("text").and_then(|v| v.as_str()).unwrap_or("");
+        transcript_lines.push(format!("[{}] {}: {}", time, sender_name, text));
+    }
+    let transcript = transcript_lines.join("\n");
+
+    // Generate summary via AI (use the organizer's agent to summarize)
+    let summary = if !transcript.is_empty() {
+        match state.openclaw.send_message(
+            meeting.organizer_id,
+            &transcript,
+            Some("Summarize this meeting transcript concisely. List: (1) key topics discussed, (2) decisions made, (3) action items with owners. Keep it under 500 words. Output only the summary, no preamble."),
+            Some(120),
+        ).await {
+            Ok(response) => {
+                let (cleaned, _) = strip_agent_tags(&response);
+                if cleaned.trim().is_empty() { None } else { Some(cleaned) }
+            }
+            Err(e) => {
+                tracing::warn!("[meetings] Summary generation failed for {}: {}", meeting_id, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Save summary to DB
+    if let Some(ref s) = summary {
+        let _ = sqlx::query("UPDATE meetings SET summary = $1 WHERE id = $2")
+            .bind(s).bind(meeting_id).execute(&state.db).await;
+    }
+
+    // Write summary file to each participant's workspace
+    let participants: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT member_id FROM thread_members WHERE thread_id = $1 AND member_type = 'AGENT'"
+    ).bind(meeting.thread_id).fetch_all(&state.db).await.unwrap_or_default();
+
+    let data_root = std::env::var("MULTICLAW_OPENCLAW_DATA").unwrap_or_else(|_| "/opt/multiclaw/openclaw-data".into());
+    let date_str = chrono::Utc::now().format("%Y-%m-%d").to_string();
+    let sanitized_topic: String = meeting.topic.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>().to_lowercase();
+    let filename = format!("meeting-{}-{}.md", date_str, &sanitized_topic[..sanitized_topic.len().min(40)]);
+
+    // Build file content
+    let mut participant_names: Vec<String> = Vec::new();
+    for pid in &participants {
+        let name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+            .bind(pid).fetch_optional(&state.db).await.ok().flatten()
+            .unwrap_or_else(|| pid.to_string());
+        participant_names.push(name);
+    }
+
+    let file_content = format!(
+        "# Meeting: {}\n\n**Date:** {}\n**Organizer:** {}\n**Participants:** {}\n**Status:** Closed\n\n## Summary\n\n{}\n\n## Full Transcript\n\n```\n{}\n```\n",
+        meeting.topic, date_str, closer_name, participant_names.join(", "),
+        summary.as_deref().unwrap_or("(summary generation failed)"),
+        transcript
+    );
+
+    for pid in &participants {
+        let meetings_dir = std::path::PathBuf::from(&data_root)
+            .join(pid.to_string())
+            .join("workspace")
+            .join("meetings");
+        let _ = tokio::fs::create_dir_all(&meetings_dir).await;
+        let file_path = meetings_dir.join(&filename);
+        let _ = tokio::fs::write(&file_path, &file_content).await;
+        let _ = tokio::process::Command::new("chown")
+            .args(["-R", "1000:1000", &meetings_dir.to_string_lossy()])
+            .output().await;
+    }
+
+    // Fetch updated meeting
+    let updated: Option<Meeting> = sqlx::query_as(
+        "SELECT id, thread_id, topic, organizer_id, status, scheduled_for, summary, closed_at, closed_by_id, created_at \
+         FROM meetings WHERE id = $1"
+    ).bind(meeting_id).fetch_optional(&state.db).await.ok().flatten();
+
+    // Broadcast
+    let _ = state.tx.send(json!({"type": "meeting_closed", "meeting": &updated}).to_string());
+
+    (StatusCode::OK, Json(json!(updated)))
 }
 
 // ═══════════════════════════════════════════════════════════════

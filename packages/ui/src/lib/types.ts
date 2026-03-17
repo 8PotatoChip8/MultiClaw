@@ -42,7 +42,20 @@ export interface OrgNode {
 export interface Thread {
     id: string;
     title: string | null;
-    type: 'DM' | 'GROUP' | 'ENGAGEMENT';
+    type: 'DM' | 'GROUP' | 'ENGAGEMENT' | 'MEETING';
+    created_at: string;
+}
+
+export interface Meeting {
+    id: string;
+    thread_id: string;
+    topic: string;
+    organizer_id: string;
+    status: 'SCHEDULED' | 'ACTIVE' | 'CLOSED';
+    scheduled_for: string | null;
+    summary: string | null;
+    closed_at: string | null;
+    closed_by_id: string | null;
     created_at: string;
 }
 

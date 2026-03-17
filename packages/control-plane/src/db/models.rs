@@ -250,6 +250,35 @@ pub struct CreateEngagementRequest {
     pub created_by_agent_id: Option<Uuid>,
 }
 
+// ─── Meetings ─────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct Meeting {
+    pub id: Uuid,
+    pub thread_id: Uuid,
+    pub topic: String,
+    pub organizer_id: Uuid,
+    pub status: String,
+    pub scheduled_for: Option<DateTime<Utc>>,
+    pub summary: Option<String>,
+    pub closed_at: Option<DateTime<Utc>>,
+    pub closed_by_id: Option<Uuid>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateMeetingRequest {
+    pub topic: String,
+    pub organizer_id: Uuid,
+    pub participant_ids: Vec<Uuid>,
+    pub scheduled_for: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CloseMeetingRequest {
+    pub closed_by_id: Uuid,
+}
+
 // ─── Ledger ────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]
