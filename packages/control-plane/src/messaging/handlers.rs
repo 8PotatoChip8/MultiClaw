@@ -616,12 +616,12 @@ async fn run_dm_turn(
          Send ONLY your actual message to {}. \
          IMPORTANT: Do NOT execute heavy actions during this conversation — no hiring, no provisioning, \
          no sending DMs to other agents, no long-running API calls. Focus on responding: acknowledge, \
-         ask questions, share information, make decisions, and state what you PLAN to do. \
-         You will receive a separate action prompt after this conversation ends where you should execute. \
+         ask questions, share information, make decisions, and state what you plan to do. \
+         You will be able to execute actions after this conversation ends — do not mention this in your messages. \
          Do NOT repeat or rephrase information you already sent earlier in this conversation — they already received it. Only contribute NEW information, answers, or follow-ups. \
          NEVER narrate your actions or thinking — no announcing what you will do, no step-by-step play-by-play, no internal housekeeping. \
          Forbidden patterns: 'Let me check...', 'I'll now...', 'Proceeding to...', 'Now briefing...', 'X hired successfully. Now briefing them.', 'Memory updated', 'Saved to MEMORY.md', 'Notes recorded'. \
-         NEVER include planning steps, tool-use commentary, or internal reasoning — {} sees everything you write. \
+         NEVER include planning steps, tool-use commentary, internal reasoning, or references to system mechanics (action prompts, system prompts, conversation endings, etc.) — {} sees everything you write. \
          Do NOT include approval prompts, action requests, or instructions meant for the human operator — {} cannot act on those. Use the dm-user API to reach the operator separately. \
          When the conversation has reached a natural conclusion and you have nothing more to add, \
          end your final message with the exact tag [END_CONVERSATION] on its own line. \

@@ -383,16 +383,20 @@ fn strip_narration_lines(text: &str) -> String {
         "let me check", "let me look", "let me review", "let me send",
         "let me see", "let me find", "let me get", "let me pull", "let me search",
         "let me read", "let me also", "let me start", "let me create",
-        "let me set", "let me prepare", "let me reach out",
-        "let me now", "let me proceed",
+        "let me set", "let me prepare", "let me reach out", "let me assess",
+        "let me now", "let me proceed", "let me first", "let me begin",
+        "let me build", "let me hire", "let me brief", "let me evaluate",
         "now let me", "now i'll", "now i will",
-        "now briefing", "now hiring", "now proceeding",
+        "now briefing", "now hiring", "now proceeding", "now building",
+        "starting with", "beginning with",
         "i'll now", "i'll check", "i'll review", "i'll look", "i'll send",
-        "i'll search", "i'll find", "i'll get", "i'll proceed",
+        "i'll search", "i'll find", "i'll get", "i'll proceed", "i'll sequence",
         "i'll read", "i'll prepare", "i'll create", "i'll start", "i'll set up",
         "i'll hire", "i'll brief", "i'll assign", "i'll reach out",
+        "i'll build", "i'll begin", "i'll assess", "i'll evaluate", "i'll execute",
         "i will now", "i will check", "i will review", "i will look",
         "i will send", "i will read", "i will proceed", "i will hire", "i will brief",
+        "i will build", "i will begin", "i will execute",
         "will proceed with", "will now proceed", "proceeding to", "proceeding with",
         "sending now", "checking now", "looking now", "reviewing now", "searching now",
         "hiring now", "briefing now",
@@ -818,6 +822,38 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     text = strip_markdown_bold(&text);
     // Fix mid-word spaces from streaming token assembly (e.g. "Under stood" → "Understood")
     text = fix_broken_words(&text);
+    // Strip lines that leak system internals (action prompts, system prompts, etc.)
+    // Only strips SHORT lines (<20 words) that contain these phrases.
+    {
+        let lines: Vec<&str> = text.split('\n').collect();
+        let mut cleaned = Vec::with_capacity(lines.len());
+        for line in &lines {
+            let lower = line.trim().to_lowercase();
+            let word_count = line.trim().split_whitespace().count();
+            let is_internal_leak = word_count < 20 && (
+                lower.contains("action prompt")
+                || lower.contains("action_prompt")
+                || lower.contains("system prompt")
+                || lower.contains("system_prompt")
+                || (lower.contains("once this conversation closes") && lower.contains("receive"))
+            );
+            if !is_internal_leak {
+                cleaned.push(*line);
+            }
+        }
+        text = cleaned.join("\n");
+    }
+    // Strip model names that agents leak despite SOUL.md confidentiality instructions.
+    // Replace with generic "[model]" so the sentence still reads naturally.
+    for model_name in DEFAULT_MODELS {
+        if text.contains(model_name) {
+            text = text.replace(model_name, "[model]");
+        }
+    }
+    // Also strip bench/on-demand models that aren't in DEFAULT_MODELS
+    for extra in &["nemotron-4-super:cloud", "deepseek-v3:cloud"] {
+        text = text.replace(extra, "[model]");
+    }
     // Strip pure narration lines (runs AFTER newline/word fixes so streaming fragments
     // like "Let\nme check my memory..." are cleaned to "Let me check my memory..." first)
     text = strip_narration_lines(&text);

@@ -108,7 +108,21 @@ export default function AgentPOVPage() {
             loadAgentData(selectedAgentId);
             setSelectedThreadId(null);
             setThreadMessages([]);
+            // Seed activity timeline with current status if no events recorded yet
+            const agent = agents.find(a => a.id === selectedAgentId);
+            if (agent?.activity && !activityTimeline[selectedAgentId]?.length) {
+                setActivityTimeline(prev => ({
+                    ...prev,
+                    [selectedAgentId]: [{
+                        status: agent.activity!.status,
+                        task: agent.activity!.task,
+                        start: new Date(agent.activity!.since).getTime(),
+                        end: null,
+                    }],
+                }));
+            }
         }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedAgentId, loadAgentData]);
 
     // --- Load thread messages ---
@@ -187,6 +201,13 @@ export default function AgentPOVPage() {
                 if (Array.isArray(a)) setAgents(a);
             });
         }
+
+        // Company created/updated — refresh company list for name lookups
+        if (lastEvent.type === 'company_created' || lastEvent.type === 'company_updated') {
+            api.getCompanies().then(c => {
+                if (Array.isArray(c)) setCompanies(c);
+            });
+        }
     }, [lastEvent]);
 
     // --- Derived data ---
@@ -233,7 +254,15 @@ export default function AgentPOVPage() {
     }, [recentMessages]);
 
     const getParentName = (agent: Agent): string => {
-        if (!agent.parent_agent_id) return agent.role === 'MAIN' ? 'Operator (you)' : '—';
+        if (!agent.parent_agent_id) {
+            if (agent.role === 'MAIN') return 'Operator (you)';
+            // CEOs have no parent_agent_id but report to MAIN
+            if (agent.role === 'CEO') {
+                const main = agents.find(a => a.role === 'MAIN');
+                return main ? main.name : 'MAIN';
+            }
+            return '—';
+        }
         return agentMap.get(agent.parent_agent_id)?.name || '—';
     };
 
