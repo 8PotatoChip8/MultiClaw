@@ -698,6 +698,46 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
             text = text.replace(tag, "");
         }
     }
+    // Strip leaked Claude/deepseek-format tool-call XML
+    // e.g. <function_calls><invoke name="read"><parameter name="file_path">...</parameter></invoke></function_calls>
+    {
+        // First: strip complete <function_calls>...</function_calls> blocks
+        while let Some(end_pos) = text.find("</function_calls>") {
+            let end = end_pos + "</function_calls>".len();
+            let search_region = &text[..end_pos];
+            let start = search_region.rfind("<function_calls")
+                .unwrap_or(end_pos);
+            text = format!("{}{}", &text[..start], &text[end..]);
+        }
+        // Second: strip orphan <invoke ...>...</invoke> and <parameter ...>...</parameter>
+        while let Some(start) = text.find("<invoke") {
+            if let Some(end_pos) = text[start..].find("</invoke>") {
+                let end = start + end_pos + "</invoke>".len();
+                text = format!("{}{}", &text[..start], &text[end..]);
+            } else if let Some(end_pos) = text[start..].find('>') {
+                let end = start + end_pos + 1;
+                text = format!("{}{}", &text[..start], &text[end..]);
+            } else {
+                break;
+            }
+        }
+        while let Some(start) = text.find("<parameter") {
+            if let Some(end_pos) = text[start..].find("</parameter>") {
+                let end = start + end_pos + "</parameter>".len();
+                text = format!("{}{}", &text[..start], &text[end..]);
+            } else if let Some(end_pos) = text[start..].find('>') {
+                let end = start + end_pos + 1;
+                text = format!("{}{}", &text[..start], &text[end..]);
+            } else {
+                break;
+            }
+        }
+        // Cleanup any remaining fragments
+        let fn_xml_tags = ["<function_calls>", "</function_calls>", "</invoke>", "</parameter>"];
+        for tag in &fn_xml_tags {
+            text = text.replace(tag, "");
+        }
+    }
     // Strip OpenClaw tool-failure feedback lines the model leaks into output
     // e.g. "⚠️ 📝 Edit: `in /workspace/MEMORY.md (315 chars)` failed"
     {
@@ -5182,6 +5222,22 @@ mod tests {
     fn tags_strips_markdown_bold() {
         let (text, _) = strip_agent_tags("the**$150 profit target within 7 days**");
         assert_eq!(text, "the $150 profit target within 7 days");
+    }
+
+    #[test]
+    fn tags_strips_function_calls_xml() {
+        let (text, _) = strip_agent_tags(
+            "Here is the result.\n<function_calls>\n<invoke name=\"read\">\n<parameter name=\"file_path\">/workspace/MEMORY.md</parameter>\n</invoke>\n</function_calls>\nDone."
+        );
+        assert_eq!(text, "Here is the result.\nDone.");
+    }
+
+    #[test]
+    fn tags_strips_orphan_invoke() {
+        let (text, _) = strip_agent_tags(
+            "Result: <invoke name=\"search\"><parameter name=\"query\">test</parameter></invoke> end."
+        );
+        assert_eq!(text, "Result:  end.");
     }
 
     // ── word_overlap_ratio ─────────────────────────────────────────
