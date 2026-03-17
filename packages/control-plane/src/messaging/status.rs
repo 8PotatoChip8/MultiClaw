@@ -167,6 +167,28 @@ async fn build_agent_status(db: &PgPool, agent_id: Uuid) -> Result<String, sqlx:
                 if let Some(bal) = balance {
                     result.push_str(&format!("## Company Ledger\nBalance: ${}\n", bal));
                 }
+
+                // Active engagements (as client or provider)
+                let eng_count: Option<i64> = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM service_engagements \
+                     WHERE (client_company_id = $1 OR provider_company_id = $1) AND status IN ('PENDING', 'ACTIVE')"
+                ).bind(cid).fetch_optional(db).await.unwrap_or(None);
+                if let Some(count) = eng_count {
+                    if count > 0 {
+                        result.push_str(&format!("## Active Engagements\n{} engagement(s) in progress.\n", count));
+                    }
+                }
+
+                // Trading positions (non-zero holdings)
+                let pos_count: Option<i64> = sqlx::query_scalar(
+                    "SELECT COUNT(DISTINCT symbol) FROM trading_orders \
+                     WHERE company_id = $1 AND status IN ('FILLED', 'PARTIAL')"
+                ).bind(cid).fetch_optional(db).await.unwrap_or(None);
+                if let Some(count) = pos_count {
+                    if count > 0 {
+                        result.push_str(&format!("## Trading\n{} symbol(s) traded.\n", count));
+                    }
+                }
             }
         }
 

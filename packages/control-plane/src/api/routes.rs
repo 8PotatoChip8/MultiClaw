@@ -2966,6 +2966,33 @@ async fn create_engagement(State(state): State<AppState>, Json(p): Json<CreateEn
         "INSERT INTO service_engagements (id, service_id, client_company_id, provider_company_id, scope, status, created_by_agent_id, thread_id) VALUES ($1,$2,$3,$4,$5,'PENDING',$6,$7)"
     ).bind(id).bind(p.service_id).bind(p.client_company_id).bind(provider_id).bind(&p.scope).bind(p.created_by_agent_id).bind(thread_id)
     .execute(&state.db).await;
+
+    // Add participants to the engagement thread so they can see it and get notifications
+    // 1. The creator (client-side agent)
+    if let Some(creator_id) = p.created_by_agent_id {
+        let _ = sqlx::query(
+            "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING"
+        ).bind(thread_id).bind(creator_id).execute(&state.db).await;
+    }
+    // 2. The provider company's CEO
+    let provider_ceo: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agents WHERE company_id = $1 AND role = 'CEO' AND status = 'ACTIVE' LIMIT 1"
+    ).bind(provider_id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some(ceo_id) = provider_ceo {
+        let _ = sqlx::query(
+            "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING"
+        ).bind(thread_id).bind(ceo_id).execute(&state.db).await;
+    }
+    // 3. The client company's CEO (if different from creator)
+    let client_ceo: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agents WHERE company_id = $1 AND role = 'CEO' AND status = 'ACTIVE' LIMIT 1"
+    ).bind(p.client_company_id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some(ceo_id) = client_ceo {
+        let _ = sqlx::query(
+            "INSERT INTO thread_members (thread_id, member_type, member_id) VALUES ($1, 'AGENT', $2) ON CONFLICT DO NOTHING"
+        ).bind(thread_id).bind(ceo_id).execute(&state.db).await;
+    }
+
     (StatusCode::CREATED, Json(json!({"id": id, "thread_id": thread_id})))
 }
 
@@ -5988,6 +6015,12 @@ async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
         }
     }
 
+    // 7. Active engagements — cross-company work in progress
+    let engagements: Vec<ServiceEngagement> = sqlx::query_as(
+        "SELECT id, service_id, client_company_id, provider_company_id, scope, status, created_by_agent_id, thread_id, created_at \
+         FROM service_engagements WHERE status IN ('PENDING', 'ACTIVE') ORDER BY created_at"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
     (StatusCode::OK, Json(json!({
         "companies": companies,
         "agents": agents,
@@ -5995,6 +6028,7 @@ async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
         "activities": activities,
         "vm_states": vm_states,
         "positions": positions,
+        "engagements": engagements,
     })))
 }
 
