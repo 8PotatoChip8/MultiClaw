@@ -1103,35 +1103,84 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
             };
 
             if has_blocker {
-                tracing::info!("[heartbeat] agent {} reported a blocker — escalating", agent_id);
-                // Find parent agent and send them a notification
-                let parent_id: Option<Uuid> = sqlx::query_scalar(
-                    "SELECT parent_agent_id FROM agents WHERE id = $1"
-                ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
                 let agent_name: String = sqlx::query_scalar(
                     "SELECT name FROM agents WHERE id = $1"
                 ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten()
                     .unwrap_or_else(|| "Unknown".to_string());
 
-                if let Some(pid) = parent_id {
-                    let escalation_msg = format!(
-                        "SYSTEM ALERT: Your team member {} is blocked. Their report: {}",
-                        agent_name, cleaned
-                    );
-                    let _ = state.enqueue_message(
-                        pid, 3, "generic_send",
-                        json!({
-                            "agent_id": pid.to_string(),
-                            "message": escalation_msg,
-                            "instructions": "One of your team members is blocked. Review the blocker and take action to unblock them. Be concise.",
-                            "task_label": "Blocker escalation",
-                        }),
-                    ).await;
+                // Check if this is a duplicate blocker with no new activity
+                let should_escalate = {
+                    let tracker = state.blocker_tracker.read().await;
+                    match tracker.get(&agent_id) {
+                        None => true, // First report — always escalate
+                        Some((prev_text, since)) => {
+                            if *prev_text != cleaned {
+                                true // Different blocker — escalate
+                            } else {
+                                // Same blocker — check if anything changed
+                                let new_msgs: i64 = sqlx::query_scalar(
+                                    "SELECT COUNT(*) FROM messages m \
+                                     JOIN thread_members tm ON m.thread_id = tm.thread_id \
+                                     WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                                       AND m.sender_id != $1 AND m.created_at > $2"
+                                ).bind(agent_id).bind(since)
+                                .fetch_one(&state.db).await.unwrap_or(0);
+
+                                if new_msgs > 0 { true }
+                                else {
+                                    let new_hires: i64 = sqlx::query_scalar(
+                                        "SELECT COUNT(*) FROM agents \
+                                         WHERE parent_agent_id = (SELECT parent_agent_id FROM agents WHERE id = $1) \
+                                           AND created_at > $2"
+                                    ).bind(agent_id).bind(since)
+                                    .fetch_one(&state.db).await.unwrap_or(0);
+
+                                    new_hires > 0
+                                }
+                            }
+                        }
+                    }
+                };
+
+                // Always update tracker with latest blocker text and timestamp
+                {
+                    let mut tracker = state.blocker_tracker.write().await;
+                    tracker.insert(agent_id, (cleaned.clone(), chrono::Utc::now()));
+                }
+
+                if should_escalate {
+                    tracing::info!("[heartbeat] agent {} reported a blocker — escalating", agent_id);
+                    let parent_id: Option<Uuid> = sqlx::query_scalar(
+                        "SELECT parent_agent_id FROM agents WHERE id = $1"
+                    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+                    if let Some(pid) = parent_id {
+                        let escalation_msg = format!(
+                            "SYSTEM ALERT: Your team member {} is blocked. Their report: {}",
+                            agent_name, cleaned
+                        );
+                        let _ = state.enqueue_message(
+                            pid, 3, "generic_send",
+                            json!({
+                                "agent_id": pid.to_string(),
+                                "message": escalation_msg,
+                                "instructions": "One of your team members is blocked. Review the blocker and take action to unblock them. Be concise.",
+                                "task_label": "Blocker escalation",
+                            }),
+                        ).await;
+                    }
+                } else {
+                    tracing::info!("[heartbeat] agent {} same blocker, no changes — suppressing escalation", agent_id);
                 }
             }
 
             if has_heartbeat_tag {
                 tracing::debug!("[heartbeat] agent {} reports all clear", agent_id);
+                // Clear any tracked blocker so next blocker is treated as new
+                {
+                    let mut tracker = state.blocker_tracker.write().await;
+                    tracker.remove(&agent_id);
+                }
             } else if cleaned.is_empty() {
                 tracing::debug!("[heartbeat] agent {} response was empty after cleaning", agent_id);
             } else {

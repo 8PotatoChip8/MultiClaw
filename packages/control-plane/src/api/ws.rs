@@ -66,6 +66,11 @@ pub struct AppState {
     /// If refreshed within 30s, skip the expensive DB queries and file writes.
     /// Invalidated by mutating endpoints (hire, DM, knowledge, ledger).
     pub status_cache: Arc<RwLock<HashMap<Uuid, (String, tokio::time::Instant)>>>,
+    /// Tracks last reported blocker per agent for deduplication.
+    /// Maps agent_id → (blocker_text, timestamp). Cleared on HEARTBEAT_OK.
+    pub blocker_tracker: Arc<RwLock<HashMap<Uuid, (String, chrono::DateTime<chrono::Utc>)>>>,
+    /// Tracks when each agent last received a heartbeat prompt (for delta computation).
+    pub last_heartbeat_times: Arc<RwLock<HashMap<Uuid, chrono::DateTime<chrono::Utc>>>>,
 }
 
 impl AppState {

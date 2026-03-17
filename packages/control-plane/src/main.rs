@@ -179,6 +179,8 @@ async fn main() -> anyhow::Result<()> {
         agents_in_dm: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         empty_response_counts: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_cache: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        blocker_tracker: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        last_heartbeat_times: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Spawn the durable message queue worker
@@ -554,6 +556,56 @@ async fn main() -> anyhow::Result<()> {
                     .map(|t| (chrono::Utc::now() - t).num_minutes())
                     .unwrap_or(0); // 0 if no messages yet (newly created agent)
 
+                // --- Delta information for richer heartbeat context ---
+                let last_hb: Option<chrono::DateTime<chrono::Utc>> = {
+                    let times = app_state_hb.last_heartbeat_times.read().await;
+                    times.get(agent_id).copied()
+                };
+                let since = last_hb.unwrap_or_else(|| chrono::Utc::now() - chrono::Duration::seconds(interval_secs as i64));
+
+                let new_msg_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM messages m \
+                     JOIN thread_members tm ON m.thread_id = tm.thread_id \
+                     WHERE tm.member_type = 'AGENT' AND tm.member_id = $1 \
+                       AND m.sender_id != $1 AND m.created_at > $2"
+                ).bind(agent_id).bind(&since).fetch_one(&pool_hb).await.unwrap_or(0);
+
+                let new_hires: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT name, role FROM agents \
+                     WHERE parent_agent_id = $1 AND created_at > $2 AND status = 'ACTIVE'"
+                ).bind(agent_id).bind(&since).fetch_all(&pool_hb).await.unwrap_or_default();
+
+                let new_companies: Vec<(String,)> = if role == "MAIN" {
+                    sqlx::query_as("SELECT name FROM companies WHERE created_at > $1")
+                        .bind(&since).fetch_all(&pool_hb).await.unwrap_or_default()
+                } else { vec![] };
+
+                let pending_count: i64 = sqlx::query_scalar(
+                    "SELECT COUNT(*) FROM message_queue WHERE agent_id = $1 AND status = 'PENDING'"
+                ).bind(agent_id).fetch_one(&pool_hb).await.unwrap_or(0);
+
+                let mut delta_lines: Vec<String> = Vec::new();
+                if new_msg_count > 0 {
+                    delta_lines.push(format!("- {} new message(s) received", new_msg_count));
+                }
+                if !new_hires.is_empty() {
+                    let names: Vec<String> = new_hires.iter()
+                        .map(|(n, r)| format!("{} ({})", n, r)).collect();
+                    delta_lines.push(format!("- New team member(s): {}", names.join(", ")));
+                }
+                if !new_companies.is_empty() {
+                    let names: Vec<String> = new_companies.iter().map(|(n,)| n.clone()).collect();
+                    delta_lines.push(format!("- New company/companies: {}", names.join(", ")));
+                }
+                if pending_count > 0 {
+                    delta_lines.push(format!("- {} pending task(s) in your queue", pending_count));
+                }
+                let delta_section = if delta_lines.is_empty() {
+                    String::new()
+                } else {
+                    format!("\n\nSince your last check-in:\n{}", delta_lines.join("\n"))
+                };
+
                 // Select the right prompt based on role + idle status
                 let base_prompt = if idle_minutes > 30 && role != "MAIN" {
                     // Stuck agent: override with check-in prompt
@@ -574,8 +626,8 @@ async fn main() -> anyhow::Result<()> {
                 };
 
                 let prompt = match main_ceo_reports.get(agent_id) {
-                    Some(report) => format!("{}\n\n{}", base_prompt, report),
-                    None => base_prompt,
+                    Some(report) => format!("{}{}\n\n{}", base_prompt, delta_section, report),
+                    None => format!("{}{}", base_prompt, delta_section),
                 };
 
                 match app_state_hb.enqueue_message(
@@ -589,6 +641,10 @@ async fn main() -> anyhow::Result<()> {
                     Ok(queue_id) => {
                         tracing::debug!("Heartbeat enqueued for {} (queue_id={})", agent_name, queue_id);
                         enqueued += 1;
+                        {
+                            let mut times = app_state_hb.last_heartbeat_times.write().await;
+                            times.insert(*agent_id, chrono::Utc::now());
+                        }
                     }
                     Err(e) => tracing::warn!("Failed to enqueue heartbeat for {}: {}", agent_name, e),
                 }
