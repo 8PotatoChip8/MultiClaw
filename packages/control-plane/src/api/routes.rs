@@ -918,6 +918,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/openclaw-files", get(get_openclaw_files))
         .route("/v1/agents/:id/secrets", get(list_agent_secrets))
         .route("/v1/agents/:id/secrets/:name", get(get_agent_secret))
+        .route("/v1/agents/:id/knowledge", post(post_agent_knowledge))
         // Secrets
         .route("/v1/secrets", get(list_secrets).post(create_secret))
         .route("/v1/secrets/:id", delete(delete_secret))
@@ -1462,6 +1463,11 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "manager_policy").await;
 
     let _ = state.tx.send(json!({"type":"agent_hired","agent_id": agent_id,"company_id": company_id,"role":"MANAGER"}).to_string());
+    crate::messaging::status::append_agent_output(
+        state.openclaw.data_dir(), ceo_id,
+        "Hired manager",
+        &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
+    ).await;
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -1612,6 +1618,11 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "worker_policy").await;
 
     let _ = state.tx.send(json!({"type":"agent_hired","agent_id": agent_id,"company_id": company_id,"role":"WORKER"}).to_string());
+    crate::messaging::status::append_agent_output(
+        state.openclaw.data_dir(), mgr_id,
+        "Hired worker",
+        &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
+    ).await;
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -2004,7 +2015,15 @@ async fn vm_exec(State(state): State<AppState>, Path(id): Path<String>, Query(q)
                     body.working_dir.as_deref().or(Some("/home/employee")),
                     body.timeout_secs,
                 ).await {
-                    Ok(result) => (StatusCode::OK, Json(json!(result))),
+                    Ok(result) => {
+                        let output_preview = if result.exit_code == 0 { &result.stdout } else { &result.stderr };
+                        crate::messaging::status::append_agent_output(
+                            state.openclaw.data_dir(), uid,
+                            &format!("vm_exec: {}", body.command),
+                            output_preview,
+                        ).await;
+                        (StatusCode::OK, Json(json!(result)))
+                    }
                     Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
                 }
             } else {
@@ -3725,6 +3744,11 @@ async fn agent_dm(
                 }
             }
 
+            crate::messaging::status::append_agent_output(
+                state.openclaw.data_dir(), sender_id,
+                "Sent DM",
+                &format!("to {}", p.target),
+            ).await;
             (StatusCode::CREATED, Json(json!({"thread_id": thread_id, "message_id": msg_id})))
         }
         Err(e) => {
@@ -5480,6 +5504,70 @@ async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
         "activities": activities,
         "vm_states": vm_states,
     })))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Team Knowledge — Agents publish findings for team visibility
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Deserialize)]
+struct PostKnowledgeRequest {
+    topic: String,
+    content: String,
+}
+
+async fn post_agent_knowledge(
+    State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<PostKnowledgeRequest>,
+) -> impl IntoResponse {
+    let agent_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent ID"}))),
+    };
+
+    if body.topic.trim().is_empty() || body.content.trim().is_empty() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "topic and content are required"})));
+    }
+
+    // Look up agent's company_id
+    let company_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT company_id FROM agents WHERE id = $1"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let topic = body.topic.trim();
+    let content = body.content.trim();
+
+    // Truncate to prevent abuse (char-boundary safe)
+    let topic_safe = if topic.len() > 200 {
+        let end = topic.char_indices().take_while(|(i, _)| *i < 200)
+            .last().map(|(i, c)| i + c.len_utf8()).unwrap_or(200);
+        &topic[..end]
+    } else { topic };
+    let content_safe = if content.len() > 2000 {
+        let end = content.char_indices().take_while(|(i, _)| *i < 2000)
+            .last().map(|(i, c)| i + c.len_utf8()).unwrap_or(2000);
+        &content[..end]
+    } else { content };
+
+    match sqlx::query_scalar::<_, Uuid>(
+        "INSERT INTO team_knowledge (agent_id, company_id, topic, content) \
+         VALUES ($1, $2, $3, $4) RETURNING id"
+    )
+    .bind(agent_id)
+    .bind(company_id)
+    .bind(topic_safe)
+    .bind(content_safe)
+    .fetch_one(&state.db)
+    .await
+    {
+        Ok(id) => {
+            tracing::info!("[knowledge] agent {} published: {}", agent_id, topic_safe);
+            (StatusCode::CREATED, Json(json!({"id": id, "status": "published"})))
+        }
+        Err(e) => {
+            tracing::error!("[knowledge] insert failed for {}: {}", agent_id, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to save knowledge entry"})))
+        }
+    }
 }
 
 #[cfg(test)]

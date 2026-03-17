@@ -173,6 +173,7 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
         state.responding_to_user.write().await.insert(responding_agent_id, thread_id);
     }
 
+    state.refresh_agent_status(responding_agent_id).await;
     state.mark_agent_working(responding_agent_id, "Responding in thread").await;
     let result: Result<String, String> = match state.openclaw.send_message(responding_agent_id, message_text, Some(&agent_context), None).await {
         Ok(response) => {
@@ -635,6 +636,9 @@ async fn run_dm_turn(
         partner_name, partner_name, partner_name, partner_name
     );
 
+    // Refresh workspace status files before sending
+    state.refresh_agent_status(responder_id).await;
+
     // Send message — mark agent as "in DM" to block heavy API endpoints
     state.mark_agent_working(responder_id, "Chatting in DM").await;
     {
@@ -749,6 +753,18 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
     {
         let mut active = state.active_dm_pairs.write().await;
         active.remove(&pair_key);
+    }
+
+    // Persist directives if the DM was from a superior to a subordinate.
+    // Both directions: sender→target and target→sender (the DM is bidirectional,
+    // but we only persist messages from the superior side).
+    if let Some(thread_id_str) = payload.get("thread_id").and_then(|v| v.as_str()) {
+        if let Ok(tid) = Uuid::parse_str(thread_id_str) {
+            let data_dir = state.openclaw.data_dir();
+            // Check both directions — one of them is superior→subordinate
+            super::status::append_directives(&state.db, data_dir, sender_id, target_id, tid).await;
+            super::status::append_directives(&state.db, data_dir, target_id, sender_id, tid).await;
+        }
     }
 
     // Gather data for action prompts before spawning the delayed task.
@@ -961,6 +977,7 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         Do NOT narrate step-by-step (no 'I'll now hire X', 'Now briefing Y', 'Memory updated'). \
         Just execute silently, then state the outcome. Only respond with actions taken or [NO_ACTION_NEEDED].";
 
+    state.refresh_agent_status(agent_id).await;
     state.mark_agent_working(agent_id, "Acting on briefing").await;
     match state.openclaw.send_message(agent_id, &action_prompt, Some(action_instructions), Some(300)).await {
         Ok(response) => {
@@ -1023,6 +1040,7 @@ pub async fn handle_heartbeat(state: &AppState, payload: &serde_json::Value) -> 
     let prompt = str_from_json(payload, "prompt")?;
     let instructions = payload.get("instructions").and_then(|v| v.as_str());
 
+    state.refresh_agent_status(agent_id).await;
     state.mark_agent_working(agent_id, "Heartbeat").await;
     let result = state.openclaw.send_message(agent_id, prompt, instructions, Some(90)).await;
     state.mark_agent_done(agent_id).await;
@@ -1093,6 +1111,7 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
     let instructions = payload.get("instructions").and_then(|v| v.as_str());
     let task_label = payload.get("task_label").and_then(|v| v.as_str()).unwrap_or("Processing message");
 
+    state.refresh_agent_status(agent_id).await;
     state.mark_agent_working(agent_id, task_label).await;
     let result = state.openclaw.send_message(agent_id, message, instructions, None).await;
     state.mark_agent_done(agent_id).await;
@@ -1224,6 +1243,7 @@ pub async fn handle_recovery_prompt(state: &AppState, payload: &serde_json::Valu
 
     tracing::info!("Sending recovery prompt to {} ({})", agent_name, role);
 
+    state.refresh_agent_status(agent_id).await;
     state.mark_agent_working(agent_id, "Post-restart recovery").await;
     let result = state.openclaw.send_message(agent_id, &prompt, Some(instructions), None).await;
     state.mark_agent_done(agent_id).await;

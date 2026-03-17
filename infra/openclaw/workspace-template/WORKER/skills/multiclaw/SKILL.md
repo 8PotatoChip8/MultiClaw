@@ -273,6 +273,18 @@ Returns `{"name": "...", "value": "..."}`. Use this for API keys, passwords, and
 
 **CRITICAL:** Never paste secret values into messages, DMs, or conversations. Access them via this API and use them only in commands (e.g., as HTTP headers or environment variables). Secret values in messages will be automatically redacted.
 
+## Team Knowledge — Share Findings with Your Team
+
+When you discover something useful (research results, analysis conclusions, working configurations), publish it so your teammates can see it:
+
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/knowledge \
+  -H 'Content-Type: application/json' \
+  -d '{"topic": "Short descriptive title", "content": "Detailed findings..."}'
+```
+
+Published knowledge appears in your team's `TEAM_KNOWLEDGE.md` workspace file automatically. Check that file to see what your teammates have found.
+
 ## Important Notes
 
 1. Your agent ID is: `{{AGENT_ID}}`

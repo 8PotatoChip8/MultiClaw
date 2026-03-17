@@ -105,6 +105,11 @@ impl OpenClawManager {
         }
     }
 
+    /// Returns the base data directory for agent workspaces.
+    pub fn data_dir(&self) -> &std::path::Path {
+        &self.data_dir
+    }
+
     /// Fire `count` concurrent 1-token requests to Ollama and return the number of successes.
     async fn fire_probe_batch(&self, model: &str, count: usize) -> usize {
         let client = reqwest::Client::new();

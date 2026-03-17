@@ -151,6 +151,14 @@ impl AppState {
         Ok(id)
     }
 
+    /// Refresh the agent's STATUS.md and TEAM_KNOWLEDGE.md workspace files.
+    /// Non-fatal — logs warnings on failure but never errors out.
+    pub async fn refresh_agent_status(&self, agent_id: Uuid) {
+        let data_dir = self.openclaw.data_dir();
+        crate::messaging::status::refresh_agent_status(&self.db, data_dir, agent_id).await;
+        crate::messaging::status::refresh_team_knowledge(&self.db, data_dir, agent_id).await;
+    }
+
     /// Mark an agent as done with a request. Decrements pending_requests; if 0, sets IDLE.
     pub async fn mark_agent_done(&self, agent_id: Uuid) {
         let mut guard = self.agent_activities.write().await;

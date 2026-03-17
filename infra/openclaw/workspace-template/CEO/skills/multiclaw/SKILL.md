@@ -323,6 +323,18 @@ Returns `{"name": "...", "value": "..."}`. Use this for API keys, passwords, and
 
 **CRITICAL:** Never paste secret values into messages, DMs, or conversations. Access them via this API and use them only in commands (e.g., as HTTP headers or environment variables). Secret values in messages will be automatically redacted.
 
+## Team Knowledge — Company-Wide Knowledge Base
+
+Agents can publish findings for the team. As CEO, you see all published knowledge across the company:
+
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/knowledge \
+  -H 'Content-Type: application/json' \
+  -d '{"topic": "Short descriptive title", "content": "Detailed findings..."}'
+```
+
+Published knowledge appears in everyone's `TEAM_KNOWLEDGE.md` workspace file automatically.
+
 ## Important Notes
 
 1. Replace `COMPANY_ID`, `MANAGER_NAME`, etc. with actual values.
