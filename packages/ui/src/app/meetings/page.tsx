@@ -203,7 +203,7 @@ export default function MeetingsPage() {
                                         <span style={{ fontSize: '13px', fontWeight: 600, color: 'var(--accent)' }}>Meeting Summary</span>
                                     </div>
                                     <div style={{ fontSize: '13px', lineHeight: '1.5' }}>
-                                        <MarkdownText text={selectedMeeting.summary} />
+                                        <MarkdownText>{selectedMeeting.summary}</MarkdownText>
                                     </div>
                                 </div>
                             )}
@@ -265,7 +265,7 @@ export default function MeetingsPage() {
                                                 </span>
                                             </div>
                                             <div style={{ fontSize: '13px', lineHeight: '1.4' }}>
-                                                <MarkdownText text={text || ''} />
+                                                <MarkdownText>{text || ''}</MarkdownText>
                                             </div>
                                         </div>
                                     );
