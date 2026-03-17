@@ -233,6 +233,22 @@ impl IncusProvider {
 
     /// Pull a file from the VM
     pub async fn file_pull(&self, vm_name: &str, remote_path: &str) -> Result<Vec<u8>> {
+        // Check if path is a directory before attempting pull
+        let check = Command::new("incus")
+            .args(&[
+                "exec", vm_name, "--user", "1000", "--",
+                "test", "-d", remote_path,
+            ])
+            .output()
+            .await?;
+
+        if check.status.success() {
+            return Err(anyhow!(
+                "path is a directory, not a file: {}",
+                remote_path
+            ));
+        }
+
         let tmp = format!("/tmp/multiclaw-pull-{}", uuid::Uuid::new_v4());
 
         let output = Command::new("incus")
