@@ -5,7 +5,7 @@ When the system sends a heartbeat, review this checklist. If everything is clear
 ## Quick Checks
 1. **Pending requests** — Check for any pending requests from your managers or workers that need approval.
 2. **Manager status** — Verify your managers are active and handling their tasks.
-3. **Active engagements** — Check on any in-progress client engagements.
+3. **Active engagements** — Check on any in-progress client engagements. Review engagement threads for updates from client/provider companies.
 
 ## Rules
 - Do NOT narrate. Just check and report.
