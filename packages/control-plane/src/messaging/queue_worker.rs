@@ -148,10 +148,10 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
         let items = claim_work(&state.db, 10).await;
 
         if items.is_empty() {
-            // No work available — wait for notification or poll every 5s
+            // No work available — wait for notification or poll every 1s
             tokio::select! {
                 _ = notify.notified() => {},
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {},
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(1)) => {},
                 _ = stale_check_interval.tick() => {
                     recover_stale_claims(&state.db).await;
                     continue;

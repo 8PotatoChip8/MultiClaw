@@ -641,8 +641,10 @@ async fn run_dm_turn(
         partner_name, partner_name, partner_name, partner_name
     );
 
-    // Refresh workspace status files before sending
-    state.refresh_agent_status(responder_id).await;
+    // Refresh workspace status files only on first DM turn — context is stable mid-conversation
+    if current_depth == 0 {
+        state.refresh_agent_status(responder_id).await;
+    }
 
     // Send message — mark agent as "in DM" to block heavy API endpoints
     state.mark_agent_working(responder_id, "Chatting in DM").await;
@@ -745,6 +747,10 @@ async fn run_dm_turn(
 async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload: &serde_json::Value) {
     state.mark_agent_done(sender_id).await;
     state.mark_agent_done(target_id).await;
+
+    // Invalidate status cache for both agents (recent activity changed)
+    state.invalidate_status_cache(sender_id).await;
+    state.invalidate_status_cache(target_id).await;
 
     // Ensure DM-mode flags are cleared for both agents
     {
@@ -861,7 +867,7 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
     // worker physically cannot pick them up until DM messages have settled.
     // This replaces the previous tokio::spawn + sleep approach which was a
     // wall-clock race with no ordering guarantee.
-    let run_after = Some(chrono::Utc::now() + chrono::Duration::seconds(5));
+    let run_after = Some(chrono::Utc::now() + chrono::Duration::seconds(2));
 
     if let Some((agent_id, sender_name, tid)) = target_prompt_data {
         let _ = state.enqueue_message_delayed(

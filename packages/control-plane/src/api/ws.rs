@@ -62,6 +62,10 @@ pub struct AppState {
     /// Tracks consecutive empty responses per agent. After 3 consecutive empties,
     /// the container is restarted. Reset on any successful (non-empty) response.
     pub empty_response_counts: Arc<RwLock<HashMap<Uuid, u32>>>,
+    /// Per-agent status refresh cache. Maps agent_id → (unused_content, last_refresh_time).
+    /// If refreshed within 30s, skip the expensive DB queries and file writes.
+    /// Invalidated by mutating endpoints (hire, DM, knowledge, ledger).
+    pub status_cache: Arc<RwLock<HashMap<Uuid, (String, tokio::time::Instant)>>>,
 }
 
 impl AppState {
@@ -155,11 +159,33 @@ impl AppState {
     }
 
     /// Refresh the agent's STATUS.md and TEAM_KNOWLEDGE.md workspace files.
+    /// Runs both refreshes concurrently for lower latency.
     /// Non-fatal — logs warnings on failure but never errors out.
     pub async fn refresh_agent_status(&self, agent_id: Uuid) {
+        // Check cache: skip rebuild if status was refreshed within 30s
+        {
+            let cache = self.status_cache.read().await;
+            if let Some((_content, ts)) = cache.get(&agent_id) {
+                if ts.elapsed() < std::time::Duration::from_secs(30) {
+                    return; // Cache is fresh — skip expensive DB queries
+                }
+            }
+        }
+
         let data_dir = self.openclaw.data_dir();
-        crate::messaging::status::refresh_agent_status(&self.db, data_dir, agent_id).await;
-        crate::messaging::status::refresh_team_knowledge(&self.db, data_dir, agent_id).await;
+        // Run both refreshes concurrently (independent DB queries + file writes)
+        tokio::join!(
+            crate::messaging::status::refresh_agent_status(&self.db, data_dir, agent_id),
+            crate::messaging::status::refresh_team_knowledge(&self.db, data_dir, agent_id),
+        );
+
+        // Update cache timestamp
+        self.status_cache.write().await.insert(agent_id, (String::new(), tokio::time::Instant::now()));
+    }
+
+    /// Invalidate the status cache for an agent, forcing a full rebuild on next refresh.
+    pub async fn invalidate_status_cache(&self, agent_id: Uuid) {
+        self.status_cache.write().await.remove(&agent_id);
     }
 
     /// Track an agent's response for consecutive empty response detection.

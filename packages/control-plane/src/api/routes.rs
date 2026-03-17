@@ -1471,6 +1471,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
         "Hired manager",
         &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
     ).await;
+    state.invalidate_status_cache(ceo_id).await; // Team roster changed
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -1626,6 +1627,7 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
         "Hired worker",
         &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
     ).await;
+    state.invalidate_status_cache(mgr_id).await; // Team roster changed
     (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
 }
 
@@ -3354,6 +3356,14 @@ async fn create_ledger_entry(State(state): State<AppState>, Path(id): Path<Strin
              .bind(&amount_str).bind(&p.currency).bind(&paired_memo)
              .execute(&state.db).await;
         }
+    }
+
+    // Invalidate status cache for the company's CEO (ledger balance changed)
+    let ceo_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agents WHERE company_id = $1 AND role = 'CEO' AND status = 'ACTIVE' LIMIT 1"
+    ).bind(company_id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some(cid) = ceo_id {
+        state.invalidate_status_cache(cid).await;
     }
 
     (StatusCode::CREATED, Json(json!({"id": entry_id})))
@@ -5564,6 +5574,8 @@ async fn post_agent_knowledge(
     {
         Ok(id) => {
             tracing::info!("[knowledge] agent {} published: {}", agent_id, topic_safe);
+            // Invalidate team knowledge cache for teammates
+            state.invalidate_status_cache(agent_id).await;
             (StatusCode::CREATED, Json(json!({"id": id, "status": "published"})))
         }
         Err(e) => {

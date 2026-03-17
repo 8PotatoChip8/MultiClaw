@@ -178,6 +178,7 @@ async fn main() -> anyhow::Result<()> {
         queue_notify: std::sync::Arc::new(tokio::sync::Notify::new()),
         agents_in_dm: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         empty_response_counts: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        status_cache: std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     };
 
     // Spawn the durable message queue worker
@@ -592,8 +593,8 @@ async fn main() -> anyhow::Result<()> {
                     Err(e) => tracing::warn!("Failed to enqueue heartbeat for {}: {}", agent_name, e),
                 }
 
-                // Stagger: 2s between enqueues to avoid thundering herd
-                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Stagger: 200ms between enqueues (queue handles per-agent FIFO naturally)
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
 
             if enqueued > 0 {

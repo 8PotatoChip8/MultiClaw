@@ -32,145 +32,191 @@ pub async fn refresh_agent_status(
 }
 
 /// Build the STATUS.md content for an agent by querying the database.
+/// Uses a single initial query for agent+parent info, then runs all remaining
+/// queries concurrently via tokio::join! to minimize DB round-trips.
 async fn build_agent_status(db: &PgPool, agent_id: Uuid) -> Result<String, sqlx::Error> {
-    // Fetch agent info
+    // Query 1: Agent info + parent name in one round-trip
     let agent: Option<(String, String, Option<Uuid>, Option<Uuid>, Option<String>)> = sqlx::query_as(
-        "SELECT name, role, company_id, parent_agent_id, specialty FROM agents WHERE id = $1"
+        "SELECT a.name, a.role, a.company_id, a.parent_agent_id, \
+         (SELECT name FROM agents WHERE id = a.parent_agent_id) AS parent_name \
+         FROM agents a WHERE a.id = $1"
     ).bind(agent_id).fetch_optional(db).await?;
 
-    let (agent_name, role, company_id, parent_agent_id, _specialty) = match agent {
+    let (_agent_name, role, company_id, _parent_agent_id, parent_name) = match agent {
         Some(a) => a,
         None => return Ok(String::new()),
     };
 
-    let mut sections: Vec<String> = vec!["# Current Status\n".to_string()];
+    // Run all remaining queries concurrently based on role.
+    // Each future resolves to its section string (empty if not applicable).
+    let role_clone = role.clone();
+    let role_clone2 = role.clone();
+    let role_clone3 = role.clone();
 
-    // --- Team roster (subordinates) ---
-    if role != "WORKER" {
-        let team: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT a.name, a.role, a.specialty FROM agents a \
-             WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
-             ORDER BY a.role, a.name"
+    // Team roster / companies (depends on role)
+    let team_fut = async {
+        if role_clone == "WORKER" {
+            return String::new();
+        }
+        if role_clone == "MAIN" {
+            // For MAIN: company overview instead of team
+            let companies: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT c.name, c.type, c.description FROM companies c \
+                 JOIN holdings h ON c.holding_id = h.id \
+                 WHERE c.status = 'ACTIVE' ORDER BY c.name"
+            ).fetch_all(db).await.unwrap_or_default();
+
+            // Also fetch subordinates (CEOs)
+            let team: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT a.name, a.role, a.specialty FROM agents a \
+                 WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
+                 ORDER BY a.role, a.name"
+            ).bind(agent_id).fetch_all(db).await.unwrap_or_default();
+
+            let mut result = String::new();
+            if !team.is_empty() {
+                result.push_str("## Your Team\n");
+                for (name, r, spec) in &team {
+                    let spec_str = spec.as_deref().unwrap_or("general");
+                    let spec_short = truncate_str(spec_str, 60);
+                    result.push_str(&format!("- {} ({}, {})\n", name, r, spec_short));
+                }
+            }
+            if !companies.is_empty() {
+                result.push_str("## Companies\n");
+                for (name, ctype, desc) in &companies {
+                    let desc_short = desc.as_deref().map(|d| {
+                        format!(" — {}", truncate_str(d, 80))
+                    }).unwrap_or_default();
+                    result.push_str(&format!("- {} ({}){}\n", name, ctype, desc_short));
+                }
+            }
+            result
+        } else {
+            // CEO/MANAGER: team roster
+            let team: Vec<(String, String, Option<String>)> = sqlx::query_as(
+                "SELECT a.name, a.role, a.specialty FROM agents a \
+                 WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
+                 ORDER BY a.role, a.name"
+            ).bind(agent_id).fetch_all(db).await.unwrap_or_default();
+
+            if !team.is_empty() {
+                let mut s = "## Your Team\n".to_string();
+                for (name, r, spec) in &team {
+                    let spec_str = spec.as_deref().unwrap_or("general");
+                    let spec_short = truncate_str(spec_str, 60);
+                    s.push_str(&format!("- {} ({}, {})\n", name, r, spec_short));
+                }
+                s
+            } else {
+                "## Your Team\nNo direct reports yet.\n".to_string()
+            }
+        }
+    };
+
+    // Recent activity
+    let recent_fut = async {
+        let recent: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
+            "SELECT COALESCE(content->>'text', '') AS text, created_at FROM messages \
+             WHERE sender_id = $1 AND sender_type = 'AGENT' \
+             ORDER BY created_at DESC LIMIT 5"
         ).bind(agent_id).fetch_all(db).await.unwrap_or_default();
 
-        if !team.is_empty() {
-            let mut s = "## Your Team\n".to_string();
-            for (name, r, spec) in &team {
-                let spec_str = spec.as_deref().unwrap_or("general");
-                // Truncate long specialties
-                let spec_short = if spec_str.len() > 60 {
-                    format!("{}...", &spec_str[..spec_str.char_indices().take_while(|(i, _)| *i < 60).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(60)])
-                } else {
-                    spec_str.to_string()
-                };
-                s.push_str(&format!("- {} ({}, {})\n", name, r, spec_short));
-            }
-            sections.push(s);
-        } else if role != "MAIN" {
-            sections.push("## Your Team\nNo direct reports yet.\n".to_string());
+        if recent.is_empty() {
+            return String::new();
         }
-    }
-
-    // --- For MAIN: company overview ---
-    if role == "MAIN" {
-        let companies: Vec<(String, String, Option<String>)> = sqlx::query_as(
-            "SELECT c.name, c.type, c.description FROM companies c \
-             JOIN holdings h ON c.holding_id = h.id \
-             WHERE c.status = 'ACTIVE' ORDER BY c.name"
-        ).fetch_all(db).await.unwrap_or_default();
-
-        if !companies.is_empty() {
-            let mut s = "## Companies\n".to_string();
-            for (name, ctype, desc) in &companies {
-                let desc_short = desc.as_deref().map(|d| {
-                    if d.len() > 80 {
-                        format!(" — {}...", &d[..d.char_indices().take_while(|(i, _)| *i < 80).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(80)])
-                    } else {
-                        format!(" — {}", d)
-                    }
-                }).unwrap_or_default();
-                s.push_str(&format!("- {} ({}){}\n", name, ctype, desc_short));
-            }
-            sections.push(s);
-        }
-    }
-
-    // --- Superior info (for non-MAIN) ---
-    if role != "MAIN" {
-        if let Some(pid) = parent_agent_id {
-            let parent_name: Option<String> = sqlx::query_scalar(
-                "SELECT name FROM agents WHERE id = $1"
-            ).bind(pid).fetch_optional(db).await.unwrap_or(None);
-            if let Some(pname) = parent_name {
-                sections.push(format!("## Reports To\n{}\n", pname));
-            }
-        } else if role == "CEO" {
-            // CEOs report to MAIN
-            let main_name: Option<String> = sqlx::query_scalar(
-                "SELECT name FROM agents WHERE role = 'MAIN' AND status = 'ACTIVE' LIMIT 1"
-            ).fetch_optional(db).await.unwrap_or(None);
-            if let Some(mname) = main_name {
-                sections.push(format!("## Reports To\n{}\n", mname));
-            }
-        }
-    }
-
-    // --- Recent activity (last 5 messages sent by this agent) ---
-    let recent: Vec<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-        "SELECT COALESCE(content->>'text', '') AS text, created_at FROM messages \
-         WHERE sender_id = $1 AND sender_type = 'AGENT' \
-         ORDER BY created_at DESC LIMIT 5"
-    ).bind(agent_id).fetch_all(db).await.unwrap_or_default();
-
-    if !recent.is_empty() {
         let mut s = "## Recent Activity\n".to_string();
         let now = chrono::Utc::now();
         for (text, created_at) in &recent {
             let ago = format_duration_ago(now, *created_at);
-            let preview = if text.len() > 100 {
-                format!("{}...", &text[..text.char_indices().take_while(|(i, _)| *i < 100).last().map(|(i, c)| i + c.len_utf8()).unwrap_or(100)])
-            } else {
-                text.clone()
-            };
-            // Single line, no newlines in preview
-            let preview = preview.replace('\n', " ");
+            let preview = truncate_str(text, 100).replace('\n', " ");
             s.push_str(&format!("- [{}] {}\n", ago, preview));
         }
-        sections.push(s);
-    }
+        s
+    };
 
-    // --- Pending requests (for CEO and above) ---
-    if role == "MAIN" || role == "CEO" {
-        let pending_count: Option<i64> = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM requests \
-             WHERE status = 'PENDING' AND current_approver_id = $1"
-        ).bind(agent_id).fetch_optional(db).await.unwrap_or(None);
+    // Pending requests + ledger (role-dependent, combined into one future)
+    let extras_fut = async {
+        let mut result = String::new();
 
-        if let Some(count) = pending_count {
-            if count > 0 {
-                sections.push(format!("## Pending Requests\n{} request(s) awaiting your approval.\n", count));
+        // Pending requests (MAIN/CEO only)
+        if role_clone2 == "MAIN" || role_clone2 == "CEO" {
+            let pending_count: Option<i64> = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM requests \
+                 WHERE status = 'PENDING' AND current_approver_id = $1"
+            ).bind(agent_id).fetch_optional(db).await.unwrap_or(None);
+
+            if let Some(count) = pending_count {
+                if count > 0 {
+                    result.push_str(&format!("## Pending Requests\n{} request(s) awaiting your approval.\n", count));
+                }
             }
         }
-    }
 
-    // --- Company ledger balance (for CEO) ---
-    if role == "CEO" {
-        if let Some(cid) = company_id {
-            let balance: Option<rust_decimal::Decimal> = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(CASE WHEN type = 'REVENUE' THEN amount \
-                                        WHEN type = 'EXPENSE' THEN -amount \
-                                        WHEN type = 'INTERNAL_TRANSFER' THEN amount \
-                                        ELSE 0 END), 0) \
-                 FROM ledger_entries WHERE company_id = $1"
-            ).bind(cid).fetch_optional(db).await.unwrap_or(None);
+        // Ledger balance (CEO only)
+        if role_clone2 == "CEO" {
+            if let Some(cid) = company_id {
+                let balance: Option<rust_decimal::Decimal> = sqlx::query_scalar(
+                    "SELECT COALESCE(SUM(CASE WHEN type = 'REVENUE' THEN amount \
+                                            WHEN type = 'EXPENSE' THEN -amount \
+                                            WHEN type = 'INTERNAL_TRANSFER' THEN amount \
+                                            ELSE 0 END), 0) \
+                     FROM ledger_entries WHERE company_id = $1"
+                ).bind(cid).fetch_optional(db).await.unwrap_or(None);
 
-            if let Some(bal) = balance {
-                sections.push(format!("## Company Ledger\nBalance: ${}\n", bal));
+                if let Some(bal) = balance {
+                    result.push_str(&format!("## Company Ledger\nBalance: ${}\n", bal));
+                }
             }
         }
-    }
+
+        result
+    };
+
+    // Superior info — resolve from the already-fetched parent_name or look up MAIN
+    let superior_fut = async {
+        if role_clone3 == "MAIN" {
+            return String::new();
+        }
+        if let Some(pname) = &parent_name {
+            return format!("## Reports To\n{}\n", pname);
+        }
+        if role_clone3 == "CEO" {
+            let main_name: Option<String> = sqlx::query_scalar(
+                "SELECT name FROM agents WHERE role = 'MAIN' AND status = 'ACTIVE' LIMIT 1"
+            ).fetch_optional(db).await.unwrap_or(None);
+            if let Some(mname) = main_name {
+                return format!("## Reports To\n{}\n", mname);
+            }
+        }
+        String::new()
+    };
+
+    // Execute all in parallel
+    let (team_section, recent_section, extras_section, superior_section) =
+        tokio::join!(team_fut, recent_fut, extras_fut, superior_fut);
+
+    // Assemble in display order
+    let mut sections: Vec<String> = vec!["# Current Status\n".to_string()];
+    if !team_section.is_empty() { sections.push(team_section); }
+    if !superior_section.is_empty() { sections.push(superior_section); }
+    if !recent_section.is_empty() { sections.push(recent_section); }
+    if !extras_section.is_empty() { sections.push(extras_section); }
 
     Ok(sections.join("\n"))
+}
+
+/// Truncate a string to `max_chars` characters, appending "..." if truncated.
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    let end = s.char_indices()
+        .take_while(|(i, _)| *i < max_chars)
+        .last()
+        .map(|(i, c)| i + c.len_utf8())
+        .unwrap_or(max_chars);
+    format!("{}...", &s[..end])
 }
 
 /// Format a duration as a human-readable "X ago" string.
