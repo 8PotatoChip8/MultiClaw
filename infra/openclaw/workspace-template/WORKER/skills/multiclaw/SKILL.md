@@ -285,6 +285,61 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/knowledge \
 
 Published knowledge appears in your team's `TEAM_KNOWLEDGE.md` workspace file automatically. Check that file to see what your teammates have found.
 
+## Trading Operations — Record & Track Trades
+
+The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). You execute trades on whatever platform you use (via scripts, API calls, etc.), then record the results here.
+
+### Record a Trade Order
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agent_id": "{{AGENT_ID}}",
+    "exchange": "coinex",
+    "symbol": "BTC/USDT",
+    "side": "BUY",
+    "order_type": "MARKET",
+    "quantity": 0.001,
+    "quote_currency": "USDT",
+    "status": "FILLED",
+    "fill_price": 65000.0,
+    "fill_quantity": 0.001,
+    "fee": 0.05,
+    "fee_currency": "USDT",
+    "exchange_order_id": "123456789"
+  }'
+```
+- `exchange`: freeform — use whatever platform you're trading on
+- `side`: `BUY` or `SELL`
+- `order_type`: `MARKET` or `LIMIT`
+- `status`: `PENDING`, `FILLED`, `PARTIAL`, `CANCELLED`, or `FAILED`
+- BUY orders are checked against your company's budget. If insufficient, you'll get a 402 error.
+- FILLED orders automatically create a ledger entry (BUY → EXPENSE, SELL → REVENUE).
+
+### List Orders
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?status=FILLED&symbol=BTC/USDT&limit=50"
+```
+
+### Update Order Status
+```bash
+curl -s -X PATCH {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders/ORDER_ID \
+  -H 'Content-Type: application/json' \
+  -d '{"status": "FILLED", "fill_price": 65000.0, "fill_quantity": 0.001, "fee": 0.05}'
+```
+
+### Check Positions (Current Holdings)
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+```
+Returns net quantities per symbol/exchange based on filled orders.
+
+### Check Budget
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+```
+Returns available spending budget per currency. Budget is funded by CAPITAL_INJECTION ledger entries.
+
 ## Important Notes
 
 1. Your agent ID is: `{{AGENT_ID}}`

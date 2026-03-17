@@ -282,6 +282,32 @@ Returns `{"name": "...", "value": "..."}`. Use this for API keys, passwords, and
 
 **CRITICAL:** Never paste secret values into messages, DMs, or conversations. Access them via this API and use them only in commands (e.g., as HTTP headers or environment variables). Secret values in messages will be automatically redacted.
 
+## Trading Oversight — Monitor Company Trading Activity
+
+As the holding's leader, you can monitor any company's trading activity.
+
+### List Company Orders
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?limit=100"
+```
+
+### Check Company Positions
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+```
+
+### Check Company Budget
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+```
+
+### Secret Access Audit
+Monitor which agents accessed which secrets:
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/secrets/audit?agent_id=AGENT_UUID&limit=50"
+curl -s "{{MULTICLAW_API_URL}}/v1/secrets/audit?secret_name=COINEX_API_KEY&limit=50"
+```
+
 ## Important Notes
 
 1. Replace `COMPANY_ID`, `CEO_NAME`, etc. with actual values.

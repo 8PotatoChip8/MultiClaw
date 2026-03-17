@@ -2,7 +2,7 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, post, put, delete},
+    routing::{get, post, put, patch, delete},
     Json, Router,
 };
 use serde::Deserialize;
@@ -890,6 +890,10 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/companies/:id/hire-ceo", post(hire_ceo))
         .route("/v1/companies/:id/ledger", get(get_ledger).post(create_ledger_entry))
         .route("/v1/companies/:id/balance", get(get_balance))
+        .route("/v1/companies/:id/orders", get(list_orders).post(create_order))
+        .route("/v1/companies/:id/orders/:order_id", patch(update_order))
+        .route("/v1/companies/:id/positions", get(get_positions))
+        .route("/v1/companies/:id/budget", get(get_budget))
         // Agents
         .route("/v1/agents", get(list_agents))
         .route("/v1/agents/:id", get(get_agent).patch(patch_agent))
@@ -924,6 +928,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/restart", post(restart_agent_container))
         // Secrets
         .route("/v1/secrets", get(list_secrets).post(create_secret))
+        .route("/v1/secrets/audit", get(get_secret_audit))
         .route("/v1/secrets/:id", delete(delete_secret))
         // Threads & Messages
         .route("/v1/threads", get(get_threads).post(create_thread))
@@ -3298,7 +3303,7 @@ async fn close_meeting(State(state): State<AppState>, Path(id): Path<String>, Js
 async fn get_ledger(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     match sqlx::query_as::<_, LedgerEntry>(
-        "SELECT id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual, created_at \
+        "SELECT id, company_id, counterparty_company_id, engagement_id, order_id, type, amount, currency, memo, is_virtual, created_at \
          FROM ledger_entries WHERE company_id = $1 ORDER BY created_at DESC"
     ).bind(uid).fetch_all(&state.db).await {
         Ok(l) => (StatusCode::OK, Json(json!(l))),
@@ -3314,6 +3319,7 @@ struct CreateLedgerEntryRequest {
     memo: Option<String>,
     counterparty_company_id: Option<String>,
     engagement_id: Option<String>,
+    order_id: Option<String>,
 }
 
 async fn create_ledger_entry(State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateLedgerEntryRequest>) -> impl IntoResponse {
@@ -3330,14 +3336,16 @@ async fn create_ledger_entry(State(state): State<AppState>, Path(id): Path<Strin
         .and_then(|s| Uuid::parse_str(s).ok());
     let engagement_id = p.engagement_id.as_deref()
         .and_then(|s| Uuid::parse_str(s).ok());
+    let order_id = p.order_id.as_deref()
+        .and_then(|s| Uuid::parse_str(s).ok());
 
     let entry_id = Uuid::new_v4();
     let amount_str = format!("{}", p.amount);
 
     if let Err(e) = sqlx::query(
-        "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, type, amount, currency, memo, is_virtual) \
-         VALUES ($1, $2, $3, $4, $5, $6::NUMERIC, $7, $8, true)"
-    ).bind(entry_id).bind(company_id).bind(counterparty_id).bind(engagement_id)
+        "INSERT INTO ledger_entries (id, company_id, counterparty_company_id, engagement_id, order_id, type, amount, currency, memo, is_virtual) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7::NUMERIC, $8, $9, true)"
+    ).bind(entry_id).bind(company_id).bind(counterparty_id).bind(engagement_id).bind(order_id)
      .bind(&p.r#type).bind(&amount_str).bind(&p.currency).bind(&p.memo)
      .execute(&state.db).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
@@ -3356,6 +3364,17 @@ async fn create_ledger_entry(State(state): State<AppState>, Path(id): Path<Strin
              .bind(&amount_str).bind(&p.currency).bind(&paired_memo)
              .execute(&state.db).await;
         }
+    }
+
+    // Auto-update company budget on CAPITAL_INJECTION
+    if p.r#type == "CAPITAL_INJECTION" {
+        let _ = sqlx::query(
+            "INSERT INTO company_budgets (company_id, currency, total_budget) \
+             VALUES ($1, $2, $3::NUMERIC) \
+             ON CONFLICT (company_id, currency) \
+             DO UPDATE SET total_budget = company_budgets.total_budget + EXCLUDED.total_budget, updated_at = NOW()"
+        ).bind(company_id).bind(&p.currency).bind(&amount_str)
+         .execute(&state.db).await;
     }
 
     // Invalidate status cache for the company's CEO (ledger balance changed)
@@ -3399,6 +3418,436 @@ async fn get_balance(State(state): State<AppState>, Path(id): Path<String>) -> i
     }
 
     (StatusCode::OK, Json(json!(balances)))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Trading Orders
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Deserialize)]
+struct CreateOrderRequest {
+    agent_id: String,
+    exchange: String,
+    symbol: String,
+    side: String,
+    order_type: String,
+    quantity: f64,
+    price: Option<f64>,
+    quote_currency: String,
+    status: String,
+    exchange_order_id: Option<String>,
+    fill_price: Option<f64>,
+    fill_quantity: Option<f64>,
+    fee: Option<f64>,
+    fee_currency: Option<String>,
+    error: Option<String>,
+}
+
+async fn create_order(
+    State(state): State<AppState>, Path(id): Path<String>, Json(p): Json<CreateOrderRequest>,
+) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid company ID"}))),
+    };
+    let agent_id = match Uuid::parse_str(&p.agent_id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent ID"}))),
+    };
+
+    // Validate enums
+    let valid_sides = ["BUY", "SELL"];
+    let valid_types = ["MARKET", "LIMIT"];
+    let valid_statuses = ["PENDING", "FILLED", "PARTIAL", "CANCELLED", "FAILED"];
+    if !valid_sides.contains(&p.side.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "side must be BUY or SELL"})));
+    }
+    if !valid_types.contains(&p.order_type.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "order_type must be MARKET or LIMIT"})));
+    }
+    if !valid_statuses.contains(&p.status.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "status must be PENDING, FILLED, PARTIAL, CANCELLED, or FAILED"})));
+    }
+
+    // Budget check for BUY orders (FILLED or PENDING)
+    if p.side == "BUY" && (p.status == "FILLED" || p.status == "PENDING" || p.status == "PARTIAL") {
+        let cost = if p.status == "FILLED" || p.status == "PARTIAL" {
+            // Use actual fill data
+            let fq = p.fill_quantity.unwrap_or(p.quantity);
+            let fp = p.fill_price.unwrap_or(p.price.unwrap_or(0.0));
+            let fee = p.fee.unwrap_or(0.0);
+            fq * fp + fee
+        } else {
+            // PENDING — use requested quantity * price
+            let price = match p.price {
+                Some(pr) => pr,
+                None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "PENDING LIMIT orders require price"}))),
+            };
+            p.quantity * price
+        };
+
+        if cost > 0.0 {
+            let cost_str = format!("{}", cost);
+            let budget_ok: Option<Uuid> = sqlx::query_scalar(
+                "UPDATE company_budgets SET spent_amount = spent_amount + $1::NUMERIC, updated_at = NOW() \
+                 WHERE company_id = $2 AND currency = $3 AND total_budget - spent_amount >= $1::NUMERIC \
+                 RETURNING id"
+            ).bind(&cost_str).bind(company_id).bind(&p.quote_currency)
+            .fetch_optional(&state.db).await.ok().flatten();
+
+            if budget_ok.is_none() {
+                return (StatusCode::PAYMENT_REQUIRED, Json(json!({"error": "Insufficient budget", "required": cost, "currency": p.quote_currency})));
+            }
+        }
+    }
+
+    let order_id = Uuid::new_v4();
+    let qty_str = format!("{}", p.quantity);
+    let price_str = p.price.map(|v| format!("{}", v));
+    let fill_price_str = p.fill_price.map(|v| format!("{}", v));
+    let fill_qty_str = p.fill_quantity.map(|v| format!("{}", v));
+    let fee_str = p.fee.map(|v| format!("{}", v));
+    let filled_at = if p.status == "FILLED" { Some(chrono::Utc::now()) } else { None };
+
+    if let Err(e) = sqlx::query(
+        "INSERT INTO trading_orders (id, company_id, agent_id, exchange, symbol, side, order_type, quantity, price, \
+         quote_currency, status, exchange_order_id, fill_price, fill_quantity, fee, fee_currency, error, filled_at) \
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::NUMERIC, $9::NUMERIC, $10, $11, $12, $13::NUMERIC, $14::NUMERIC, $15::NUMERIC, $16, $17, $18)"
+    )
+    .bind(order_id).bind(company_id).bind(agent_id)
+    .bind(&p.exchange).bind(&p.symbol).bind(&p.side).bind(&p.order_type)
+    .bind(&qty_str).bind(&price_str).bind(&p.quote_currency).bind(&p.status)
+    .bind(&p.exchange_order_id).bind(&fill_price_str).bind(&fill_qty_str)
+    .bind(&fee_str).bind(&p.fee_currency).bind(&p.error).bind(filled_at)
+    .execute(&state.db).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
+    }
+
+    // Auto-create ledger entry for FILLED orders
+    if p.status == "FILLED" || p.status == "PARTIAL" {
+        let fq = p.fill_quantity.unwrap_or(p.quantity);
+        let fp = p.fill_price.unwrap_or(p.price.unwrap_or(0.0));
+        let fee = p.fee.unwrap_or(0.0);
+
+        let (ledger_type, ledger_amount) = if p.side == "BUY" {
+            ("EXPENSE", fq * fp + fee)
+        } else {
+            ("REVENUE", fq * fp - fee)
+        };
+
+        let ledger_id = Uuid::new_v4();
+        let amount_str = format!("{}", ledger_amount.abs());
+        let memo = format!("{} {} {} on {} @ {}", p.side, fq, p.symbol, p.exchange, fp);
+
+        let _ = sqlx::query(
+            "INSERT INTO ledger_entries (id, company_id, order_id, type, amount, currency, memo, is_virtual) \
+             VALUES ($1, $2, $3, $4, $5::NUMERIC, $6, $7, true)"
+        ).bind(ledger_id).bind(company_id).bind(order_id).bind(ledger_type)
+         .bind(&amount_str).bind(&p.quote_currency).bind(&memo)
+         .execute(&state.db).await;
+    }
+
+    // Invalidate status cache for company's CEO
+    let ceo_id: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM agents WHERE company_id = $1 AND role = 'CEO' AND status = 'ACTIVE' LIMIT 1"
+    ).bind(company_id).fetch_optional(&state.db).await.ok().flatten();
+    if let Some(cid) = ceo_id {
+        state.invalidate_status_cache(cid).await;
+    }
+
+    (StatusCode::CREATED, Json(json!({"id": order_id})))
+}
+
+#[derive(Debug, Deserialize)]
+struct ListOrdersQuery {
+    status: Option<String>,
+    symbol: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn list_orders(
+    State(state): State<AppState>, Path(id): Path<String>, Query(q): Query<ListOrdersQuery>,
+) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
+    };
+
+    let limit = q.limit.unwrap_or(100).min(500);
+    let mut sql = String::from(
+        "SELECT id, company_id, agent_id, exchange, symbol, side, order_type, quantity, price, \
+         quote_currency, status, exchange_order_id, fill_price, fill_quantity, fee, fee_currency, \
+         error, created_at, filled_at FROM trading_orders WHERE company_id = $1"
+    );
+    let mut param_idx = 2;
+
+    if q.status.is_some() {
+        sql.push_str(&format!(" AND status = ${}", param_idx));
+        param_idx += 1;
+    }
+    if q.symbol.is_some() {
+        sql.push_str(&format!(" AND symbol = ${}", param_idx));
+        param_idx += 1;
+    }
+    let _ = param_idx; // suppress unused warning
+
+    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT {}", limit));
+
+    let mut query = sqlx::query_as::<_, TradingOrder>(&sql).bind(company_id);
+    if let Some(ref status) = q.status {
+        query = query.bind(status);
+    }
+    if let Some(ref symbol) = q.symbol {
+        query = query.bind(symbol);
+    }
+
+    match query.fetch_all(&state.db).await {
+        Ok(orders) => (StatusCode::OK, Json(json!(orders))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)}))),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateOrderRequest {
+    status: String,
+    fill_price: Option<f64>,
+    fill_quantity: Option<f64>,
+    fee: Option<f64>,
+    fee_currency: Option<String>,
+    exchange_order_id: Option<String>,
+    error: Option<String>,
+}
+
+async fn update_order(
+    State(state): State<AppState>,
+    Path((id, order_id_str)): Path<(String, String)>,
+    Json(p): Json<UpdateOrderRequest>,
+) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid company ID"}))),
+    };
+    let order_id = match Uuid::parse_str(&order_id_str) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid order ID"}))),
+    };
+
+    let valid_statuses = ["PENDING", "FILLED", "PARTIAL", "CANCELLED", "FAILED"];
+    if !valid_statuses.contains(&p.status.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid status"})));
+    }
+
+    // Fetch current order
+    let current: Option<TradingOrder> = sqlx::query_as(
+        "SELECT id, company_id, agent_id, exchange, symbol, side, order_type, quantity, price, \
+         quote_currency, status, exchange_order_id, fill_price, fill_quantity, fee, fee_currency, \
+         error, created_at, filled_at FROM trading_orders WHERE id = $1 AND company_id = $2"
+    ).bind(order_id).bind(company_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let order = match current {
+        Some(o) => o,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Order not found"}))),
+    };
+
+    // Budget adjustments for status transitions
+    if order.status == "PENDING" && order.side == "BUY" {
+        let old_cost = order.quantity.to_string().parse::<f64>().unwrap_or(0.0)
+            * order.price.map(|v| v.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0);
+
+        if p.status == "CANCELLED" || p.status == "FAILED" {
+            // Release the pending reservation
+            if old_cost > 0.0 {
+                let cost_str = format!("{}", old_cost);
+                let _ = sqlx::query(
+                    "UPDATE company_budgets SET spent_amount = spent_amount - $1::NUMERIC, updated_at = NOW() \
+                     WHERE company_id = $2 AND currency = $3"
+                ).bind(&cost_str).bind(company_id).bind(&order.quote_currency)
+                .execute(&state.db).await;
+            }
+        } else if p.status == "FILLED" || p.status == "PARTIAL" {
+            // Adjust: release pending reservation, charge actual cost
+            let fq = p.fill_quantity.unwrap_or(order.quantity.to_string().parse::<f64>().unwrap_or(0.0));
+            let fp = p.fill_price.unwrap_or(order.price.map(|v| v.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0));
+            let fee = p.fee.unwrap_or(0.0);
+            let actual_cost = fq * fp + fee;
+            let diff = actual_cost - old_cost;
+
+            if diff != 0.0 {
+                let diff_str = format!("{}", diff);
+                let _ = sqlx::query(
+                    "UPDATE company_budgets SET spent_amount = spent_amount + $1::NUMERIC, updated_at = NOW() \
+                     WHERE company_id = $2 AND currency = $3"
+                ).bind(&diff_str).bind(company_id).bind(&order.quote_currency)
+                .execute(&state.db).await;
+            }
+        }
+    }
+
+    let filled_at = if (p.status == "FILLED" || p.status == "PARTIAL") && order.filled_at.is_none() {
+        Some(chrono::Utc::now())
+    } else {
+        order.filled_at
+    };
+
+    let fill_price_str = p.fill_price.map(|v| format!("{}", v));
+    let fill_qty_str = p.fill_quantity.map(|v| format!("{}", v));
+    let fee_str = p.fee.map(|v| format!("{}", v));
+
+    if let Err(e) = sqlx::query(
+        "UPDATE trading_orders SET status = $1, fill_price = COALESCE($2::NUMERIC, fill_price), \
+         fill_quantity = COALESCE($3::NUMERIC, fill_quantity), fee = COALESCE($4::NUMERIC, fee), \
+         fee_currency = COALESCE($5, fee_currency), exchange_order_id = COALESCE($6, exchange_order_id), \
+         error = $7, filled_at = $8 WHERE id = $9"
+    ).bind(&p.status).bind(&fill_price_str).bind(&fill_qty_str).bind(&fee_str)
+     .bind(&p.fee_currency).bind(&p.exchange_order_id).bind(&p.error)
+     .bind(filled_at).bind(order_id)
+     .execute(&state.db).await {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
+    }
+
+    // Auto-create ledger entry when transitioning to FILLED/PARTIAL
+    if (p.status == "FILLED" || p.status == "PARTIAL") && order.status == "PENDING" {
+        let fq = p.fill_quantity.unwrap_or(order.quantity.to_string().parse::<f64>().unwrap_or(0.0));
+        let fp = p.fill_price.unwrap_or(order.price.map(|v| v.to_string().parse::<f64>().unwrap_or(0.0)).unwrap_or(0.0));
+        let fee = p.fee.unwrap_or(0.0);
+
+        let (ledger_type, ledger_amount) = if order.side == "BUY" {
+            ("EXPENSE", fq * fp + fee)
+        } else {
+            ("REVENUE", fq * fp - fee)
+        };
+
+        let ledger_id = Uuid::new_v4();
+        let amount_str = format!("{}", ledger_amount.abs());
+        let memo = format!("{} {} {} on {} @ {}", order.side, fq, order.symbol, order.exchange, fp);
+
+        let _ = sqlx::query(
+            "INSERT INTO ledger_entries (id, company_id, order_id, type, amount, currency, memo, is_virtual) \
+             VALUES ($1, $2, $3, $4, $5::NUMERIC, $6, $7, true)"
+        ).bind(ledger_id).bind(company_id).bind(order_id).bind(ledger_type)
+         .bind(&amount_str).bind(&order.quote_currency).bind(&memo)
+         .execute(&state.db).await;
+    }
+
+    (StatusCode::OK, Json(json!({"id": order_id, "status": p.status})))
+}
+
+async fn get_positions(
+    State(state): State<AppState>, Path(id): Path<String>,
+) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
+    };
+
+    let rows: Vec<(String, String, rust_decimal::Decimal, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT symbol, exchange, \
+         SUM(CASE WHEN side='BUY' THEN COALESCE(fill_quantity, 0) ELSE 0 END) as bought, \
+         SUM(CASE WHEN side='SELL' THEN COALESCE(fill_quantity, 0) ELSE 0 END) as sold, \
+         SUM(CASE WHEN side='BUY' THEN COALESCE(fill_quantity, 0) ELSE -COALESCE(fill_quantity, 0) END) as net_quantity \
+         FROM trading_orders WHERE company_id = $1 AND status IN ('FILLED', 'PARTIAL') \
+         GROUP BY symbol, exchange \
+         HAVING SUM(CASE WHEN side='BUY' THEN COALESCE(fill_quantity, 0) ELSE -COALESCE(fill_quantity, 0) END) != 0"
+    ).bind(company_id).fetch_all(&state.db).await.unwrap_or_default();
+
+    let positions: Vec<Value> = rows.iter().map(|(symbol, exchange, bought, sold, net)| {
+        json!({
+            "symbol": symbol,
+            "exchange": exchange,
+            "bought": bought.to_string().parse::<f64>().unwrap_or(0.0),
+            "sold": sold.to_string().parse::<f64>().unwrap_or(0.0),
+            "net_quantity": net.to_string().parse::<f64>().unwrap_or(0.0),
+        })
+    }).collect();
+
+    (StatusCode::OK, Json(json!(positions)))
+}
+
+async fn get_budget(
+    State(state): State<AppState>, Path(id): Path<String>,
+) -> impl IntoResponse {
+    let company_id = match Uuid::parse_str(&id) {
+        Ok(u) => u,
+        Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid ID"}))),
+    };
+
+    let rows: Vec<(String, rust_decimal::Decimal, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT currency, total_budget, spent_amount FROM company_budgets WHERE company_id = $1"
+    ).bind(company_id).fetch_all(&state.db).await.unwrap_or_default();
+
+    let budgets: Vec<Value> = rows.iter().map(|(currency, total, spent)| {
+        let total_f = total.to_string().parse::<f64>().unwrap_or(0.0);
+        let spent_f = spent.to_string().parse::<f64>().unwrap_or(0.0);
+        json!({
+            "currency": currency,
+            "total_budget": total_f,
+            "spent_amount": spent_f,
+            "available": total_f - spent_f,
+        })
+    }).collect();
+
+    (StatusCode::OK, Json(json!(budgets)))
+}
+
+// ─── Secret Access Audit ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct SecretAuditQuery {
+    agent_id: Option<String>,
+    secret_name: Option<String>,
+    limit: Option<i64>,
+}
+
+async fn get_secret_audit(
+    State(state): State<AppState>, Query(q): Query<SecretAuditQuery>,
+) -> impl IntoResponse {
+    let limit = q.limit.unwrap_or(100).min(500);
+
+    let mut sql = String::from(
+        "SELECT id, secret_id, agent_id, secret_name, action, created_at FROM secret_access_log WHERE 1=1"
+    );
+    let mut param_idx = 1;
+
+    if q.agent_id.is_some() {
+        sql.push_str(&format!(" AND agent_id = ${}", param_idx));
+        param_idx += 1;
+    }
+    if q.secret_name.is_some() {
+        sql.push_str(&format!(" AND secret_name = ${}", param_idx));
+        param_idx += 1;
+    }
+    let _ = param_idx;
+
+    sql.push_str(&format!(" ORDER BY created_at DESC LIMIT {}", limit));
+
+    let mut query = sqlx::query_as::<_, (Uuid, Uuid, Uuid, String, String, chrono::DateTime<chrono::Utc>)>(&sql);
+    if let Some(ref agent_id) = q.agent_id {
+        if let Ok(uid) = Uuid::parse_str(agent_id) {
+            query = query.bind(uid);
+        } else {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid agent_id"})));
+        }
+    }
+    if let Some(ref name) = q.secret_name {
+        query = query.bind(name);
+    }
+
+    match query.fetch_all(&state.db).await {
+        Ok(rows) => {
+            let entries: Vec<Value> = rows.iter().map(|(id, secret_id, agent_id, name, action, created_at)| {
+                json!({
+                    "id": id,
+                    "secret_id": secret_id,
+                    "agent_id": agent_id,
+                    "secret_name": name,
+                    "action": action,
+                    "created_at": created_at,
+                })
+            }).collect();
+            (StatusCode::OK, Json(json!(entries)))
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)}))),
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -4984,14 +5433,20 @@ async fn get_agent_secret(
     scopes.push(("holding", holding_id));
 
     for (scope_type, scope_id) in &scopes {
-        let row: Option<(Vec<u8>,)> = sqlx::query_as(
-            "SELECT ciphertext FROM secrets WHERE scope_type = $1 AND scope_id = $2 AND kind = $3 LIMIT 1"
+        let row: Option<(Uuid, Vec<u8>)> = sqlx::query_as(
+            "SELECT id, ciphertext FROM secrets WHERE scope_type = $1 AND scope_id = $2 AND kind = $3 LIMIT 1"
         ).bind(scope_type).bind(scope_id).bind(&name)
         .fetch_optional(&state.db).await.ok().flatten();
 
-        if let Some((ciphertext,)) = row {
+        if let Some((secret_id, ciphertext)) = row {
             match crypto.decrypt(&ciphertext) {
                 Ok(plaintext) => {
+                    // Audit log: record that this agent accessed this secret
+                    let _ = sqlx::query(
+                        "INSERT INTO secret_access_log (secret_id, agent_id, secret_name) VALUES ($1, $2, $3)"
+                    ).bind(secret_id).bind(agent_id).bind(&name)
+                    .execute(&state.db).await;
+
                     let text = String::from_utf8_lossy(&plaintext).to_string();
                     // Try JSON multi-value format first
                     if let Ok(parsed) = serde_json::from_str::<Value>(&text) {
@@ -5510,12 +5965,36 @@ async fn world_snapshot(State(state): State<AppState>) -> impl IntoResponse {
         }));
     }
 
+    // 6. Trading positions — net holdings per company/symbol/exchange
+    let position_rows: Vec<(Uuid, String, String, rust_decimal::Decimal)> = sqlx::query_as(
+        "SELECT company_id, symbol, exchange, \
+         SUM(CASE WHEN side='BUY' THEN COALESCE(fill_quantity, 0) ELSE -COALESCE(fill_quantity, 0) END) as net_qty \
+         FROM trading_orders WHERE status IN ('FILLED', 'PARTIAL') \
+         GROUP BY company_id, symbol, exchange \
+         HAVING SUM(CASE WHEN side='BUY' THEN COALESCE(fill_quantity, 0) ELSE -COALESCE(fill_quantity, 0) END) != 0"
+    ).fetch_all(&state.db).await.unwrap_or_default();
+
+    let mut positions: serde_json::Map<String, Value> = serde_json::Map::new();
+    for (company_id, symbol, exchange, net_qty) in &position_rows {
+        let company_key = company_id.to_string();
+        let company_arr = positions.entry(company_key)
+            .or_insert_with(|| json!([]));
+        if let Some(arr) = company_arr.as_array_mut() {
+            arr.push(json!({
+                "symbol": symbol,
+                "exchange": exchange,
+                "net_quantity": net_qty.to_string().parse::<f64>().unwrap_or(0.0),
+            }));
+        }
+    }
+
     (StatusCode::OK, Json(json!({
         "companies": companies,
         "agents": agents,
         "balances": balances,
         "activities": activities,
         "vm_states": vm_states,
+        "positions": positions,
     })))
 }
 

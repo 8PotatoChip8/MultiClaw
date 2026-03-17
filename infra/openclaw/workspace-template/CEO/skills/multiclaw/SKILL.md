@@ -335,6 +335,48 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/knowledge \
 
 Published knowledge appears in everyone's `TEAM_KNOWLEDGE.md` workspace file automatically.
 
+## Trading Operations — Oversee Company Trading
+
+The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). Your workers execute trades on whatever platform they use, then record results through these endpoints. As CEO, you oversee all trading activity.
+
+### List All Orders
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?limit=100"
+```
+Filter by: `?status=FILLED`, `?symbol=BTC/USDT`, or combine.
+
+### Check Positions (Current Holdings)
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+```
+Returns net quantities per symbol/exchange based on filled orders.
+
+### Check Budget
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+```
+Returns available spending budget per currency. Budget is automatically funded when CAPITAL_INJECTION ledger entries are created. BUY orders are checked against this budget — workers cannot overspend.
+
+### Record a Trade Order (if needed)
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agent_id": "{{AGENT_ID}}",
+    "exchange": "coinex",
+    "symbol": "BTC/USDT",
+    "side": "BUY",
+    "order_type": "MARKET",
+    "quantity": 0.001,
+    "quote_currency": "USDT",
+    "status": "FILLED",
+    "fill_price": 65000.0,
+    "fill_quantity": 0.001,
+    "fee": 0.05,
+    "fee_currency": "USDT"
+  }'
+```
+
 ## Important Notes
 
 1. Replace `COMPANY_ID`, `MANAGER_NAME`, etc. with actual values.

@@ -323,6 +323,49 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/knowledge \
 
 Published knowledge appears in everyone's `TEAM_KNOWLEDGE.md` workspace file automatically. Encourage your workers to publish their findings too.
 
+## Trading Operations — Monitor & Record Trades
+
+The system tracks trades from **any exchange** (CoinEx, Binance, Kraken, etc.). Agents execute trades on whatever platform they use, then record the results here.
+
+### Record a Trade Order
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "agent_id": "{{AGENT_ID}}",
+    "exchange": "coinex",
+    "symbol": "BTC/USDT",
+    "side": "BUY",
+    "order_type": "MARKET",
+    "quantity": 0.001,
+    "quote_currency": "USDT",
+    "status": "FILLED",
+    "fill_price": 65000.0,
+    "fill_quantity": 0.001,
+    "fee": 0.05,
+    "fee_currency": "USDT"
+  }'
+```
+- `exchange`: freeform — any platform (CoinEx, Binance, Kraken, etc.)
+- `side`: `BUY` or `SELL` | `order_type`: `MARKET` or `LIMIT`
+- `status`: `PENDING`, `FILLED`, `PARTIAL`, `CANCELLED`, or `FAILED`
+- BUY orders are budget-checked. FILLED orders auto-create ledger entries.
+
+### List Orders
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/orders?status=FILLED&limit=50"
+```
+
+### Check Positions (Current Holdings)
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/positions
+```
+
+### Check Budget
+```bash
+curl -s {{MULTICLAW_API_URL}}/v1/companies/COMPANY_ID/budget
+```
+
 ## Important Notes
 
 1. Your agent ID is: `{{AGENT_ID}}`

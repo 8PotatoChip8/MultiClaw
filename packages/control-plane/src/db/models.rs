@@ -287,12 +287,38 @@ pub struct LedgerEntry {
     pub company_id: Uuid,
     pub counterparty_company_id: Option<Uuid>,
     pub engagement_id: Option<Uuid>,
+    pub order_id: Option<Uuid>,
     pub r#type: String,
     pub amount: rust_decimal::Decimal,
     pub currency: String,
     pub memo: Option<String>,
     pub is_virtual: bool,
     pub created_at: DateTime<Utc>,
+}
+
+// ─── Trading Orders ───────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct TradingOrder {
+    pub id: Uuid,
+    pub company_id: Uuid,
+    pub agent_id: Uuid,
+    pub exchange: String,
+    pub symbol: String,
+    pub side: String,
+    pub order_type: String,
+    pub quantity: rust_decimal::Decimal,
+    pub price: Option<rust_decimal::Decimal>,
+    pub quote_currency: String,
+    pub status: String,
+    pub exchange_order_id: Option<String>,
+    pub fill_price: Option<rust_decimal::Decimal>,
+    pub fill_quantity: Option<rust_decimal::Decimal>,
+    pub fee: Option<rust_decimal::Decimal>,
+    pub fee_currency: Option<String>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub filled_at: Option<DateTime<Utc>>,
 }
 
 // ─── Secrets ───────────────────────────────────────────────────
