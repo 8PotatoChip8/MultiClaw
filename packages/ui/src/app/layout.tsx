@@ -1,8 +1,10 @@
 'use client';
 import '../styles/globals.css';
 import Link from 'next/link';
-import { useEffect, useState } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar, Eye } from 'lucide-react';
+import { useEffect, useState, useRef, useCallback } from 'react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar, Eye, Bell, X } from 'lucide-react';
+import { useMultiClawEvents } from '../lib/ws';
+import { api } from '../lib/api';
 
 const navItems = [
     { href: '/', icon: Activity, label: 'Dashboard' },
@@ -124,6 +126,145 @@ function UpdateBanner() {
     );
 }
 
+interface Toast {
+    id: string;
+    requestId: string;
+    type: string;
+    requesterName: string;
+    description: string;
+    createdAt: string;
+}
+
+function ApprovalToast() {
+    const [toasts, setToasts] = useState<Toast[]>([]);
+    const seenIds = useRef<Set<string>>(new Set());
+    const agentCache = useRef<Record<string, string>>({});
+    const event = useMultiClawEvents();
+
+    const dismiss = useCallback((id: string) => {
+        setToasts(prev => prev.filter(t => t.id !== id));
+    }, []);
+
+    useEffect(() => {
+        if (!event) return;
+        if (event.type !== 'new_request' && event.type !== 'approval_required') return;
+
+        const requestId = event.request_id;
+        if (!requestId || seenIds.current.has(requestId)) return;
+        seenIds.current.add(requestId);
+
+        // Fetch the pending request details
+        api.getRequests('PENDING', 'USER').then(async (data) => {
+            if (!Array.isArray(data)) return;
+            const req = data.find((r: any) => r.id === requestId);
+            if (!req) return;
+
+            // Resolve requester name
+            let requesterName = 'Agent';
+            const agentId = req.created_by_agent_id || req.payload?.requester_id;
+            if (agentId) {
+                if (agentCache.current[agentId]) {
+                    requesterName = agentCache.current[agentId];
+                } else {
+                    try {
+                        const agents = await api.getAgents();
+                        if (Array.isArray(agents)) {
+                            agents.forEach((a: any) => { agentCache.current[a.id] = a.name; });
+                            if (agentCache.current[agentId]) requesterName = agentCache.current[agentId];
+                        }
+                    } catch {}
+                }
+            }
+
+            // Build description
+            let description: string;
+            if (req.type === 'REQUEST_TOOL') {
+                description = `Tool: "${req.payload?.tool_name || 'unnamed'}" — ${req.payload?.description || 'No description'}`;
+            } else {
+                description = req.payload?.description || req.payload?.reason || req.type.replace(/_/g, ' ').toLowerCase();
+            }
+
+            const toast: Toast = {
+                id: requestId,
+                requestId,
+                type: req.type,
+                requesterName,
+                description,
+                createdAt: req.created_at,
+            };
+
+            setToasts(prev => [...prev, toast]);
+
+            // Auto-dismiss after 30s
+            setTimeout(() => {
+                setToasts(prev => prev.filter(t => t.id !== requestId));
+            }, 30000);
+        }).catch(() => {});
+    }, [event]);
+
+    if (toasts.length === 0) return null;
+
+    return (
+        <div style={{
+            position: 'fixed', bottom: '20px', right: '20px',
+            zIndex: 2000, display: 'flex', flexDirection: 'column', gap: '10px',
+            maxWidth: '400px',
+        }}>
+            {toasts.map(toast => (
+                <div key={toast.id} style={{
+                    background: 'var(--panel)',
+                    backdropFilter: 'blur(20px)',
+                    WebkitBackdropFilter: 'blur(20px)',
+                    border: '1px solid rgba(245, 158, 11, 0.4)',
+                    borderLeft: '4px solid var(--warning)',
+                    borderRadius: 'var(--radius)',
+                    padding: '16px',
+                    animation: 'slideInRight 0.3s ease',
+                    boxShadow: '0 8px 32px rgba(0, 0, 0, 0.4)',
+                }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px', color: 'var(--warning)', fontWeight: 600, fontSize: '13px' }}>
+                            <Bell size={16} />
+                            Approval Needed
+                        </div>
+                        <button
+                            onClick={() => dismiss(toast.id)}
+                            style={{
+                                background: 'none', border: 'none', color: 'var(--text-muted)',
+                                cursor: 'pointer', padding: '2px', lineHeight: 1,
+                            }}
+                        >
+                            <X size={14} />
+                        </button>
+                    </div>
+                    <div style={{ fontSize: '12px', fontWeight: 600, color: 'var(--text)', marginBottom: '4px' }}>
+                        {toast.type.replace(/_/g, ' ')}
+                    </div>
+                    <div style={{
+                        fontSize: '12px', color: 'var(--text-muted)', marginBottom: '8px',
+                        overflow: 'hidden', textOverflow: 'ellipsis',
+                        display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical' as any,
+                    }}>
+                        {toast.description}
+                    </div>
+                    <div style={{ fontSize: '11px', color: 'var(--text-muted)', marginBottom: '10px' }}>
+                        From: {toast.requesterName}
+                    </div>
+                    <Link href="/approvals" onClick={() => dismiss(toast.id)}>
+                        <button style={{
+                            background: 'var(--warning)', color: '#000', border: 'none',
+                            padding: '5px 14px', borderRadius: '6px', fontSize: '11px',
+                            fontWeight: 600, cursor: 'pointer', width: '100%',
+                        }}>
+                            Review
+                        </button>
+                    </Link>
+                </div>
+            ))}
+        </div>
+    );
+}
+
 export default function RootLayout({ children }: { children: React.ReactNode }) {
     const [versionLabel, setVersionLabel] = useState('v0.1.1');
 
@@ -192,6 +333,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                 <main style={{ flex: 1, padding: '32px 40px', overflowY: 'auto', maxHeight: '100vh' }}>
                     {children}
                 </main>
+                <ApprovalToast />
             </body>
         </html>
     );
