@@ -393,6 +393,7 @@ fn strip_narration_lines(text: &str) -> String {
         "i'll search", "i'll find", "i'll get", "i'll proceed", "i'll sequence",
         "i'll read", "i'll prepare", "i'll create", "i'll start", "i'll set up",
         "i'll hire", "i'll brief", "i'll assign", "i'll reach out",
+        "i'll address",
         "i'll build", "i'll begin", "i'll assess", "i'll evaluate", "i'll execute",
         "i will now", "i will check", "i will review", "i will look",
         "i will send", "i will read", "i will proceed", "i will hire", "i will brief",
@@ -400,6 +401,8 @@ fn strip_narration_lines(text: &str) -> String {
         "will proceed with", "will now proceed", "proceeding to", "proceeding with",
         "sending now", "checking now", "looking now", "reviewing now", "searching now",
         "hiring now", "briefing now",
+        "i need to", "i will need to", "i should",
+        "action required",
     ];
 
     // Housekeeping phrases that models leak despite instructions.
@@ -411,6 +414,7 @@ fn strip_narration_lines(text: &str) -> String {
         "saved to memory.md", "saved to memory/", "written to memory",
         "dm sent", "message sent", "briefing sent",
         "logged to memory", "recorded in memory",
+        "action required",
     ];
 
     // Short filler phrases that can precede narration (e.g. "Good. Let me check...")
@@ -442,11 +446,11 @@ fn strip_narration_lines(text: &str) -> String {
             if remainder.is_empty() || remainder.chars().all(|c| ".,;:!?…".contains(c)) {
                 return true;
             }
-            // Tier 2: extended narration — prefix + SHORT content that doesn't address anyone.
-            // Long remainders (8+ words) are likely real conversational content,
-            // not internal narration (e.g. "building my team immediately with two managers...").
+            // Tier 2: extended narration — prefix + content that doesn't address anyone.
+            // The direct-address check (you/your/?) is the real safeguard;
+            // the word limit prevents stripping very long substantive sentences.
             let word_count = remainder.split_whitespace().count();
-            word_count < 12 && !has_direct_address(remainder)
+            word_count < 20 && !has_direct_address(remainder)
         })
     }
 
@@ -6447,6 +6451,33 @@ mod tests {
     fn housekeeping_with_filler() {
         assert_eq!(strip_narration_lines("Done. Memory updated."), "");
         assert_eq!(strip_narration_lines("Good. Notes recorded."), "");
+    }
+
+    #[test]
+    fn narration_address_need_action_required() {
+        // "I'll address" pattern
+        assert_eq!(strip_narration_lines("I'll address Marcus's request to hire an engineering manager."), "");
+        // "Action required" as housekeeping
+        assert_eq!(strip_narration_lines("Action required."), "");
+        // "Action required" as narration prefix with content
+        assert_eq!(strip_narration_lines("Action required : I need to approve Marcus's plan."), "");
+        // "I need to" pattern
+        assert_eq!(strip_narration_lines("I need to approve Marcus's plan to hire his first engineering manager."), "");
+        assert_eq!(strip_narration_lines("I need to check the memory for relevant context."), "");
+        // "I should" pattern
+        assert_eq!(strip_narration_lines("I should review the org tree before proceeding."), "");
+        // Long narration now caught with raised word limit
+        assert_eq!(strip_narration_lines("Now I'll read the skill file since Marcus needs to hire an engineering manager and this involves MultiClaw operations."), "");
+    }
+
+    #[test]
+    fn narration_preserves_long_conversational() {
+        // Long line with direct address preserved even with raised word limit
+        let line = "I'll send you the full report with all the details about our trading positions and current market analysis by end of day.";
+        assert_eq!(strip_narration_lines(line), line);
+        // Long line with question preserved
+        let line2 = "I need to know whether the deployment pipeline is configured correctly for the new staging environment setup?";
+        assert_eq!(strip_narration_lines(line2), line2);
     }
 
     // ── dedup_content_blocks ───────────────────────────────────────
