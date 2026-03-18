@@ -299,6 +299,8 @@ fn fix_broken_words(s: &str) -> String {
         ("Escal ated", "Escalated"),
         ("escal ated", "escalated"),
         ("VM s ", "VMs "),
+        ("Deliver ables", "Deliverables"),
+        ("deliver ables", "deliverables"),
     ];
     let mut result = s.to_string();
     for (broken, fixed) in FIXES {
@@ -406,6 +408,8 @@ fn strip_narration_lines(text: &str) -> String {
         "i see i'm", "i see that", "i see we", "i see there",
         "i have already", "i've already",
         "i can see",
+        "let me try",
+        "dm sent to",
         "action required",
     ];
 
@@ -7369,6 +7373,24 @@ mod tests {
         // Legitimate use of "save" that doesn't match housekeeping patterns
         let legit = "Please save the report to the shared drive.";
         assert_eq!(strip_narration_lines(legit), legit);
+    }
+
+    #[test]
+    fn narration_let_me_try_and_dm_sent() {
+        // "let me try" narration prefix
+        assert_eq!(strip_narration_lines("Let me try running the command again."), "");
+        // "dm sent to" narration prefix
+        assert_eq!(strip_narration_lines("DM sent to Michael Park. Blocker is name collision on the first hire."), "");
+        // "dm sent to" with direct address preserved
+        let line = "DM sent to you with the report attached.";
+        assert_eq!(strip_narration_lines(line), line);
+    }
+
+    #[test]
+    fn fix_broken_deliverables() {
+        assert_eq!(fix_broken_words("deliver ables"), "deliverables");
+        assert_eq!(fix_broken_words("Deliver ables"), "Deliverables");
+        assert_eq!(fix_broken_words("key deliver ables for Q2"), "key deliverables for Q2");
     }
 
     // ── dedup_content_blocks ───────────────────────────────────────
