@@ -426,6 +426,8 @@ fn strip_narration_lines(text: &str) -> String {
     const FILLER_PREFIXES: &[&str] = &[
         "good.", "ok.", "okay.", "sure.", "understood.", "alright.",
         "right.", "great.", "perfect.", "absolutely.", "done.", "noted.",
+        "first,", "first.", "next,", "next.", "then,", "then.",
+        "also,", "finally,", "finally.",
     ];
 
     // Internal-housekeeping substrings that should never appear in visible messages,
@@ -7292,6 +7294,10 @@ mod tests {
     fn housekeeping_with_filler() {
         assert_eq!(strip_narration_lines("Done. Memory updated."), "");
         assert_eq!(strip_narration_lines("Good. Notes recorded."), "");
+        // "First," filler + narration prefix
+        assert_eq!(strip_narration_lines("First, let me check the current state of my company and then hire the managers I need."), "");
+        // "Next," filler + narration
+        assert_eq!(strip_narration_lines("Next, I'll hire a DevOps manager."), "");
     }
 
     #[test]
