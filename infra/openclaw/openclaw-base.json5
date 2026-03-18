@@ -51,11 +51,28 @@
         },
       },
 
-      // Compaction: flush durable notes before context truncation
+      // Compaction: flush durable notes before context truncation.
+      // reserveTokensFloor keeps 8k tokens free for responses;
+      // keepRecentTokens preserves the last 16k of conversation on compaction.
       compaction: {
         memoryFlush: {
           enabled: true,
         },
+        reserveTokensFloor: 8000,
+        keepRecentTokens: 16000,
+      },
+
+      // Evict stale cached content first when context window pressure builds
+      pruning: {
+        mode: "cache-ttl",
+      },
+
+      // Detect agents stuck in output/tool-call loops. maxRepeats=3 flags after
+      // 3 identical consecutive outputs; cooldownSeconds pauses before retry.
+      loopDetection: {
+        enabled: true,
+        maxRepeats: 3,
+        cooldownSeconds: 30,
       },
     },
   },
