@@ -218,25 +218,19 @@ pub async fn run(state: AppState, notify: Arc<Notify>) {
                             "[queue_worker] {}:{} for agent {} timed out after 660s",
                             kind, item_id, agent_id
                         );
-                        // DM handlers: the agent's OpenClaw likely already processed
-                        // the message and stored it in conversation history. Retrying
-                        // would send the same message again → stale/duplicate responses.
-                        let (err_msg, force_permanent) = if kind == "dm_initiate" || kind == "dm_continue" {
-                            ("handler timed out — skipping retry (DM already processed by agent)", true)
-                        } else {
-                            ("handler timed out after 660s", false)
-                        };
-                        if force_permanent {
-                            mark_failed(
-                                &state_clone.db, item_id, err_msg,
-                                item.max_retries, item.max_retries,
-                            ).await;
-                        } else {
-                            mark_failed(
-                                &state_clone.db, item_id, err_msg,
-                                item.retry_count, item.max_retries,
-                            ).await;
-                        }
+                        // Mark as ghost run for diagnostics — OpenClaw's interrupt
+                        // queue mode will cancel it when the next message arrives.
+                        state_clone.openclaw.ghost_run_agents.write().await.insert(agent_id);
+                        // ALWAYS permanent-fail on timeout, regardless of kind.
+                        // The OpenClaw run continues executing inside the container
+                        // after HTTP disconnect. Retrying would create a duplicate
+                        // ghost run. OpenClaw's interrupt mode + stable session key
+                        // will cancel the ghost when the next real message arrives.
+                        mark_failed(
+                            &state_clone.db, item_id,
+                            "handler timed out — skipping retry (ghost run may still be active)",
+                            item.max_retries, item.max_retries,
+                        ).await;
                     }
                 }
 

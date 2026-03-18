@@ -20,6 +20,10 @@
     defaults: {
       model: {
         primary: "ollama/{{MODEL}}",
+        // Only one active run at a time across all sessions for this agent.
+        // MultiClaw's control plane serializes messages per agent, so this
+        // should never bottleneck — it's a safety net against ghost runs.
+        maxConcurrent: 1,
       },
       models: {
         "ollama/{{MODEL}}": { alias: "{{MODEL}}" },
@@ -111,6 +115,16 @@
         // Runs BOOT.md instructions on gateway start
         "boot-md": { enabled: true },
       },
+    },
+  },
+
+  // Message queue: interrupt mode cancels any active run when a new message
+  // arrives in the same session. This kills ghost runs left over from HTTP
+  // timeouts — instead of the new message queueing behind a stale 600s run,
+  // the ghost is aborted and the new message processes immediately.
+  messages: {
+    queue: {
+      mode: "interrupt",
     },
   },
 

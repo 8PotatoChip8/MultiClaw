@@ -4542,6 +4542,32 @@ async fn agent_send_file(
         return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid dest_path"})));
     }
 
+    // Dedup: reject if the same file was transferred between these agents in the
+    // last 60 seconds. This catches concurrent sessions sending the same file
+    // before either transfer completes. The file is already at the destination
+    // from the first transfer — the second would just overwrite with identical
+    // (or near-identical) content and create duplicate notifications.
+    let recent_dup: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM file_transfers \
+         WHERE sender_id = $1 AND receiver_id = $2 AND filename = $3 \
+           AND status = 'DELIVERED' \
+           AND created_at > NOW() - INTERVAL '60 seconds' \
+         LIMIT 1"
+    )
+    .bind(sender_id).bind(receiver_id).bind(filename)
+    .fetch_optional(&state.db).await.ok().flatten();
+
+    if recent_dup.is_some() {
+        tracing::warn!(
+            "Duplicate file transfer blocked: '{}' from {} to {} (already sent within 60s)",
+            filename, sender.name, receiver.name
+        );
+        return (StatusCode::CONFLICT, Json(json!({
+            "error": format!("File '{}' was already sent to {} within the last 60 seconds", filename, receiver.name),
+            "duplicate": true
+        })));
+    }
+
     let receiver_workspace = std::path::PathBuf::from(&data_root)
         .join(receiver_id.to_string())
         .join("workspace");
@@ -4626,15 +4652,36 @@ async fn agent_send_file(
         }
     }
 
-    // Notify receiver via queue
+    // Notify receiver via queue — but skip if an identical file_notify is already
+    // pending or processing. This prevents duplicate notifications when an agent's
+    // concurrent sessions both send the same file before either notification is delivered.
     let notify_msg = format!(
         "FILE RECEIVED from {}: '{}' has been placed in your workspace at '/workspace/{}' ({} bytes).",
         sender.name, filename, dest_relative, file_bytes.len()
     );
-    let _ = state.enqueue_message(
-        receiver_id, 2, "file_notify",
-        json!({"agent_id": receiver_id.to_string(), "message": notify_msg, "task_label": "Processing received file"}),
-    ).await;
+
+    let existing_notify: Option<(Uuid,)> = sqlx::query_as(
+        "SELECT id FROM message_queue \
+         WHERE agent_id = $1 AND kind = 'file_notify' \
+           AND status IN ('PENDING', 'PROCESSING') \
+           AND payload->>'message' LIKE $2 \
+         LIMIT 1"
+    )
+    .bind(receiver_id)
+    .bind(format!("%'{}'%", filename))
+    .fetch_optional(&state.db).await.ok().flatten();
+
+    if existing_notify.is_some() {
+        tracing::warn!(
+            "Skipping duplicate file_notify for '{}' → {} (already queued)",
+            filename, receiver.name
+        );
+    } else {
+        let _ = state.enqueue_message(
+            receiver_id, 2, "file_notify",
+            json!({"agent_id": receiver_id.to_string(), "message": notify_msg, "task_label": "Processing received file"}),
+        ).await;
+    }
 
     // Broadcast WebSocket event
     let _ = state.tx.send(json!({

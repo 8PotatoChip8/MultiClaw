@@ -46,6 +46,11 @@ pub struct OpenClawManager {
     /// Tracks respawn attempts per agent for exponential backoff.
     /// Maps agent_id → (attempt_count, last_attempt_time).
     respawn_attempts: Arc<RwLock<HashMap<Uuid, (u32, tokio::time::Instant)>>>,
+    /// Agents whose last `send_message()` timed out, meaning a ghost run may
+    /// still be executing inside the container. OpenClaw's interrupt queue mode
+    /// cancels the ghost run when the next message arrives in the same session.
+    /// This set is used for logging/diagnostics.
+    pub ghost_run_agents: Arc<RwLock<HashSet<Uuid>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,6 +120,7 @@ impl OpenClawManager {
             container_memory_limit,
             container_cpu_limit,
             respawn_attempts: Arc::new(RwLock::new(HashMap::new())),
+            ghost_run_agents: Arc::new(RwLock::new(HashSet::new())),
         }
     }
 
@@ -575,6 +581,17 @@ impl OpenClawManager {
             }
         };
 
+        // If a previous message timed out, log it. The ghost run will be
+        // cancelled automatically by OpenClaw's interrupt queue mode when this
+        // new message arrives in the same session lane. No container restart needed.
+        let was_ghost = self.ghost_run_agents.write().await.remove(&agent_id);
+        if was_ghost {
+            tracing::warn!(
+                "Previous message to {} timed out (ghost run likely active) — interrupt mode will cancel it",
+                instance.agent_name
+            );
+        }
+
         tracing::info!(
             "Sending message to {} via OpenClaw (container: {})",
             instance.agent_name,
@@ -592,6 +609,14 @@ impl OpenClawManager {
             body["instructions"] = serde_json::Value::String(inst.to_string());
         }
 
+        // Stable session key per agent — all messages to the same agent share
+        // one OpenClaw session lane. This ensures OpenClaw serializes runs
+        // internally (one active run per session) and preserves conversation
+        // history across heartbeats, file notifications, and DMs. Without this,
+        // each request creates a new session with messages=0, allowing concurrent
+        // runs that do duplicate work.
+        let session_key = format!("multiclaw:{}", agent_id);
+
         let max_retries = 5u32;
         let max_429_retries = 6u32;
         let mut attempts_429 = 0u32;
@@ -608,6 +633,7 @@ impl OpenClawManager {
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", instance.gateway_token))
                 .header("Content-Type", "application/json")
+                .header("x-openclaw-session-key", &session_key)
                 .json(&body)
                 .timeout(std::time::Duration::from_secs(timeout_secs.unwrap_or(600)))
                 .send()
@@ -729,11 +755,13 @@ impl OpenClawManager {
                 Err(e) if attempt < max_retries - 1 => {
                     // Timeout means the OpenClaw run is still executing inside the container.
                     // Retrying would create a duplicate ghost run. Fail immediately.
+                    // Mark as ghost so the container is restarted before the next message.
                     if e.is_timeout() {
                         tracing::warn!(
-                            "OpenClaw request timed out for {} after {}s (run may still be active inside container): {}",
-                            instance.agent_name, timeout_secs.unwrap_or(600), e
+                            "OpenClaw request timed out for {} after {}s — marking for container restart before next message",
+                            instance.agent_name, timeout_secs.unwrap_or(600)
                         );
+                        self.ghost_run_agents.write().await.insert(agent_id);
                         return Err(anyhow!("OpenClaw request timed out: {}", e));
                     }
                     tracing::warn!(
@@ -745,6 +773,14 @@ impl OpenClawManager {
                     continue;
                 }
                 Err(e) => {
+                    if e.is_timeout() {
+                        tracing::warn!(
+                            "OpenClaw request timed out for {} (final attempt) — marking for container restart",
+                            instance.agent_name
+                        );
+                        self.ghost_run_agents.write().await.insert(agent_id);
+                        return Err(anyhow!("OpenClaw request timed out: {}", e));
+                    }
                     tracing::error!("OpenClaw request failed for {}: {}", instance.agent_name, e);
                     return Err(anyhow!("OpenClaw connection error: {}", e));
                 }
@@ -1402,11 +1438,12 @@ impl OpenClawManager {
   },
   "agents": {
     "defaults": {
-      "model": { "primary": "ollama/{{MODEL}}" },
+      "model": { "primary": "ollama/{{MODEL}}", "maxConcurrent": 1 },
       "workspace": "/workspace",
       "skipBootstrap": true
     }
   },
+  "messages": { "queue": { "mode": "interrupt" } },
   "models": {
     "mode": "replace",
     "providers": {
