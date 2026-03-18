@@ -401,7 +401,11 @@ fn strip_narration_lines(text: &str) -> String {
         "will proceed with", "will now proceed", "proceeding to", "proceeding with",
         "sending now", "checking now", "looking now", "reviewing now", "searching now",
         "hiring now", "briefing now",
+        "status report sent", "report sent to",
         "i need to", "i will need to", "i should",
+        "i see i'm", "i see that", "i see we", "i see there",
+        "i have already", "i've already",
+        "i can see",
         "action required",
     ];
 
@@ -413,6 +417,7 @@ fn strip_narration_lines(text: &str) -> String {
         "updated my log", "updated my notes", "updated my memory",
         "saved to memory.md", "saved to memory/", "written to memory",
         "dm sent", "message sent", "briefing sent",
+        "status report sent", "report sent",
         "logged to memory", "recorded in memory",
         "action required",
     ];
@@ -423,13 +428,34 @@ fn strip_narration_lines(text: &str) -> String {
         "right.", "great.", "perfect.", "absolutely.", "done.", "noted.",
     ];
 
+    // Internal-housekeeping substrings that should never appear in visible messages,
+    // even mid-sentence.  If a line contains one of these, the entire line is stripped.
+    const MID_LINE_HOUSEKEEPING: &[&str] = &[
+        "save the key context",
+        "save this context to memory",
+        "save this to memory",
+        "save to memory",
+        "record this to memory",
+        "log this to memory",
+        "write this to memory",
+        "store this in memory",
+        "note this in memory",
+        "commit this to memory",
+        "update my memory",
+        "save the briefing to memory",
+        "save context from this briefing",
+        "key context from this briefing",
+    ];
+
     /// Check whether `remainder` (text after narration prefix) contains markers
     /// indicating the line is conversational (addressing someone) rather than
     /// pure internal narration.  Lines with these markers are kept.
     fn has_direct_address(remainder: &str) -> bool {
         remainder.starts_with("you ") || remainder.starts_with("your ")
+            || remainder.starts_with("you'")  // you've, you'll, you'd, you're
             || remainder.contains(" you ") || remainder.contains(" your ")
             || remainder.contains(" you.") || remainder.contains(" you,")
+            || remainder.contains(" you'")  // contractions: you've, you'll, you'd
             || remainder.ends_with(" you")
             || remainder.contains('?')
     }
@@ -477,6 +503,10 @@ fn strip_narration_lines(text: &str) -> String {
                 })
         });
         if is_housekeeping { continue; }
+
+        // Mid-line housekeeping: strip lines containing internal phrases regardless of position
+        let is_mid_line_hk = MID_LINE_HOUSEKEEPING.iter().any(|phrase| lower.contains(phrase));
+        if is_mid_line_hk { continue; }
 
         // Check the line as-is against narration prefixes
         if is_narration(&lower, NARRATION_PREFIXES) {
@@ -7282,6 +7312,28 @@ mod tests {
     }
 
     #[test]
+    fn narration_i_see_and_i_have_already() {
+        // "I see I'm" — narrating internal state
+        assert_eq!(strip_narration_lines("I see I'm the only employee so far."), "");
+        // "I have already" — hallucinated prior context
+        assert_eq!(strip_narration_lines("I have already asked one question, so I will wait for the response."), "");
+        // "I can see" — narrating observations
+        assert_eq!(strip_narration_lines("I can see we have one company in the holding."), "");
+        // "I see that" with direct address preserved
+        let line = "I see that you've completed the report.";
+        assert_eq!(strip_narration_lines(line), line);
+    }
+
+    #[test]
+    fn housekeeping_status_report_sent() {
+        assert_eq!(strip_narration_lines("Status report sent to KonnerBot."), "");
+        assert_eq!(strip_narration_lines("Report sent."), "");
+        // But "report sent" embedded in useful content is kept (line-level, not mid-line)
+        let line = "The quarterly report sent by Lisa contained good data.";
+        assert_eq!(strip_narration_lines(line), line);
+    }
+
+    #[test]
     fn narration_preserves_long_conversational() {
         // Long line with direct address preserved even with raised word limit
         let line = "I'll send you the full report with all the details about our trading positions and current market analysis by end of day.";
@@ -7289,6 +7341,28 @@ mod tests {
         // Long line with question preserved
         let line2 = "I need to know whether the deployment pipeline is configured correctly for the new staging environment setup?";
         assert_eq!(strip_narration_lines(line2), line2);
+    }
+
+    #[test]
+    fn mid_line_housekeeping_stripped() {
+        // Narration embedded mid-sentence (not caught by prefix-based checks)
+        assert_eq!(
+            strip_narration_lines("I need to save the key context from this briefing to memory for future reference."),
+            ""
+        );
+        // Mid-line "save to memory"
+        assert_eq!(
+            strip_narration_lines("Thank you for the briefing. I need to save this to memory."),
+            ""
+        );
+        // Mid-line "update my memory"
+        assert_eq!(
+            strip_narration_lines("Great information. Let me update my memory with these details."),
+            ""
+        );
+        // Legitimate use of "save" that doesn't match housekeeping patterns
+        let legit = "Please save the report to the shared drive.";
+        assert_eq!(strip_narration_lines(legit), legit);
     }
 
     // ── dedup_content_blocks ───────────────────────────────────────
