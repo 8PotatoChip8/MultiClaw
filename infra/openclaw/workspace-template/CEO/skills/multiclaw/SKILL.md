@@ -161,6 +161,78 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox 
 - `dest_path` (optional): destination on your **testing environment** (defaults to the same path)
 - Maximum file size: 10 MB. Both computers must be running.
 
+---
+
+## Company Shared Servers
+
+As CEO, you can provision and manage shared servers for your entire company.
+
+### Provision a Company Server
+
+**Request a company test server:**
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "requester_agent_id": "{{AGENT_ID}}",
+    "company_id": "{{COMPANY_ID}}",
+    "vm_purpose": "company_test",
+    "label": "COMPANY_NAME Test Server"
+  }'
+```
+
+**Request a company production server:**
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "requester_agent_id": "{{AGENT_ID}}",
+    "company_id": "{{COMPANY_ID}}",
+    "vm_purpose": "company_prod",
+    "label": "COMPANY_NAME Production"
+  }'
+```
+
+**List all shared VMs in your company:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms?company_id={{COMPANY_ID}}"
+```
+
+**Run a command on a shared server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/exec" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "command": "ls /home/employee"}'
+```
+
+**Push/pull files, start/stop/rebuild:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/push" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/path/to/file", "content": "FILE_CONTENT"}'
+
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/pull" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/path/to/file"}'
+
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/start"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/stop"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
+```
+
+**Destroy a shared server (permanent):**
+```bash
+curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID"
+```
+
+> **Access:** You have full access to all shared VMs in your company (department test, company test, company production).
+>
+> **Workflow:** Managers validate worker code on the department test server, then promote to the company test server. Review it there. When ready, deploy to production.
+>
+> **Important:** Production servers cannot be rebuilt — they are persistent and stable. Use start/stop only. Only install new software or deploy tested updates on production.
+
+---
+
 ### Submit a Request to Your Superior
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \

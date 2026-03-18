@@ -971,6 +971,16 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/system/update", post(system_update))
         .route("/v1/system/containers", get(list_containers))
         .route("/v1/system/containers/:id/logs", get(get_container_logs))
+        // Shared VMs (department test, company test/prod servers)
+        .route("/v1/shared-vms", get(list_shared_vms).post(provision_shared_vm))
+        .route("/v1/shared-vms/:id", get(get_shared_vm).delete(destroy_shared_vm))
+        .route("/v1/shared-vms/:id/start", post(shared_vm_start))
+        .route("/v1/shared-vms/:id/stop", post(shared_vm_stop))
+        .route("/v1/shared-vms/:id/rebuild", post(shared_vm_rebuild))
+        .route("/v1/shared-vms/:id/exec", post(shared_vm_exec))
+        .route("/v1/shared-vms/:id/info", get(shared_vm_info))
+        .route("/v1/shared-vms/:id/file/push", post(shared_vm_file_push))
+        .route("/v1/shared-vms/:id/file/pull", post(shared_vm_file_pull))
         // Rewrite
         .route("/v1/rewrite", post(rewrite_text))
         // World
@@ -2732,6 +2742,7 @@ async fn approve_request(State(state): State<AppState>, Path(id): Path<String>, 
     notify_requester(&state, uid, "APPROVED", note.as_deref()).await;
 
     trigger_tool_creation(&state, uid).await;
+    trigger_shared_vm_provisioning(&state, uid).await;
 
     (StatusCode::OK, Json(json!({"status":"approved"})))
 }
@@ -2771,6 +2782,8 @@ async fn notify_requester(state: &AppState, request_id: Uuid, decision: &str, no
                     You can now retry the hire-worker command to complete the hire.",
                 "REQUEST_TOOL" => " Your tool has been created/updated and is available \
                     in your /workspace/skills/ directory. Check your skills folder.",
+                "REQUEST_SHARED_VM" => " Your shared VM is now being provisioned. \
+                    It takes 2-3 minutes to boot. Use the shared-vms list endpoint to check status.",
                 _ => " IMPORTANT: Approval does NOT mean credentials or resources are available yet. \
                     The operator must still provision them via the Secrets page. Do NOT tell your team \
                     credentials are active until you verify via the secrets API \
@@ -2865,6 +2878,7 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
             let _ = state.tx.send(json!({"type":"request_approved","request_id": request_id}).to_string());
             notify_requester(&state, request_id, "APPROVED", p.note.as_deref()).await;
             trigger_tool_creation(&state, request_id).await;
+            trigger_shared_vm_provisioning(&state, request_id).await;
             (StatusCode::OK, Json(json!({"status":"approved"})))
         }
     } else {
@@ -6394,6 +6408,752 @@ async fn restart_agent_container(State(state): State<AppState>, Path(id): Path<S
                 "error": format!("Failed to spawn container: {}", e),
             })))
         }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Shared VMs — department test, company test, company production
+// ═══════════════════════════════════════════════════════════════
+
+/// Query parameters for listing shared VMs.
+#[derive(Debug, Deserialize)]
+struct SharedVmQuery {
+    company_id: Option<Uuid>,
+    vm_purpose: Option<String>,
+}
+
+/// Enforce role-based access to a shared VM. Returns Ok(()) if the requesting
+/// agent is allowed, or an HTTP error response otherwise.
+async fn check_shared_vm_access(
+    db: &sqlx::PgPool,
+    agent_id: Uuid,
+    shared_vm_id: Uuid,
+) -> Result<(), (StatusCode, Json<Value>)> {
+    // Fetch agent info
+    let agent: Option<(String, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        "SELECT role, company_id, parent_agent_id FROM agents WHERE id = $1"
+    ).bind(agent_id).fetch_optional(db).await.ok().flatten();
+    let (role, agent_company_id, parent_id) = match agent {
+        Some(a) => a,
+        None => return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found"})))),
+    };
+
+    // Fetch shared VM info
+    let svm: Option<(String, Uuid, Option<Uuid>, String)> = sqlx::query_as(
+        "SELECT scope_type, company_id, department_manager_id, vm_purpose FROM shared_vms WHERE id = $1"
+    ).bind(shared_vm_id).fetch_optional(db).await.ok().flatten();
+    let (scope_type, vm_company_id, dept_manager_id, vm_purpose) = match svm {
+        Some(s) => s,
+        None => return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"})))),
+    };
+
+    // MAIN: access everything
+    if role == "MAIN" { return Ok(()); }
+
+    // Must be in the same company
+    if agent_company_id != Some(vm_company_id) {
+        return Err((StatusCode::FORBIDDEN, Json(json!({"error": "You cannot access shared VMs outside your company"}))));
+    }
+
+    match role.as_str() {
+        "CEO" => {
+            // CEOs can access all shared VMs in their company
+            Ok(())
+        }
+        "MANAGER" => {
+            match vm_purpose.as_str() {
+                "dept_test" => {
+                    // Only their own department's test VM
+                    if dept_manager_id == Some(agent_id) { Ok(()) }
+                    else { Err((StatusCode::FORBIDDEN, Json(json!({"error": "You can only access your own department's test VM"})))) }
+                }
+                "company_test" => Ok(()),
+                "company_prod" => Err((StatusCode::FORBIDDEN, Json(json!({"error": "Only CEOs can access the production server"})))),
+                _ => Err((StatusCode::FORBIDDEN, Json(json!({"error": "Unknown VM purpose"})))),
+            }
+        }
+        "WORKER" => {
+            match vm_purpose.as_str() {
+                "dept_test" => {
+                    // Only their department's test VM (parent = the dept manager)
+                    if dept_manager_id.is_some() && dept_manager_id == parent_id { Ok(()) }
+                    else { Err((StatusCode::FORBIDDEN, Json(json!({"error": "You can only access your department's test VM"})))) }
+                }
+                "company_test" | "company_prod" => {
+                    Err((StatusCode::FORBIDDEN, Json(json!({"error": "Workers cannot access company-level servers. Deploy through your manager."}))))
+                }
+                _ => Err((StatusCode::FORBIDDEN, Json(json!({"error": "Unknown VM purpose"})))),
+            }
+        }
+        _ => Err((StatusCode::FORBIDDEN, Json(json!({"error": "Access denied"})))),
+    }
+}
+
+/// Check that a requester has the right role to provision a given VM purpose.
+fn check_provision_permission(role: &str, vm_purpose: &str) -> Result<(), (StatusCode, Json<Value>)> {
+    match vm_purpose {
+        "dept_test" => {
+            if role == "MANAGER" || role == "CEO" || role == "MAIN" { Ok(()) }
+            else { Err((StatusCode::FORBIDDEN, Json(json!({"error": "Only managers or above can provision department test VMs"})))) }
+        }
+        "company_test" | "company_prod" => {
+            if role == "CEO" || role == "MAIN" { Ok(()) }
+            else { Err((StatusCode::FORBIDDEN, Json(json!({"error": "Only CEOs or above can provision company servers"})))) }
+        }
+        _ => Err((StatusCode::BAD_REQUEST, Json(json!({"error": "Invalid vm_purpose. Must be dept_test, company_test, or company_prod"})))),
+    }
+}
+
+/// Resolve a shared VM's Incus provider_ref from its ID.
+async fn resolve_shared_vm_ref(db: &sqlx::PgPool, shared_vm_id: Uuid) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT v.provider_ref FROM vms v JOIN shared_vms sv ON sv.vm_id = v.id WHERE sv.id = $1"
+    ).bind(shared_vm_id).fetch_optional(db).await.ok().flatten()
+}
+
+// ── List shared VMs ──────────────────────────────────────────────
+
+async fn list_shared_vms(
+    State(state): State<AppState>,
+    Query(q): Query<SharedVmQuery>,
+) -> impl IntoResponse {
+    let mut sql = String::from(
+        "SELECT sv.id, sv.vm_id, sv.scope_type, sv.company_id, sv.department_manager_id, \
+         sv.vm_purpose, sv.provisioned_by_agent_id, sv.label, sv.resource_limits, sv.created_at, \
+         v.provider_ref, v.hostname, v.ip_address, v.resources, v.state \
+         FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id"
+    );
+    let mut conditions = Vec::new();
+    if q.company_id.is_some() { conditions.push(" sv.company_id = $1"); }
+    if q.vm_purpose.is_some() {
+        conditions.push(if q.company_id.is_some() { " sv.vm_purpose = $2" } else { " sv.vm_purpose = $1" });
+    }
+    if !conditions.is_empty() {
+        sql.push_str(" WHERE");
+        sql.push_str(&conditions.join(" AND"));
+    }
+    sql.push_str(" ORDER BY sv.created_at DESC");
+
+    // Build query dynamically based on which params are present
+    let rows: Vec<SharedVmDetail> = if let (Some(cid), Some(ref purpose)) = (q.company_id, &q.vm_purpose) {
+        sqlx::query_as::<_, SharedVmDetail>(&sql)
+            .bind(cid).bind(purpose)
+            .fetch_all(&state.db).await.unwrap_or_default()
+    } else if let Some(cid) = q.company_id {
+        sqlx::query_as::<_, SharedVmDetail>(&sql)
+            .bind(cid)
+            .fetch_all(&state.db).await.unwrap_or_default()
+    } else if let Some(ref purpose) = q.vm_purpose {
+        sqlx::query_as::<_, SharedVmDetail>(&sql)
+            .bind(purpose)
+            .fetch_all(&state.db).await.unwrap_or_default()
+    } else {
+        sqlx::query_as::<_, SharedVmDetail>(&sql)
+            .fetch_all(&state.db).await.unwrap_or_default()
+    };
+
+    (StatusCode::OK, Json(json!(rows)))
+}
+
+// ── Get single shared VM ─────────────────────────────────────────
+
+async fn get_shared_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let row: Option<SharedVmDetail> = sqlx::query_as(
+        "SELECT sv.id, sv.vm_id, sv.scope_type, sv.company_id, sv.department_manager_id, \
+         sv.vm_purpose, sv.provisioned_by_agent_id, sv.label, sv.resource_limits, sv.created_at, \
+         v.provider_ref, v.hostname, v.ip_address, v.resources, v.state \
+         FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id WHERE sv.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    match row {
+        Some(r) => (StatusCode::OK, Json(json!(r))),
+        None => (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    }
+}
+
+// ── Provision shared VM ──────────────────────────────────────────
+
+async fn provision_shared_vm(
+    State(state): State<AppState>,
+    Json(p): Json<ProvisionSharedVmRequest>,
+) -> impl IntoResponse {
+    let agent_id = p.requester_agent_id;
+    if let Some(resp) = check_dm_mode(&state, agent_id).await { return resp; }
+
+    // Validate vm_purpose
+    if !["dept_test", "company_test", "company_prod"].contains(&p.vm_purpose.as_str()) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "vm_purpose must be dept_test, company_test, or company_prod"})));
+    }
+
+    // dept_test requires department_manager_id
+    if p.vm_purpose == "dept_test" && p.department_manager_id.is_none() {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": "dept_test requires department_manager_id"})));
+    }
+
+    // Verify company exists
+    let company_exists: Option<Uuid> = sqlx::query_scalar("SELECT id FROM companies WHERE id = $1")
+        .bind(p.company_id).fetch_optional(&state.db).await.ok().flatten();
+    if company_exists.is_none() {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "Company not found"})));
+    }
+
+    // Check requester role
+    let role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+        .bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+    let role = match role {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Agent not found"}))),
+    };
+    if let Err(e) = check_provision_permission(&role, &p.vm_purpose) { return e; }
+
+    // Check for existing shared VM with same scope
+    let existing: Option<Uuid> = sqlx::query_scalar(
+        "SELECT id FROM shared_vms WHERE company_id = $1 AND vm_purpose = $2 \
+         AND (department_manager_id IS NOT DISTINCT FROM $3)"
+    ).bind(p.company_id).bind(&p.vm_purpose).bind(p.department_manager_id)
+     .fetch_optional(&state.db).await.ok().flatten();
+    if existing.is_some() {
+        return (StatusCode::CONFLICT, Json(json!({"error": "A shared VM with this purpose already exists for this scope"})));
+    }
+
+    // Get provider
+    let provider = match state.vm_provider {
+        Some(ref prov) => prov.clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "VM provider not available"}))),
+    };
+
+    // Build VM name
+    let vm_name = match p.vm_purpose.as_str() {
+        "dept_test" => {
+            let mgr_id = p.department_manager_id.unwrap();
+            format!("mc-dept-{}", &mgr_id.to_string()[..8])
+        }
+        "company_test" => format!("mc-co-{}-test", &p.company_id.to_string()[..8]),
+        "company_prod" => format!("mc-co-{}-prod", &p.company_id.to_string()[..8]),
+        _ => unreachable!(),
+    };
+
+    let shared_vm_id = Uuid::new_v4();
+    let vm_uuid = Uuid::new_v4();
+    let db = state.db.clone();
+    let tx = state.tx.clone();
+    let vm_purpose = p.vm_purpose.clone();
+    let company_id = p.company_id;
+    let dept_manager_id = p.department_manager_id;
+    let label = p.label.clone();
+    let resource_limits = p.resources.clone().unwrap_or(json!({"vcpus": 2, "memory_mb": 2048, "disk_gb": 20}));
+
+    let vcpus = resource_limits.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+    let memory_mb = resource_limits.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+    let disk_gb = resource_limits.get("disk_gb").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+
+    tokio::spawn(async move {
+        tracing::info!("Provisioning shared VM '{}' ({}) for company {}", vm_name, vm_purpose, company_id);
+
+        // Minimal cloud-init: employee user + dev tools (no OpenClaw, no agentd)
+        let cloud_init = format!(
+            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+            vm_name
+        );
+
+        let resources = VmResources { vcpus, memory_mb, disk_gb };
+
+        match provider.provision(&vm_name, &resources, &cloud_init).await {
+            Ok(details) => {
+                tracing::info!("Shared VM '{}' provisioned, ip={:?}", vm_name, details.ip_address);
+                let resources_json = json!({"vcpus": vcpus, "memory_mb": memory_mb, "disk_gb": disk_gb});
+
+                // Insert into vms table
+                let _ = sqlx::query(
+                    "INSERT INTO vms (id, provider, provider_ref, hostname, ip_address, resources, state, vm_type) \
+                     VALUES ($1, 'incus', $2, $3, $4, $5, 'RUNNING', $6)"
+                )
+                .bind(vm_uuid).bind(&vm_name).bind(&vm_name)
+                .bind(&details.ip_address).bind(&resources_json).bind(&vm_purpose)
+                .execute(&db).await;
+
+                // Insert into shared_vms table
+                let _ = sqlx::query(
+                    "INSERT INTO shared_vms (id, vm_id, scope_type, company_id, department_manager_id, \
+                     vm_purpose, provisioned_by_agent_id, label, resource_limits) \
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                )
+                .bind(shared_vm_id).bind(vm_uuid)
+                .bind(if vm_purpose == "dept_test" { "DEPARTMENT" } else { "COMPANY" })
+                .bind(company_id).bind(dept_manager_id)
+                .bind(&vm_purpose).bind(agent_id)
+                .bind(&label).bind(&resource_limits)
+                .execute(&db).await;
+
+                let _ = tx.send(json!({
+                    "type": "shared_vm_provisioned",
+                    "shared_vm_id": shared_vm_id,
+                    "vm_purpose": vm_purpose,
+                    "company_id": company_id,
+                    "ip": details.ip_address,
+                    "provider_ref": vm_name
+                }).to_string());
+            }
+            Err(e) => {
+                tracing::error!("Failed to provision shared VM '{}': {}", vm_name, e);
+                let _ = tx.send(json!({
+                    "type": "shared_vm_provision_failed",
+                    "vm_purpose": vm_purpose,
+                    "company_id": company_id,
+                    "error": e.to_string()
+                }).to_string());
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({
+        "status": "provisioning",
+        "shared_vm_id": shared_vm_id,
+        "vm_purpose": p.vm_purpose,
+        "company_id": company_id
+    })))
+}
+
+// ── Destroy shared VM ────────────────────────────────────────────
+
+async fn destroy_shared_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Get the VM's provider_ref before deleting
+    let vm_info: Option<(Uuid, String)> = sqlx::query_as(
+        "SELECT sv.vm_id, v.provider_ref FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id WHERE sv.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+
+    let (vm_id, provider_ref) = match vm_info {
+        Some(i) => i,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    // Destroy the Incus VM
+    if let Some(ref provider) = state.vm_provider {
+        if let Err(e) = provider.destroy(&provider_ref).await {
+            tracing::error!("Failed to destroy shared VM '{}': {}", provider_ref, e);
+        }
+    }
+
+    // Delete from shared_vms (cascade from vm delete won't happen yet)
+    let _ = sqlx::query("DELETE FROM shared_vms WHERE id = $1").bind(uid).execute(&state.db).await;
+    let _ = sqlx::query("DELETE FROM vms WHERE id = $1").bind(vm_id).execute(&state.db).await;
+
+    let _ = state.tx.send(json!({"type": "shared_vm_destroyed", "shared_vm_id": uid}).to_string());
+
+    (StatusCode::OK, Json(json!({"status": "destroyed"})))
+}
+
+// ── Start/Stop/Rebuild ───────────────────────────────────────────
+
+async fn shared_vm_start(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    match tokio::process::Command::new("incus").args(["start", &provider_ref]).output().await {
+        Ok(o) if o.status.success() => {
+            let _ = sqlx::query(
+                "UPDATE vms SET state = 'RUNNING' WHERE id = (SELECT vm_id FROM shared_vms WHERE id = $1)"
+            ).bind(uid).execute(&state.db).await;
+            let _ = state.tx.send(json!({"type": "shared_vm_state_changed", "shared_vm_id": uid, "state": "RUNNING"}).to_string());
+            (StatusCode::OK, Json(json!({"status": "started"})))
+        }
+        Ok(o) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&o.stderr).to_string()}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+async fn shared_vm_stop(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    if let Some(ref provider) = state.vm_provider {
+        match provider.stop(&provider_ref).await {
+            Ok(()) => {
+                let _ = sqlx::query(
+                    "UPDATE vms SET state = 'STOPPED' WHERE id = (SELECT vm_id FROM shared_vms WHERE id = $1)"
+                ).bind(uid).execute(&state.db).await;
+                let _ = state.tx.send(json!({"type": "shared_vm_state_changed", "shared_vm_id": uid, "state": "STOPPED"}).to_string());
+                (StatusCode::OK, Json(json!({"status": "stopped"})))
+            }
+            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+        }
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "VM provider not available"})))
+    }
+}
+
+async fn shared_vm_rebuild(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Only dept_test and company_test can be rebuilt — not company_prod
+    let purpose: Option<String> = sqlx::query_scalar(
+        "SELECT vm_purpose FROM shared_vms WHERE id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    match purpose.as_deref() {
+        Some("company_prod") => return (StatusCode::FORBIDDEN, Json(json!({"error": "Production servers cannot be rebuilt. Use stop/start instead."}))),
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+        _ => {}
+    }
+
+    // Get current VM info for re-provisioning
+    let vm_info: Option<(Uuid, String, serde_json::Value)> = sqlx::query_as(
+        "SELECT sv.vm_id, v.provider_ref, sv.resource_limits \
+         FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id WHERE sv.id = $1"
+    ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
+    let (vm_id, provider_ref, resource_limits) = match vm_info {
+        Some(i) => i,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    let provider = match state.vm_provider {
+        Some(ref p) => p.clone(),
+        None => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "VM provider not available"}))),
+    };
+
+    let db = state.db.clone();
+    let tx = state.tx.clone();
+
+    tokio::spawn(async move {
+        // Destroy existing VM
+        if let Err(e) = provider.destroy(&provider_ref).await {
+            tracing::error!("Failed to destroy shared VM '{}' for rebuild: {}", provider_ref, e);
+            return;
+        }
+
+        // Re-provision with same name and resources
+        let vcpus = resource_limits.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+        let memory_mb = resource_limits.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+        let disk_gb = resource_limits.get("disk_gb").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+
+        let cloud_init = format!(
+            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+            provider_ref
+        );
+        let resources = VmResources { vcpus, memory_mb, disk_gb };
+
+        match provider.provision(&provider_ref, &resources, &cloud_init).await {
+            Ok(details) => {
+                let resources_json = json!({"vcpus": vcpus, "memory_mb": memory_mb, "disk_gb": disk_gb});
+                let _ = sqlx::query(
+                    "UPDATE vms SET ip_address = $1, resources = $2, state = 'RUNNING' WHERE id = $3"
+                ).bind(&details.ip_address).bind(&resources_json).bind(vm_id)
+                .execute(&db).await;
+                let _ = tx.send(json!({"type": "shared_vm_state_changed", "shared_vm_id": uid, "state": "RUNNING"}).to_string());
+                tracing::info!("Shared VM '{}' rebuilt successfully", provider_ref);
+            }
+            Err(e) => {
+                tracing::error!("Failed to rebuild shared VM '{}': {}", provider_ref, e);
+                let _ = sqlx::query("UPDATE vms SET state = 'FAILED' WHERE id = $1").bind(vm_id).execute(&db).await;
+                let _ = tx.send(json!({"type": "shared_vm_rebuild_failed", "shared_vm_id": uid, "error": e.to_string()}).to_string());
+            }
+        }
+    });
+
+    (StatusCode::ACCEPTED, Json(json!({"status": "rebuilding"})))
+}
+
+// ── Exec on shared VM ────────────────────────────────────────────
+
+async fn shared_vm_exec(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(p): Json<SharedVmExecRequest>,
+) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    // Access control
+    if let Err(e) = check_shared_vm_access(&state.db, p.agent_id, uid).await { return e; }
+    if let Some(resp) = check_dm_mode(&state, p.agent_id).await { return resp; }
+
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    let user = p.user.as_deref().unwrap_or("employee");
+    let working_dir = p.working_dir.as_deref().unwrap_or("/home/employee");
+    let timeout_secs = p.timeout_secs.unwrap_or(30).min(120);
+
+    // Use incus exec directly (same pattern as individual VM exec)
+    let user_flag = if user == "root" { "0" } else { "1000" };
+    let full_cmd = format!("cd {} && {}", working_dir, p.command);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(timeout_secs),
+        tokio::process::Command::new("incus")
+            .args(["exec", &provider_ref, "--user", user_flag, "--", "/bin/bash", "-lc", &full_cmd])
+            .output()
+    ).await;
+
+    match output {
+        Ok(Ok(o)) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            // Truncate to 1MB
+            let stdout = if stdout.len() > 1_048_576 { &stdout[..1_048_576] } else { &stdout };
+            let stderr = if stderr.len() > 1_048_576 { &stderr[..1_048_576] } else { &stderr };
+            (StatusCode::OK, Json(json!({
+                "exit_code": o.status.code().unwrap_or(-1),
+                "stdout": stdout,
+                "stderr": stderr
+            })))
+        }
+        Ok(Err(e)) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+        Err(_) => (StatusCode::GATEWAY_TIMEOUT, Json(json!({"error": format!("Command timed out after {}s", timeout_secs)}))),
+    }
+}
+
+// ── Info ─────────────────────────────────────────────────────────
+
+async fn shared_vm_info(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    // Query incus for live info
+    let output = tokio::process::Command::new("incus")
+        .args(["list", &provider_ref, "--format", "json"])
+        .output().await;
+
+    match output {
+        Ok(o) if o.status.success() => {
+            let raw = String::from_utf8_lossy(&o.stdout);
+            let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(json!([]));
+            if let Some(instance) = parsed.as_array().and_then(|a| a.first()) {
+                let status = instance.get("status").and_then(|v| v.as_str()).unwrap_or("Unknown");
+                (StatusCode::OK, Json(json!({
+                    "shared_vm_id": uid,
+                    "provider_ref": provider_ref,
+                    "status": status,
+                    "details": instance
+                })))
+            } else {
+                (StatusCode::NOT_FOUND, Json(json!({"error": "VM not found in Incus"})))
+            }
+        }
+        Ok(o) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&o.stderr).to_string()}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+// ── File push/pull on shared VM ──────────────────────────────────
+
+async fn shared_vm_file_push(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(p): Json<SharedVmFileRequest>,
+) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    if let Err(e) = check_shared_vm_access(&state.db, p.agent_id, uid).await { return e; }
+
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    let content = match &p.content {
+        Some(c) => c.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "content is required for file push"}))),
+    };
+
+    // Decode if base64
+    let bytes = if p.encoding.as_deref() == Some("base64") {
+        use base64::Engine;
+        match base64::engine::general_purpose::STANDARD.decode(&content) {
+            Ok(b) => b,
+            Err(e) => return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Invalid base64: {}", e)}))),
+        }
+    } else {
+        content.into_bytes()
+    };
+
+    // Write to temp file, push via incus
+    let tmp = format!("/tmp/multiclaw-shared-push-{}", Uuid::new_v4());
+    if tokio::fs::write(&tmp, &bytes).await.is_err() {
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "Failed to write temp file"})));
+    }
+
+    let dest = format!("{}/{}", provider_ref, p.path);
+    let result = tokio::process::Command::new("incus")
+        .args(["file", "push", &tmp, &dest])
+        .output().await;
+    let _ = tokio::fs::remove_file(&tmp).await;
+
+    match result {
+        Ok(o) if o.status.success() => (StatusCode::OK, Json(json!({"status": "pushed", "path": p.path, "size": bytes.len()}))),
+        Ok(o) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&o.stderr).to_string()}))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()}))),
+    }
+}
+
+async fn shared_vm_file_pull(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(p): Json<SharedVmFileRequest>,
+) -> impl IntoResponse {
+    let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    if let Err(e) = check_shared_vm_access(&state.db, p.agent_id, uid).await { return e; }
+
+    let provider_ref = match resolve_shared_vm_ref(&state.db, uid).await {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
+    };
+
+    let tmp = format!("/tmp/multiclaw-shared-pull-{}", Uuid::new_v4());
+    let src = format!("{}/{}", provider_ref, p.path);
+    let result = tokio::process::Command::new("incus")
+        .args(["file", "pull", &src, &tmp])
+        .output().await;
+
+    match result {
+        Ok(o) if o.status.success() => {
+            let content = tokio::fs::read(&tmp).await.unwrap_or_default();
+            let _ = tokio::fs::remove_file(&tmp).await;
+            let text = String::from_utf8_lossy(&content);
+            (StatusCode::OK, Json(json!({
+                "path": p.path,
+                "content": text.to_string(),
+                "size": content.len()
+            })))
+        }
+        Ok(o) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": String::from_utf8_lossy(&o.stderr).to_string()})))
+        }
+        Err(e) => {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": e.to_string()})))
+        }
+    }
+}
+
+// ── Post-approval hook for shared VM provisioning ────────────────
+
+async fn trigger_shared_vm_provisioning(state: &AppState, request_id: Uuid) {
+    let row: Option<(String, Value)> = sqlx::query_as(
+        "SELECT type, payload FROM requests WHERE id = $1"
+    ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let (req_type, payload) = match row {
+        Some(r) if r.0 == "REQUEST_SHARED_VM" => r,
+        _ => return,
+    };
+
+    let requester_id: Option<Uuid> = sqlx::query_scalar("SELECT created_by_agent_id FROM requests WHERE id = $1")
+        .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
+    let agent_id = match requester_id {
+        Some(id) => id,
+        None => return,
+    };
+
+    let company_id = payload.get("company_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+    let vm_purpose = payload.get("vm_purpose").and_then(|v| v.as_str()).unwrap_or("");
+    let dept_manager_id = payload.get("department_manager_id").and_then(|v| v.as_str()).and_then(|s| Uuid::parse_str(s).ok());
+    let label = payload.get("label").and_then(|v| v.as_str()).map(String::from);
+    let resources = payload.get("resources").cloned();
+
+    if let Some(cid) = company_id {
+        // Notify the requester that provisioning is starting
+        let msg = format!(
+            "Your shared VM request (type: {}) has been approved and is now being provisioned.",
+            vm_purpose
+        );
+        let _ = state.enqueue_message(
+            agent_id, 3, "generic_send",
+            json!({"agent_id": agent_id.to_string(), "message": msg, "task_label": "Shared VM provisioning notification"}),
+        ).await;
+
+        // The actual provisioning happens via the provision_shared_vm endpoint
+        // We need to call the provisioning logic directly here
+        let provider = match state.vm_provider {
+            Some(ref p) => p.clone(),
+            None => {
+                tracing::error!("VM provider not available for shared VM provisioning (request {})", request_id);
+                return;
+            }
+        };
+
+        let vm_name = match vm_purpose {
+            "dept_test" => {
+                if let Some(mid) = dept_manager_id {
+                    format!("mc-dept-{}", &mid.to_string()[..8])
+                } else { return; }
+            }
+            "company_test" => format!("mc-co-{}-test", &cid.to_string()[..8]),
+            "company_prod" => format!("mc-co-{}-prod", &cid.to_string()[..8]),
+            _ => return,
+        };
+
+        let shared_vm_id = Uuid::new_v4();
+        let vm_uuid = Uuid::new_v4();
+        let db = state.db.clone();
+        let tx = state.tx.clone();
+        let vm_purpose = vm_purpose.to_string();
+        let resource_limits = resources.unwrap_or(json!({"vcpus": 2, "memory_mb": 2048, "disk_gb": 20}));
+
+        let vcpus = resource_limits.get("vcpus").and_then(|v| v.as_u64()).unwrap_or(2) as u32;
+        let memory_mb = resource_limits.get("memory_mb").and_then(|v| v.as_u64()).unwrap_or(2048) as u32;
+        let disk_gb = resource_limits.get("disk_gb").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
+
+        tokio::spawn(async move {
+            let cloud_init = format!(
+                "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+                vm_name
+            );
+            let vm_resources = VmResources { vcpus, memory_mb, disk_gb };
+
+            match provider.provision(&vm_name, &vm_resources, &cloud_init).await {
+                Ok(details) => {
+                    let resources_json = json!({"vcpus": vcpus, "memory_mb": memory_mb, "disk_gb": disk_gb});
+                    let _ = sqlx::query(
+                        "INSERT INTO vms (id, provider, provider_ref, hostname, ip_address, resources, state, vm_type) \
+                         VALUES ($1, 'incus', $2, $3, $4, $5, 'RUNNING', $6)"
+                    ).bind(vm_uuid).bind(&vm_name).bind(&vm_name)
+                     .bind(&details.ip_address).bind(&resources_json).bind(&vm_purpose)
+                     .execute(&db).await;
+
+                    let _ = sqlx::query(
+                        "INSERT INTO shared_vms (id, vm_id, scope_type, company_id, department_manager_id, \
+                         vm_purpose, provisioned_by_agent_id, label, resource_limits) \
+                         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"
+                    ).bind(shared_vm_id).bind(vm_uuid)
+                     .bind(if vm_purpose == "dept_test" { "DEPARTMENT" } else { "COMPANY" })
+                     .bind(cid).bind(dept_manager_id)
+                     .bind(&vm_purpose).bind(agent_id)
+                     .bind(&label).bind(&resource_limits)
+                     .execute(&db).await;
+
+                    let _ = tx.send(json!({
+                        "type": "shared_vm_provisioned",
+                        "shared_vm_id": shared_vm_id,
+                        "vm_purpose": vm_purpose,
+                        "company_id": cid,
+                        "ip": details.ip_address
+                    }).to_string());
+                }
+                Err(e) => {
+                    tracing::error!("Failed to provision shared VM '{}' after approval: {}", vm_name, e);
+                    let _ = tx.send(json!({
+                        "type": "shared_vm_provision_failed",
+                        "vm_purpose": vm_purpose,
+                        "company_id": cid,
+                        "error": e.to_string()
+                    }).to_string());
+                }
+            }
+        });
     }
 }
 

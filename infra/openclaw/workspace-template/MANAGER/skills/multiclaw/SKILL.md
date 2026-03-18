@@ -148,6 +148,65 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox 
 - `dest_path` (optional): destination on your **testing environment** (defaults to the same path)
 - Maximum file size: 10 MB. Both computers must be running.
 
+---
+
+## Shared Servers
+
+Your department and company may have shared servers for collaborative development and testing.
+
+### Department Test Server
+
+As a manager, you can provision a test/dev server for your department where your workers can push code for integration testing.
+
+**Request a department test server:**
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "requester_agent_id": "{{AGENT_ID}}",
+    "company_id": "{{COMPANY_ID}}",
+    "vm_purpose": "dept_test",
+    "department_manager_id": "{{AGENT_ID}}",
+    "label": "DEPARTMENT_NAME Test Server"
+  }'
+```
+
+**List available shared VMs in your company:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms?company_id={{COMPANY_ID}}"
+```
+
+**Run a command on a shared server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/exec" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "command": "ls /home/employee"}'
+```
+
+**Push/pull files:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/push" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/home/employee/app.py", "content": "FILE_CONTENT"}'
+
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/pull" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/home/employee/app.py"}'
+```
+
+**Start / stop / rebuild a shared server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/start"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/stop"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
+```
+
+> **Access:** You can access your department's test server and the company test server. You cannot access the company production server — deploy through your CEO.
+>
+> **Workflow:** Have your workers push tested code to the department test server. Validate it there, then promote to the company test server for your CEO to review.
+
+---
+
 ### Submit a Request to Your CEO
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \

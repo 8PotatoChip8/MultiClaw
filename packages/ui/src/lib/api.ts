@@ -161,6 +161,27 @@ export const api = {
     // World
     getWorldSnapshot: () => request('/world/snapshot'),
 
+    // Shared VMs
+    getSharedVms: (companyId?: string, vmPurpose?: string) => {
+        const params = new URLSearchParams();
+        if (companyId) params.set('company_id', companyId);
+        if (vmPurpose) params.set('vm_purpose', vmPurpose);
+        const qs = params.toString();
+        return request(`/shared-vms${qs ? `?${qs}` : ''}`);
+    },
+    getSharedVm: (id: string) => request(`/shared-vms/${id}`),
+    provisionSharedVm: (data: {
+        requester_agent_id: string; company_id: string; vm_purpose: string;
+        department_manager_id?: string; label?: string; resources?: any;
+    }) => request('/shared-vms', { method: 'POST', body: JSON.stringify(data) }),
+    sharedVmStart: (id: string) => request(`/shared-vms/${id}/start`, { method: 'POST' }),
+    sharedVmStop: (id: string) => request(`/shared-vms/${id}/stop`, { method: 'POST' }),
+    sharedVmRebuild: (id: string) => request(`/shared-vms/${id}/rebuild`, { method: 'POST' }),
+    destroySharedVm: (id: string) => request(`/shared-vms/${id}`, { method: 'DELETE' }),
+    sharedVmExec: (id: string, data: { agent_id: string; command: string; user?: string; working_dir?: string; timeout_secs?: number }) =>
+        request(`/shared-vms/${id}/exec`, { method: 'POST', body: JSON.stringify(data) }),
+    sharedVmInfo: (id: string) => request(`/shared-vms/${id}/info`),
+
     // Secrets
     getSecrets: (scopeType?: string, scopeId?: string) => {
         const params = new URLSearchParams();

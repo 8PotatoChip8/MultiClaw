@@ -2,7 +2,7 @@
 import '../styles/globals.css';
 import Link from 'next/link';
 import { useEffect, useState, useRef, useCallback } from 'react';
-import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar, Eye, Bell, X } from 'lucide-react';
+import { Activity, Building2, Users2, MessageSquare, CheckSquare, Briefcase, Wallet, Shield, Radio, ArrowUpCircle, Server, Key, Settings, Globe2, Calendar, Eye, Bell, X, HardDrive } from 'lucide-react';
 import { useMultiClawEvents } from '../lib/ws';
 import { api } from '../lib/api';
 
@@ -16,6 +16,7 @@ const navItems = [
     { href: '/meetings', icon: Calendar, label: 'Meetings' },
     { href: '/pov', icon: Eye, label: 'Agent POV' },
     { href: '/infrastructure', icon: Server, label: 'Infrastructure' },
+    { href: '/vms', icon: HardDrive, label: 'Shared VMs' },
     { href: '/approvals', icon: CheckSquare, label: 'Approvals' },
     { href: '/services', icon: Briefcase, label: 'Services' },
     { href: '/ledger', icon: Wallet, label: 'Ledger' },

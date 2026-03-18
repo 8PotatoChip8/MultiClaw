@@ -105,6 +105,25 @@ export interface LedgerEntry {
     created_at: string;
 }
 
+export interface SharedVm {
+    id: string;
+    vm_id: string;
+    scope_type: 'DEPARTMENT' | 'COMPANY';
+    company_id: string;
+    department_manager_id: string | null;
+    vm_purpose: 'dept_test' | 'company_test' | 'company_prod';
+    provisioned_by_agent_id: string;
+    label: string | null;
+    resource_limits: any;
+    created_at: string;
+    // Joined from vms table
+    provider_ref: string;
+    hostname: string;
+    ip_address: string | null;
+    resources: any;
+    state: string;
+}
+
 export interface FileTransfer {
     id: string;
     sender_id: string;

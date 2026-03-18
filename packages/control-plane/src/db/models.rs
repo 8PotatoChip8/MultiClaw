@@ -100,6 +100,71 @@ pub struct Vm {
     pub created_at: DateTime<Utc>,
 }
 
+// ─── Shared VMs ───────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct SharedVm {
+    pub id: Uuid,
+    pub vm_id: Uuid,
+    pub scope_type: String,
+    pub company_id: Uuid,
+    pub department_manager_id: Option<Uuid>,
+    pub vm_purpose: String,
+    pub provisioned_by_agent_id: Uuid,
+    pub label: Option<String>,
+    pub resource_limits: JsonValue,
+    pub created_at: DateTime<Utc>,
+}
+
+/// Joined view returned by list/get endpoints.
+#[derive(Debug, Serialize, Deserialize, FromRow)]
+pub struct SharedVmDetail {
+    // shared_vms fields
+    pub id: Uuid,
+    pub vm_id: Uuid,
+    pub scope_type: String,
+    pub company_id: Uuid,
+    pub department_manager_id: Option<Uuid>,
+    pub vm_purpose: String,
+    pub provisioned_by_agent_id: Uuid,
+    pub label: Option<String>,
+    pub resource_limits: JsonValue,
+    pub created_at: DateTime<Utc>,
+    // joined from vms
+    pub provider_ref: String,
+    pub hostname: String,
+    pub ip_address: Option<String>,
+    pub resources: JsonValue,
+    pub state: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ProvisionSharedVmRequest {
+    pub requester_agent_id: Uuid,
+    pub company_id: Uuid,
+    pub vm_purpose: String,
+    pub department_manager_id: Option<Uuid>,
+    pub label: Option<String>,
+    pub resources: Option<JsonValue>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SharedVmExecRequest {
+    pub agent_id: Uuid,
+    pub command: String,
+    pub user: Option<String>,
+    pub working_dir: Option<String>,
+    pub timeout_secs: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SharedVmFileRequest {
+    pub agent_id: Uuid,
+    pub path: String,
+    pub content: Option<String>,
+    pub encoding: Option<String>,
+}
+
 // ─── Threads ───────────────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, FromRow)]

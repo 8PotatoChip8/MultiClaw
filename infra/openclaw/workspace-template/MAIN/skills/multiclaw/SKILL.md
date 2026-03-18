@@ -164,6 +164,46 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox 
 - `dest_path` (optional): destination on your **testing environment** (defaults to the same path)
 - Maximum file size: 10 MB. Both computers must be running.
 
+---
+
+## Shared Server Management
+
+As MainAgent, you can view and manage all shared VMs across the entire holding.
+
+**List all shared VMs (across all companies):**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms"
+```
+
+**List shared VMs for a specific company:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms?company_id=COMPANY_ID"
+```
+
+**Get details on a specific shared VM:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID"
+```
+
+**Run a command on any shared server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/exec" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "command": "ls /home/employee"}'
+```
+
+**Start / stop / rebuild / destroy:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/start"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/stop"
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
+curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID"
+```
+
+> **Note:** Production servers cannot be rebuilt. When CEOs request shared VMs (REQUEST_SHARED_VM), you approve or reject them like any other request.
+
+---
+
 ### Approve a CEO's Request
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests/REQUEST_ID/agent-approve \

@@ -133,6 +133,43 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/vm/copy-to-sandbox 
 - `dest_path` (optional): destination on your **testing environment** (defaults to the same path)
 - Maximum file size: 10 MB. Both computers must be running.
 
+---
+
+## Department Test Server
+
+Your department may have a shared test/dev server where the team collaborates on integration testing. Unlike your personal computers, this server is shared with your entire department (your manager and fellow workers).
+
+**List available shared VMs in your company:**
+```bash
+curl -s "{{MULTICLAW_API_URL}}/v1/shared-vms?company_id={{COMPANY_ID}}"
+```
+
+**Run a command on the department test server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/exec" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "command": "ls /home/employee"}'
+```
+Optional fields: `"user"` (default: `employee`), `"working_dir"` (default: `/home/employee`), `"timeout_secs"`.
+
+**Push a file to the test server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/push" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/home/employee/app.py", "content": "FILE_CONTENT"}'
+```
+
+**Pull a file from the test server:**
+```bash
+curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/file/pull" \
+  -H 'Content-Type: application/json' \
+  -d '{"agent_id": "{{AGENT_ID}}", "path": "/home/employee/app.py"}'
+```
+
+> **Access:** You can only access your department's test server. You cannot access company-wide test or production servers directly — deploy through your manager.
+
+---
+
 ### Submit a Request to Your Manager
 ```bash
 curl -s -X POST {{MULTICLAW_API_URL}}/v1/requests \
