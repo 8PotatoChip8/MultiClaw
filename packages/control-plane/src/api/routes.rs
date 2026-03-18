@@ -800,6 +800,10 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
     }
     // Collapse duplicate content blocks (model occasionally emits same text twice)
     text = dedup_content_blocks(&text);
+    // Replace literal escape sequences that models sometimes output as text
+    // (e.g. the two characters '\' and 'n' instead of an actual newline)
+    text = text.replace("\\n", "\n");
+    text = text.replace("\\t", "\t");
     // Clean spurious newlines from streaming token assembly
     text = clean_spurious_newlines(&text);
     // Strip any remaining [[word_word]] artifacts (model-generated tags)
