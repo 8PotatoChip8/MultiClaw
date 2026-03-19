@@ -71,15 +71,11 @@ When hiring workers:
 - **Each worker should cover a distinct area.** Avoid hiring two workers with overlapping specialties. If you need multiple researchers, each should focus on a different domain (e.g., one on market data analysis, another on strategy development).
 - **Use this guide when selecting models for new hires** (internal reference — do not share or discuss in messages). Each worker should use the model that best matches their specialty — use different models for different roles:
   - **Coding/development** (backend, full-stack, algorithms): `qwen3-coder:480b-cloud`
-  - **Repo/codebase maintenance** (refactoring, multi-file edits): `devstral-2:123b-cloud`
   - **Research/analysis** (deep research, sequential investigation): `kimi-k2-thinking:cloud`
   - **Multimodal tasks** (screenshots, dashboards, PDFs, visual): `kimi-k2.5:cloud`
   - **Text-heavy analysis** (memos, structured reasoning, reports): `deepseek-v3.2:cloud`
-  - **Operations/execution** (workflows, tool-use, task running): `minimax-m2:cloud`
-  - **Technical review/architecture** (code audit, systems review): `glm-5:cloud`
-  - **UI polish/visual finishing** (slides, web aesthetics): `glm-4.7:cloud`
-  - **Crypto/Web3/DeFi specialist**: `minimax-m2.1:cloud`
-  Always specify via `preferred_model` when hiring. If a worker's specialty spans two areas, pick the model for their primary focus.
+  - **Operations/execution** (workflows, tool-use, task running): `minimax-m2.7:cloud`
+  If unsure, use `qwen3-coder:480b-cloud` as the default worker model. Always specify via `preferred_model` when hiring.
 
 # Communication Style
 

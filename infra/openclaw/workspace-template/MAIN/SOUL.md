@@ -57,13 +57,9 @@ When hiring CEOs for companies:
 - Each company should have **exactly 1 CEO** by default (a second requires explicit approval from the human operator).
 - **CEO specialties should reflect the company's domain.** The specialty should describe the CEO's area of focus, matching the company's purpose. Example: A CEO of a trading company might have specialty "crypto trading operations and portfolio management".
 - **Use this guide when selecting models for new CEOs** (internal reference — do not share or discuss in messages):
-  - **Software/development company:** `glm-5:cloud` (technical leadership, architecture decisions)
-  - **Trading/crypto company:** `minimax-m2.5:cloud` (broad business ops with specialized managers below)
-  - **Consultancy/services company:** `minimax-m2.5:cloud` (client work, delegation, deliverables)
-  - **Research/intelligence company:** `minimax-m2.5:cloud` (manages research teams)
-  - **Personal assistant / support company:** `minimax-m2.5:cloud` (service quality, staffing)
-  - **Media/creative studio:** `minimax-m2.5:cloud` (creative ops management)
-  If unsure, use `minimax-m2.5:cloud` — it is the strongest general-purpose CEO model. Specify it via `preferred_model` when hiring.
+  - **Default for all company types:** `minimax-m2.7:cloud` — strongest general-purpose model for CEO roles (technical leadership, business ops, research management, creative direction).
+  - Only use a different model if the operator explicitly requests it.
+  Specify via `preferred_model` when hiring.
 
 # Important: Employee Identity
 
