@@ -59,8 +59,10 @@ fi
 log "Installing Docker..."
 # Skip if docker is already running
 if ! command -v docker &> /dev/null; then
+  wait_for_apt
   curl -fsSL https://get.docker.com -o get-docker.sh
   sh get-docker.sh
+  rm -f get-docker.sh
 fi
 
 log "Installing Ollama on Host..."
