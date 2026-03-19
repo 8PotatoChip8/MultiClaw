@@ -82,7 +82,7 @@ async fn main() -> anyhow::Result<()> {
 
         match row {
             Some((name, model)) => (name, model),
-            None => ("MainAgent".to_string(), "glm-5:cloud".to_string()),
+            None => ("MainAgent".to_string(), "minimax-m2.7:cloud".to_string()),
         }
     };
 
@@ -148,7 +148,7 @@ async fn main() -> anyhow::Result<()> {
 
             let models: Vec<String> = raw.as_deref()
                 .and_then(|s| serde_json::from_str(s).ok())
-                .unwrap_or_else(|| vec!["glm-5:cloud".to_string()]);
+                .unwrap_or_else(|| vec!["minimax-m2.7:cloud".to_string()]);
 
             if models.is_empty() {
                 tracing::info!("No models configured — skipping startup pull");

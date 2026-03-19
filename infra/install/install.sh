@@ -199,7 +199,7 @@ echo "--- MultiClaw Setup ---"
 
 HOLDING_NAME=${HOLDING_NAME:-"Main Holding"}
 MAIN_AGENT_NAME=${MAIN_AGENT_NAME:-"MainAgent"}
-DEFAULT_MODEL=${DEFAULT_MODEL:-"glm-5:cloud"}
+DEFAULT_MODEL=${DEFAULT_MODEL:-"minimax-m2.7:cloud"}
 STRICT_MODE=${STRICT_MODE:-"false"}
 
 read -r -p "Holding Name [$HOLDING_NAME]: " USER_HOLDING </dev/tty
@@ -215,7 +215,7 @@ read -r -p "Enable Strict Mode (true/false) [$STRICT_MODE]: " USER_STRICT </dev/
 if [[ -n "$USER_STRICT" ]]; then STRICT_MODE="$USER_STRICT"; fi
 
 # ── Pull all default models ──
-BUILTIN_MODELS=("glm-5:cloud" "nemotron-3-super:cloud" "minimax-m2.5:cloud" "minimax-m2:cloud" "kimi-k2-thinking:cloud" "kimi-k2.5:cloud" "qwen3-coder:480b-cloud" "devstral-2:123b-cloud" "deepseek-v3.2:cloud" "minimax-m2.1:cloud" "glm-4.7:cloud")
+BUILTIN_MODELS=("minimax-m2.7:cloud" "nemotron-3-super:cloud" "minimax-m2:cloud" "glm-5:cloud" "kimi-k2-thinking:cloud" "kimi-k2.5:cloud" "qwen3-coder:480b-cloud" "devstral-2:123b-cloud" "deepseek-v3.2:cloud" "minimax-m2.1:cloud" "glm-4.7:cloud")
 
 log "Pulling ${#BUILTIN_MODELS[@]} default models via Ollama..."
 for m in "${BUILTIN_MODELS[@]}"; do

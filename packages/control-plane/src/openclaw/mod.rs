@@ -114,7 +114,7 @@ impl OpenClawManager {
             next_port_offset: Arc::new(AtomicU16::new(0)),
             pending_spawns: Arc::new(RwLock::new(HashSet::new())),
             available_models_csv: Arc::new(std::sync::RwLock::new(
-                "nemotron-3-super:cloud, minimax-m2.5:cloud, minimax-m2:cloud, glm-5:cloud, kimi-k2-thinking:cloud, kimi-k2.5:cloud, qwen3-coder:480b-cloud, devstral-2:123b-cloud, deepseek-v3.2:cloud, minimax-m2.1:cloud, glm-4.7:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
+                "nemotron-3-super:cloud, minimax-m2.7:cloud, minimax-m2:cloud, glm-5:cloud, kimi-k2-thinking:cloud, kimi-k2.5:cloud, qwen3-coder:480b-cloud, devstral-2:123b-cloud, deepseek-v3.2:cloud, minimax-m2.1:cloud, glm-4.7:cloud, qwen3.5:397b-cloud, qwen3-coder-next:cloud".to_string()
             )),
             model_pull_status: Arc::new(std::sync::RwLock::new(HashMap::new())),
             container_memory_limit,
@@ -1350,7 +1350,7 @@ impl OpenClawManager {
     fn replace_vars(&self, template: &str, config: &AgentConfig) -> String {
         let models_csv = self.available_models_csv.read()
             .map(|g| g.clone())
-            .unwrap_or_else(|_| "glm-5:cloud".to_string());
+            .unwrap_or_else(|_| "minimax-m2.7:cloud".to_string());
 
         // Build set of truthy condition names for {{#if COND}}...{{/if}} blocks
         let mut truthy: std::collections::HashSet<&str> = std::collections::HashSet::new();
