@@ -1279,9 +1279,10 @@ pub async fn handle_generic_send(state: &AppState, payload: &serde_json::Value) 
 /// These currently just call generic_send or do minimal work.
 
 pub async fn handle_hire_notify(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
-    // Insert SYSTEM notification into the DM thread.
-    // This runs after the approver's response is already stored (by approval_escalate → handle_generic_send),
-    // so the notification appears in correct chronological order.
+    // Insert SYSTEM notification into the DM thread as a record.
+    // The approver already communicated the decision to the requester in the DM conversation
+    // (via approval_escalate → handle_generic_send), so we do NOT prompt the agent again.
+    // Prompting caused duplicate notifications and blocked the agent's queue.
     if let (Some(thread_id_str), Some(approver_id_str), Some(msg)) = (
         payload.get("thread_id").and_then(|v| v.as_str()),
         payload.get("approver_id").and_then(|v| v.as_str()),
@@ -1289,11 +1290,11 @@ pub async fn handle_hire_notify(state: &AppState, payload: &serde_json::Value) -
     ) {
         if let (Ok(thread_id), Ok(approver_id)) = (Uuid::parse_str(thread_id_str), Uuid::parse_str(approver_id_str)) {
             insert_system_message_in_thread(state, thread_id, approver_id, msg).await;
+            tracing::info!("[hire_notify] SYSTEM message inserted in thread {} (no agent prompt — approver already communicated decision)", thread_id);
         }
     }
 
-    // Deliver the notification to the agent (agent acts via tool calls during send_message)
-    handle_generic_send(state, payload).await
+    Ok(())
 }
 
 pub async fn handle_approval_escalate(state: &AppState, payload: &serde_json::Value) -> Result<(), String> {
