@@ -24,7 +24,7 @@ pub struct OpenClawManager {
     /// Ollama URL accessible from inside Docker containers
     ollama_url: String,
     /// MultiClaw API URL accessible from inside Docker containers
-    multiclaw_api_url: String,
+    pub multiclaw_api_url: String,
     /// Docker image to use
     image: String,
     /// Base port for OpenClaw gateways (each agent gets base_port + offset)

@@ -1450,13 +1450,15 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
                 // DM the approver agent about the pending request
                 if approver_type_str == "AGENT" {
                     if let Some(aid) = approver_id {
+                        let api_url = &state.openclaw.multiclaw_api_url;
                         let dm_text = format!(
                             "APPROVAL REQUEST from {}: Hire manager #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                            ceo.name, new_count, payload.name, req_id, request_type, req_id, req_id
+                             To approve: curl -s -X POST {}/v1/requests/{}/agent-approve \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'\n\n\
+                             To reject: curl -s -X POST {}/v1/requests/{}/agent-reject \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'",
+                            ceo.name, new_count, payload.name, req_id, request_type,
+                            api_url, req_id, aid, api_url, req_id, aid
                         );
                         let dm_thread = find_or_create_agent_dm_thread(&state.db, ceo_id, aid).await;
                         insert_system_message_in_thread(&state, dm_thread, ceo_id, &dm_text).await;
@@ -1607,13 +1609,15 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
                 // DM the approver agent about the pending request
                 if approver_type_str == "AGENT" {
                     if let Some(aid) = approver_id {
+                        let api_url = &state.openclaw.multiclaw_api_url;
                         let dm_text = format!(
                             "APPROVAL REQUEST from {}: Hire worker #{} (\"{}\")\n\nRequest ID: {}\nType: {}\n\n\
-                             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                            mgr.name, new_count, payload.name, req_id, request_type, req_id, req_id
+                             To approve: curl -s -X POST {}/v1/requests/{}/agent-approve \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'\n\n\
+                             To reject: curl -s -X POST {}/v1/requests/{}/agent-reject \
+                             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'",
+                            mgr.name, new_count, payload.name, req_id, request_type,
+                            api_url, req_id, aid, api_url, req_id, aid
                         );
                         let dm_thread = find_or_create_agent_dm_thread(&state.db, mgr_id, aid).await;
                         insert_system_message_in_thread(&state, dm_thread, mgr_id, &dm_text).await;
@@ -2669,13 +2673,15 @@ async fn create_request(State(state): State<AppState>, Json(p): Json<CreateReque
         let requester_name: String = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
             .bind(requester_id).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "An agent".into());
         let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("(no description)");
+        let api_url = &state.openclaw.multiclaw_api_url;
         let dm_text = format!(
             "APPROVAL REQUEST from {}: \"{}\"\n\nRequest ID: {}\nType: {}\n\n\
-             To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-             To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-            requester_name, description, id, p.r#type, id, id
+             To approve: curl -s -X POST {}/v1/requests/{}/agent-approve \
+             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'\n\n\
+             To reject: curl -s -X POST {}/v1/requests/{}/agent-reject \
+             -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'",
+            requester_name, description, id, p.r#type,
+            api_url, id, superior_id, api_url, id, superior_id
         );
         let dm_thread = find_or_create_agent_dm_thread(&state.db, requester_id, superior_id).await;
         insert_system_message_in_thread(&state, dm_thread, requester_id, &dm_text).await;
@@ -2937,13 +2943,15 @@ async fn agent_approve_request(State(state): State<AppState>, Path(id): Path<Str
                     .bind(request_id).fetch_optional(&state.db).await.ok().flatten();
                 let description = payload.as_ref().and_then(|p| p.get("description")).and_then(|v| v.as_str()).unwrap_or("(no description)");
 
+                let api_url = &state.openclaw.multiclaw_api_url;
                 let dm_text = format!(
                     "APPROVAL REQUEST (escalated, approved by {}): \"{}\"\n\nRequest ID: {}\nType: {}\n\n\
-                     To approve: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-approve \
-                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'\n\n\
-                     To reject: curl -s -X POST $MULTICLAW_API_URL/v1/requests/{}/agent-reject \
-                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"$AGENT_ID\"}}'",
-                    approver_name, description, request_id, req_type, request_id, request_id
+                     To approve: curl -s -X POST {}/v1/requests/{}/agent-approve \
+                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'\n\n\
+                     To reject: curl -s -X POST {}/v1/requests/{}/agent-reject \
+                     -H 'Content-Type: application/json' -d '{{\"agent_id\": \"{}\"}}'",
+                    approver_name, description, request_id, req_type,
+                    api_url, request_id, next_superior_id, api_url, request_id, next_superior_id
                 );
                 let dm_thread = find_or_create_agent_dm_thread(&state.db, p.agent_id, next_superior_id).await;
                 insert_system_message_in_thread(&state, dm_thread, p.agent_id, &dm_text).await;
