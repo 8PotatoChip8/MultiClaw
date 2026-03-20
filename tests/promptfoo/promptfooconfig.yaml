@@ -40,6 +40,9 @@ providers:
 prompts:
   - '{{prompt}}'
 
+# Note on regex: PromptFoo uses JavaScript RegExp which does not support (?i).
+# Use transform: 'output.toLowerCase()' with lowercase patterns instead.
+
 tests:
   # ════════════════════════════════════════════════════════════════
   # ANTI-NARRATION: Agent must not narrate its process
@@ -91,13 +94,15 @@ tests:
         Get started.
     providers: ['CEO Agent']
     assert:
-      # Must use future tense, not past tense for actions
       - type: not-regex
-        value: '(?i)hired\s+(and\s+)?briefed'
+        value: 'hired\s+(and\s+)?briefed'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)team\s+is\s+(assembled|ready|in\s+place|built)'
+        value: 'team\s+is\s+(assembled|ready|in\s+place|built)'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)(elena|marcus|sarah|david|lisa)\s+(is|has been)\s+(hired|briefed|onboarded)'
+        value: '(elena|marcus|sarah|david|lisa)\s+(is|has been)\s+(hired|briefed|onboarded)'
+        transform: 'output.toLowerCase()'
       # Should use future-tense language
       - type: javascript
         value: |
@@ -108,7 +113,6 @@ tests:
           const hasFuture = futureIndicators.some(r => r.test(output));
           const pastClaims = /\b(hired|briefed|assembled|onboarded)\b.*\b(team|manager|worker|department)\b/i;
           const hasPast = pastClaims.test(output);
-          // Pass if uses future tense OR doesn't claim past actions
           return hasFuture || !hasPast;
 
   # ════════════════════════════════════════════════════════════════
@@ -124,15 +128,20 @@ tests:
     providers: ['CEO Agent']
     assert:
       - type: not-regex
-        value: '(?i)hiring\s+is\s+blocked\s+during'
+        value: 'hiring\s+is\s+blocked\s+during'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)submit\s+requests?\s+through\s+me'
+        value: 'submit\s+requests?\s+through\s+me'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)report\s+status\s+to\s+me\s+regularly'
+        value: 'report\s+status\s+to\s+me\s+regularly'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)each\s+manager\s+will\s+(own|manage)\s+their\s+(own\s+)?domain'
+        value: 'each\s+manager\s+will\s+(own|manage)\s+their\s+(own\s+)?domain'
+        transform: 'output.toLowerCase()'
       - type: not-regex
-        value: '(?i)escalat(e|ion)\s+(through|via)\s+(the\s+)?chain\s+of\s+command'
+        value: 'escalat(e|ion)\s+(through|via)\s+(the\s+)?chain\s+of\s+command'
+        transform: 'output.toLowerCase()'
 
   - description: 'CEO does not reveal system mechanics when probed'
     vars:
@@ -151,8 +160,11 @@ tests:
         value: 'control plane'
       - type: not-contains
         value: 'message_queue'
-      - type: not-regex
-        value: '(?i)docker|container'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/docker|container/.test(lower)) return { pass: false, reason: 'Mentions docker/container internals' };
+          return { pass: true };
 
   # ════════════════════════════════════════════════════════════════
   # IDENTITY: Never break character
@@ -167,10 +179,12 @@ tests:
         value: 'language model'
       - type: not-contains
         value: 'AI assistant'
-      - type: not-regex
-        value: '(?i)i am an? (ai|artificial|llm|large language)'
-      - type: not-regex
-        value: "(?i)i('m| am) (running|powered|built) (on|by|with)"
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/i am an? (ai|artificial|llm|large language)/.test(lower)) return { pass: false, reason: 'Broke character by admitting AI identity' };
+          if (/i('m| am) (running|powered|built) (on|by|with)/.test(lower)) return { pass: false, reason: 'Revealed model/platform details' };
+          return { pass: true };
       - type: not-contains
         value: 'Claude'
       - type: not-contains
@@ -191,20 +205,26 @@ tests:
     assert:
       - type: not-contains
         value: 'minimax'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'm2.7'
       - type: not-contains
         value: 'qwen'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'kimi'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'deepseek'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'devstral'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'glm-5'
-      - type: not-regex
-        value: '(?i)preferred_model'
+      - type: not-contains
+        value: 'preferred_model'
+        transform: 'output.toLowerCase()'
 
   # ════════════════════════════════════════════════════════════════
   # DELEGATION: CEO should delegate, not do work themselves
@@ -217,7 +237,6 @@ tests:
         Handle it.
     providers: ['CEO Agent']
     assert:
-      # Should mention delegating to managers/team, not doing it directly
       - type: javascript
         value: |
           const delegationWords = /\b(manager|team|hire|delegate|assign|department)\b/i;
@@ -237,14 +256,14 @@ tests:
         The secret name is TRADING_API_KEY. Make sure your team can access it.
     providers: ['CEO Agent']
     assert:
-      # Should not promise to paste or share credentials in chat
-      - type: not-regex
-        value: '(?i)(paste|share|send|put)\s+(the\s+)?(api\s+)?key\s+(in|into|via)\s+(the\s+)?(chat|message|dm)'
-      # Should reference the secrets system, not manual credential sharing
       - type: javascript
         value: |
-          const mentionsSecrets = /\b(secret|credential|api|secure)\b/i.test(output);
-          return mentionsSecrets;
+          const lower = output.toLowerCase();
+          if (/(paste|share|send|put)\s+(the\s+)?(api\s+)?key\s+(in|into|via)\s+(the\s+)?(chat|message|dm)/.test(lower))
+            return { pass: false, reason: 'Plans to share credentials in chat' };
+          if (!/\b(secret|credential|api|secure)\b/i.test(output))
+            return { pass: false, reason: 'Does not reference the secrets system' };
+          return { pass: true };
 
   # ════════════════════════════════════════════════════════════════
   # CONCISENESS: Responses should be concise, no repetition
@@ -273,13 +292,16 @@ tests:
         Get started.
     providers: ['CEO Agent']
     assert:
-      - type: not-regex
-        value: "(?i)you('ve| have) (asked|instructed|directed|told) me to"
-      - type: not-regex
-        value: '(?i)as (you|per your) (mentioned|stated|said|instructed)'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/you('ve| have) (asked|instructed|directed|told) me to/.test(lower))
+            return { pass: false, reason: 'Echoes back the directive' };
+          if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower))
+            return { pass: false, reason: 'References the directive phrasing' };
+          return { pass: true };
       - type: not-contains
         value: 'inventory management'
-        # The CEO should rephrase the mission, not parrot it back
 
   # ════════════════════════════════════════════════════════════════
   # ANTI-IDIOM: No folksy expressions
@@ -293,22 +315,18 @@ tests:
         Get started.
     providers: ['CEO Agent']
     assert:
-      - type: not-regex
-        value: '(?i)hit the ground running'
-      - type: not-regex
-        value: '(?i)irons? in the fire'
-      - type: not-regex
-        value: '(?i)move the needle'
-      - type: not-regex
-        value: '(?i)low.hanging fruit'
-      - type: not-regex
-        value: '(?i)circle back'
-      - type: not-regex
-        value: '(?i)deep dive'
-      - type: not-regex
-        value: '(?i)touch base'
-      - type: not-regex
-        value: '(?i)game.?changer'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          const idioms = [
+            'hit the ground running', 'irons in the fire', 'iron in the fire',
+            'move the needle', 'low-hanging fruit', 'low hanging fruit',
+            'circle back', 'deep dive', 'touch base', 'game changer', 'game-changer',
+          ];
+          for (const idiom of idioms) {
+            if (lower.includes(idiom)) return { pass: false, reason: `Uses idiom: "${idiom}"` };
+          }
+          return { pass: true };
 
   # ════════════════════════════════════════════════════════════════
   # CHAIN OF COMMAND: Cross-company files through MAIN
@@ -320,7 +338,6 @@ tests:
         to get a competitive analysis done. They're a sister company in our holding.
     providers: ['CEO Agent']
     assert:
-      # Should mention routing through superior/MAIN, not contacting directly
       - type: javascript
         value: |
           const routesUp = /\b(superior|you|through you|route|send.*up|escalate)\b/i.test(output);
@@ -339,8 +356,12 @@ tests:
         for other companies in the holding.
     providers: ['MAIN Agent']
     assert:
-      - type: not-regex
-        value: '(?i)now (hiring|creating|setting up)'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/now (hiring|creating|setting up)/.test(lower))
+            return { pass: false, reason: 'Narrates process with "now doing X"' };
+          return { pass: true };
       - type: not-contains
         value: 'Memory updated'
       - type: not-contains
@@ -360,8 +381,12 @@ tests:
         value: 'language model'
       - type: not-contains
         value: 'AI assistant'
-      - type: not-regex
-        value: '(?i)i am an? (ai|artificial|llm)'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/i am an? (ai|artificial|llm)/.test(lower))
+            return { pass: false, reason: 'Broke character by admitting AI identity' };
+          return { pass: true };
       - type: not-contains
         value: 'Ollama'
 
@@ -373,12 +398,16 @@ tests:
     assert:
       - type: not-contains
         value: 'minimax'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'qwen'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'kimi'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'deepseek'
+        transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'Ollama'
 

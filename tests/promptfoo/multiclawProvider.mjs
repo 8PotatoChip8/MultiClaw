@@ -43,6 +43,16 @@ async function fetchJson(url, options = {}) {
 }
 
 /**
+ * Extract text from a message content field.
+ * Handles both string content ("hello") and object content ({"text": "hello"}).
+ */
+function extractText(content) {
+  if (typeof content === 'string') return content;
+  if (content && typeof content === 'object' && content.text) return content.text;
+  return JSON.stringify(content);
+}
+
+/**
  * Find the MAIN agent (used as the sender for DMs to other agents).
  */
 async function findMainAgent(baseUrl) {
@@ -54,18 +64,30 @@ async function findMainAgent(baseUrl) {
 
 /**
  * Find target agent by role (and optionally name).
+ * Waits up to timeoutSecs for the agent to appear (useful when setup is still
+ * creating agents or a prior test triggered a hire).
  */
-async function findTargetAgent(baseUrl, role, agentName) {
-  const agents = await fetchJson(`${baseUrl}/v1/agents`);
-  let candidates = agents.filter(a => a.role === role && a.status === 'ACTIVE');
-  if (agentName) {
-    candidates = candidates.filter(a => a.name === agentName);
-  }
-  if (candidates.length === 0) {
+async function findTargetAgent(baseUrl, role, agentName, timeoutSecs = 0, pollInterval = 5) {
+  const deadline = Date.now() + timeoutSecs * 1000;
+
+  do {
+    const agents = await fetchJson(`${baseUrl}/v1/agents`);
+    let candidates = agents.filter(a => a.role === role && a.status === 'ACTIVE');
+    if (agentName) {
+      candidates = candidates.filter(a => a.name === agentName);
+    }
+    if (candidates.length > 0) return candidates[0];
+
+    if (timeoutSecs <= 0) break;
+
     const available = agents.map(a => `${a.name}(${a.role}:${a.status})`).join(', ');
-    throw new Error(`No active ${role} agent found${agentName ? ` named "${agentName}"` : ''}. Available: ${available}`);
-  }
-  return candidates[0];
+    console.log(`  Waiting for active ${role} agent... (available: ${available})`);
+    await sleep(pollInterval * 1000);
+  } while (Date.now() < deadline);
+
+  const agents = await fetchJson(`${baseUrl}/v1/agents`);
+  const available = agents.map(a => `${a.name}(${a.role}:${a.status})`).join(', ');
+  throw new Error(`No active ${role} agent found${agentName ? ` named "${agentName}"` : ''} after ${timeoutSecs}s. Available: ${available}`);
 }
 
 /**
@@ -132,11 +154,7 @@ async function sendDmAndWaitForResponse(baseUrl, senderId, targetId, message, ti
     );
 
     if (targetResponses.length > 0) {
-      // Return all target responses concatenated
-      return targetResponses.map(m => {
-        const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content);
-        return content;
-      }).join('\n\n');
+      return targetResponses.map(m => extractText(m.content)).join('\n\n');
     }
   }
 
@@ -185,9 +203,7 @@ async function sendUserMessageAndWait(baseUrl, agentId, message, timeoutSecs, po
     const newMsgs = msgs.slice(countBefore);
     const agentMsgs = newMsgs.filter(m => m.sender_type === 'AGENT' && m.sender_id === agentId);
     if (agentMsgs.length > 0) {
-      return agentMsgs.map(m =>
-        typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-      ).join('\n\n');
+      return agentMsgs.map(m => extractText(m.content)).join('\n\n');
     }
   }
 
@@ -225,9 +241,7 @@ async function observeHeartbeatBehavior(baseUrl, agentId, timeoutSecs, pollInter
     }
 
     if (allNewMessages.length > 0) {
-      return allNewMessages.map(m =>
-        typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
-      ).join('\n\n');
+      return allNewMessages.map(m => extractText(m.content)).join('\n\n');
     }
   }
 
@@ -255,8 +269,7 @@ export default class MultiClawProvider {
   async callApi(prompt, context) {
     try {
       if (this.mode === 'observe') {
-        // Observe heartbeat-driven behavior
-        const target = await findTargetAgent(this.baseUrl, this.role, this.agentName);
+        const target = await findTargetAgent(this.baseUrl, this.role, this.agentName, this.timeout, this.pollInterval);
         const output = await observeHeartbeatBehavior(
           this.baseUrl, target.id, this.timeout, this.pollInterval
         );
@@ -264,8 +277,7 @@ export default class MultiClawProvider {
       }
 
       if (this.mode === 'user') {
-        // Send as operator/user message (for testing MAIN)
-        const target = await findTargetAgent(this.baseUrl, this.role, this.agentName);
+        const target = await findTargetAgent(this.baseUrl, this.role, this.agentName, this.timeout, this.pollInterval);
         const output = await sendUserMessageAndWait(
           this.baseUrl, target.id, prompt, this.timeout, this.pollInterval
         );
@@ -274,12 +286,12 @@ export default class MultiClawProvider {
 
       // Default: DM mode — send from MAIN (or parent) to target agent
       const mainAgent = await findMainAgent(this.baseUrl);
-      const target = await findTargetAgent(this.baseUrl, this.role, this.agentName);
+      // Wait for target agent to appear (setup may still be hiring)
+      const target = await findTargetAgent(this.baseUrl, this.role, this.agentName, this.timeout, this.pollInterval);
 
       // Determine who should send the DM based on hierarchy
       let senderId;
       if (this.role === 'MAIN') {
-        // Can't DM MAIN from MAIN — use user mode instead
         const output = await sendUserMessageAndWait(
           this.baseUrl, target.id, prompt, this.timeout, this.pollInterval
         );
@@ -287,7 +299,6 @@ export default class MultiClawProvider {
       } else if (this.role === 'CEO') {
         senderId = mainAgent.id;
       } else {
-        // For MANAGER/WORKER, find their parent agent
         const parentId = target.parent_agent_id;
         if (parentId) {
           senderId = parentId;
