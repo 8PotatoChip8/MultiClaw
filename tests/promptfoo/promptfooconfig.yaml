@@ -190,7 +190,7 @@ tests:
       - type: not-regex
         value: '(?i)i am an? (ai|artificial|llm|large language)'
       - type: not-regex
-        value: '(?i)i('m| am) (running|powered|built) (on|by|with)'
+        value: "(?i)i('m| am) (running|powered|built) (on|by|with)"
       - type: not-contains
         value: 'Claude'
       - type: not-contains
@@ -280,7 +280,7 @@ tests:
     providers: ['CEO Agent']
     assert:
       - type: not-regex
-        value: '(?i)you('ve| have) (asked|instructed|directed|told) me to'
+        value: "(?i)you('ve| have) (asked|instructed|directed|told) me to"
       - type: not-regex
         value: '(?i)as (you|per your) (mentioned|stated|said|instructed)'
       - type: not-contains

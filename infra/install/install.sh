@@ -215,6 +215,11 @@ else
   log "Embeddings model already present, skipping download."
 fi
 
+# Make tests directory writable for non-root users (PromptFoo results)
+if [ -d /opt/multiclaw/tests/promptfoo ]; then
+  chmod -R a+rw /opt/multiclaw/tests/promptfoo
+fi
+
 log "Installing systemd service for auto-start on boot..."
 cp /opt/multiclaw/infra/systemd/multiclaw-stack.service /etc/systemd/system/
 systemctl daemon-reload

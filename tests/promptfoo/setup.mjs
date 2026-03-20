@@ -187,7 +187,7 @@ async function sendOperatorMessage(threadId, message, timeoutSecs = 120) {
 
   await fetchJson(`${BASE_URL}/v1/threads/${threadId}/messages`, {
     method: 'POST',
-    body: JSON.stringify({ sender_type: 'USER', content: message }),
+    body: JSON.stringify({ sender_type: 'USER', content: { text: message } }),
   });
 
   console.log(`    Sent: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);

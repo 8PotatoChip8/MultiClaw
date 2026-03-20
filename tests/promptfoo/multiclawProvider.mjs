@@ -167,7 +167,7 @@ async function sendUserMessageAndWait(baseUrl, agentId, message, timeoutSecs, po
     method: 'POST',
     body: JSON.stringify({
       sender_type: 'USER',
-      content: message,
+      content: { text: message },
     }),
   });
 

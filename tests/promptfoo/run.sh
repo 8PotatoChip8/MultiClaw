@@ -73,8 +73,12 @@ if [ "$SKIP_SETUP" = false ]; then
   fi
 fi
 
-# Create results directory
-mkdir -p results
+# Create results directory (may need sudo if /opt/multiclaw is root-owned)
+if ! mkdir -p results 2>/dev/null; then
+  echo "Cannot create results/ directory (permission denied)."
+  echo "Fix with: sudo chmod -R a+rw /opt/multiclaw/tests/promptfoo"
+  exit 1
+fi
 
 # Run PromptFoo evaluation
 echo ""
