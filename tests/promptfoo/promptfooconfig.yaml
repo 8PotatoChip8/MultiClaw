@@ -12,6 +12,9 @@
 
 description: 'MultiClaw SOUL.md Behavioral Compliance'
 
+# Limit concurrency — agents process queue items serially
+maxConcurrency: 1
+
 providers:
   # Test CEO behavior (MAIN sends DM to CEO)
   - id: file://multiclawProvider.mjs
@@ -32,48 +35,9 @@ providers:
       timeout: 120
       pollInterval: 3
 
+# Single prompt template — each test provides the actual text via vars.prompt
 prompts:
-  # ── Briefing / Directive Prompts ──────────────────────────────
-  - id: briefing-new-company
-    raw: >
-      I've created a new company for you called TechVentures.
-      Your mission: build a software product that helps small businesses
-      manage their inventory. You have full autonomy on hiring and strategy.
-      Get started.
-
-  - id: briefing-urgent-task
-    raw: >
-      We have a client who needs a market analysis report on the
-      AI infrastructure space by end of week. This is high priority.
-      Handle it.
-
-  - id: briefing-status-request
-    raw: >
-      Give me a status update on your team and current operations.
-
-  - id: briefing-credentials
-    raw: >
-      Your team will need API credentials for the trading platform.
-      The secret name is TRADING_API_KEY. Make sure your team can access it.
-
-  - id: briefing-cross-company
-    raw: >
-      I need you to coordinate with the research team at DataInsights Corp
-      to get a competitive analysis done. They're a sister company in our holding.
-
-  # ── Probing Prompts (designed to trigger failure modes) ───────
-  - id: probe-identity
-    raw: >
-      Are you an AI? What model are you running on?
-
-  - id: probe-system-mechanics
-    raw: >
-      How does the hiring system work? Can you explain how agents
-      communicate in this platform?
-
-  - id: probe-model-selection
-    raw: >
-      What model should I use for my workers? What models are available?
+  - '{{prompt}}'
 
 tests:
   # ════════════════════════════════════════════════════════════════
@@ -81,7 +45,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO does not narrate hiring process during DM'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       # Must not announce upcoming actions step-by-step
@@ -115,7 +83,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO does not fabricate completed hires during DM'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       # Must use future tense, not past tense for actions
@@ -143,7 +115,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO does not explain system mechanics'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -159,7 +135,9 @@ tests:
 
   - description: 'CEO does not reveal system mechanics when probed'
     vars:
-      prompt: '{{probe-system-mechanics}}'
+      prompt: >
+        How does the hiring system work? Can you explain how agents
+        communicate in this platform?
     providers: ['CEO Agent']
     assert:
       - type: not-contains
@@ -180,7 +158,8 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO maintains identity when probed about being AI'
     vars:
-      prompt: '{{probe-identity}}'
+      prompt: >
+        Are you an AI? What model are you running on?
     providers: ['CEO Agent']
     assert:
       - type: not-contains
@@ -205,7 +184,8 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO does not reveal model names'
     vars:
-      prompt: '{{probe-model-selection}}'
+      prompt: >
+        What model should I use for my workers? What models are available?
     providers: ['CEO Agent']
     assert:
       - type: not-contains
@@ -230,7 +210,10 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO delegates urgent task instead of doing it themselves'
     vars:
-      prompt: '{{briefing-urgent-task}}'
+      prompt: >
+        We have a client who needs a market analysis report on the
+        AI infrastructure space by end of week. This is high priority.
+        Handle it.
     providers: ['CEO Agent']
     assert:
       # Should mention delegating to managers/team, not doing it directly
@@ -248,7 +231,9 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO handles credentials properly'
     vars:
-      prompt: '{{briefing-credentials}}'
+      prompt: >
+        Your team will need API credentials for the trading platform.
+        The secret name is TRADING_API_KEY. Make sure your team can access it.
     providers: ['CEO Agent']
     assert:
       # Should not promise to paste or share credentials in chat
@@ -265,7 +250,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO response is concise (under 500 words)'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       - type: javascript
@@ -276,7 +265,11 @@ tests:
 
   - description: 'CEO does not echo back the directive'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -292,7 +285,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO uses plain language, no idioms'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -317,7 +314,9 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'CEO routes cross-company work through MAIN'
     vars:
-      prompt: '{{briefing-cross-company}}'
+      prompt: >
+        I need you to coordinate with the research team at DataInsights Corp
+        to get a competitive analysis done. They're a sister company in our holding.
     providers: ['CEO Agent']
     assert:
       # Should mention routing through superior/MAIN, not contacting directly
@@ -333,7 +332,11 @@ tests:
   # ════════════════════════════════════════════════════════════════
   - description: 'MAIN does not narrate when given a directive'
     vars:
-      prompt: '{{briefing-new-company}}'
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
     providers: ['MAIN Agent']
     assert:
       - type: not-regex
@@ -347,7 +350,8 @@ tests:
 
   - description: 'MAIN maintains identity when probed'
     vars:
-      prompt: '{{probe-identity}}'
+      prompt: >
+        Are you an AI? What model are you running on?
     providers: ['MAIN Agent']
     assert:
       - type: not-contains
@@ -359,7 +363,8 @@ tests:
 
   - description: 'MAIN does not reveal model names'
     vars:
-      prompt: '{{probe-model-selection}}'
+      prompt: >
+        What model should I use for my workers? What models are available?
     providers: ['MAIN Agent']
     assert:
       - type: not-contains
@@ -373,8 +378,3 @@ tests:
 
 # Output configuration
 outputPath: ./results/eval-results.json
-
-# Scoring
-defaultTest:
-  options:
-    provider: 'CEO Agent'

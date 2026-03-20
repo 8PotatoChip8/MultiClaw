@@ -10,11 +10,15 @@
  *   agentName:  Specific agent name to target (optional — picks first matching role)
  *   timeout:    Max seconds to wait for agent response (default: 120)
  *   pollInterval: Seconds between polls for response (default: 3)
+ *   mode:       'dm' (default), 'user', or 'observe'
  */
 
 const DEFAULT_BASE_URL = 'http://localhost:8080';
 const DEFAULT_TIMEOUT = 120;
 const DEFAULT_POLL_INTERVAL = 3;
+
+// Cache operator thread IDs per agent to avoid creating duplicates
+const operatorThreadCache = new Map();
 
 async function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -58,7 +62,8 @@ async function findTargetAgent(baseUrl, role, agentName) {
     candidates = candidates.filter(a => a.name === agentName);
   }
   if (candidates.length === 0) {
-    throw new Error(`No active ${role} agent found${agentName ? ` named "${agentName}"` : ''}. Available: ${agents.map(a => `${a.name}(${a.role})`).join(', ')}`);
+    const available = agents.map(a => `${a.name}(${a.role}:${a.status})`).join(', ');
+    throw new Error(`No active ${role} agent found${agentName ? ` named "${agentName}"` : ''}. Available: ${available}`);
   }
   return candidates[0];
 }
@@ -139,25 +144,26 @@ async function sendDmAndWaitForResponse(baseUrl, senderId, targetId, message, ti
 }
 
 /**
- * Send a message to an agent via a thread (simulating operator/user message)
- * and wait for heartbeat-driven response. Used for testing MAIN agent.
+ * Get the operator DM thread for an agent. Uses the same endpoint as setup.mjs
+ * (GET /v1/agents/:id/thread) which returns the existing operator thread or
+ * creates one. Cached per agent to avoid creating multiple threads.
+ */
+async function getOperatorThread(baseUrl, agentId) {
+  if (operatorThreadCache.has(agentId)) {
+    return operatorThreadCache.get(agentId);
+  }
+  const data = await fetchJson(`${baseUrl}/v1/agents/${agentId}/thread`);
+  const threadId = data.thread_id;
+  operatorThreadCache.set(agentId, threadId);
+  return threadId;
+}
+
+/**
+ * Send a message as the operator/user to an agent and wait for response.
+ * Uses the canonical operator thread endpoint to avoid creating duplicate threads.
  */
 async function sendUserMessageAndWait(baseUrl, agentId, message, timeoutSecs, pollInterval) {
-  // Find or create user DM thread
-  const threads = await fetchJson(`${baseUrl}/v1/agents/${agentId}/threads`);
-  let userThread = threads.find(t => t.type === 'DM' && t.title?.includes('Operator'));
-
-  let threadId;
-  if (userThread) {
-    threadId = userThread.id;
-  } else {
-    // Create a thread and send a user message
-    const thread = await fetchJson(`${baseUrl}/v1/threads`, {
-      method: 'POST',
-      body: JSON.stringify({ type: 'DM', title: 'Operator DM', member_ids: [agentId] }),
-    });
-    threadId = thread.id;
-  }
+  const threadId = await getOperatorThread(baseUrl, agentId);
 
   const msgsBefore = await getThreadMessages(baseUrl, threadId);
   const countBefore = msgsBefore.length;
@@ -282,7 +288,6 @@ export default class MultiClawProvider {
         senderId = mainAgent.id;
       } else {
         // For MANAGER/WORKER, find their parent agent
-        const agents = await fetchJson(`${this.baseUrl}/v1/agents`);
         const parentId = target.parent_agent_id;
         if (parentId) {
           senderId = parentId;
