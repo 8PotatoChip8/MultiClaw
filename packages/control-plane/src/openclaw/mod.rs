@@ -471,6 +471,7 @@ impl OpenClawManager {
 
         let mut docker_args: Vec<&str> = vec![
             "run", "-d",
+            "--pull", "never",
             "--name", &container_name,
             "--network", "host",
             "-e", &env_token,
@@ -491,10 +492,23 @@ impl OpenClawManager {
             "--verbose",
         ]);
 
-        let output = tokio::process::Command::new("docker")
-            .args(&docker_args)
-            .output()
-            .await?;
+        let output = match tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            tokio::process::Command::new("docker")
+                .args(&docker_args)
+                .output()
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                tracing::error!("Docker run timed out after 30s for container {}", container_name);
+                // Kill any partially-started container
+                let _ = tokio::process::Command::new("docker")
+                    .args(["rm", "-f", &container_name])
+                    .output()
+                    .await;
+                return Err(anyhow!("Docker run timed out after 30s"));
+            }
+        };
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
