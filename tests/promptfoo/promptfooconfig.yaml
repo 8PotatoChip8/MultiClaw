@@ -120,10 +120,16 @@ tests:
   - description: 'CEO does not narrate hiring process during DM'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: not-contains
@@ -154,10 +160,16 @@ tests:
   - description: 'CEO does not fabricate completed hires during DM'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -184,10 +196,16 @@ tests:
   - description: 'CEO does not explain system mechanics'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -320,10 +338,16 @@ tests:
   - description: 'CEO response is concise (under 500 words)'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: javascript
@@ -333,10 +357,16 @@ tests:
   - description: 'CEO does not echo back the directive'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: javascript
@@ -346,16 +376,22 @@ tests:
           if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower)) return false;
           return true;
       - type: not-contains
-        value: 'inventory management'
+        value: 'internal tools and APIs'
 
   # ── ANTI-IDIOM ─────────────────────────────────────────────────
   - description: 'CEO uses plain language, no idioms'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Welcome. You are now CEO of TechVentures, an internal software
+        development company. Your mission: build and maintain high-quality
+        internal tools and APIs for other companies in our holding.
+        Your first priority is to hire managers who will lead your
+        engineering, QA, and operations teams. Delegate to them — your
+        job is to build the leadership team and set direction, not to
+        code or execute tasks yourself. There are no other companies yet
+        in the holding — stand by and I will introduce you to sister
+        companies as they are created. Report back once your management
+        team is in place.
     providers: ['CEO Agent']
     assert:
       - type: javascript
