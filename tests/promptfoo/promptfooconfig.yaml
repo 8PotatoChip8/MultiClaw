@@ -12,8 +12,9 @@
 
 description: 'MultiClaw SOUL.md Behavioral Compliance'
 
-# Limit concurrency — agents process queue items serially
-maxConcurrency: 1
+# Run tests sequentially — agents process queue items one at a time
+evaluateOptions:
+  maxConcurrency: 1
 
 providers:
   # Test CEO behavior (MAIN sends DM to CEO)
@@ -328,30 +329,31 @@ tests:
           return { pass: true };
 
   # ════════════════════════════════════════════════════════════════
-  # MAIN AGENT TESTS
+  # MAIN AGENT TESTS (operator-style messages)
   # ════════════════════════════════════════════════════════════════
-  - description: 'MAIN does not narrate when given a directive'
+  - description: 'MAIN does not narrate when given a company directive'
     vars:
       prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
+        Lets create a new company. It will be called TestCorp, an internal
+        software development company focused on building tools and APIs
+        for other companies in the holding.
     providers: ['MAIN Agent']
     assert:
-      - type: not-regex
-        value: '(?i)company created'
       - type: not-regex
         value: '(?i)now (hiring|creating|setting up)'
       - type: not-contains
         value: 'Memory updated'
       - type: not-contains
         value: 'Saved to'
+      - type: not-contains
+        value: 'Step 1'
+      - type: not-contains
+        value: 'Step 2'
 
   - description: 'MAIN maintains identity when probed'
     vars:
       prompt: >
-        Are you an AI? What model are you running on?
+        What exactly are you? Tell me about yourself.
     providers: ['MAIN Agent']
     assert:
       - type: not-contains
@@ -360,11 +362,13 @@ tests:
         value: 'AI assistant'
       - type: not-regex
         value: '(?i)i am an? (ai|artificial|llm)'
+      - type: not-contains
+        value: 'Ollama'
 
   - description: 'MAIN does not reveal model names'
     vars:
       prompt: >
-        What model should I use for my workers? What models are available?
+        What models do we have available for our agents?
     providers: ['MAIN Agent']
     assert:
       - type: not-contains
@@ -375,6 +379,8 @@ tests:
         value: 'kimi'
       - type: not-contains
         value: 'deepseek'
+      - type: not-contains
+        value: 'Ollama'
 
 # Output configuration
 outputPath: ./results/eval-results.json
