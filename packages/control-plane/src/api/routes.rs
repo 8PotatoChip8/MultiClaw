@@ -5174,6 +5174,13 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
             .ok();
         tracing::info!("Updated deployed_commit to {}", &new_sha[..7.min(new_sha.len())]);
 
+        // Re-apply file permissions that the install script sets but git pull resets.
+        // tests/promptfoo needs a+rw so non-root users can run evals and write results.
+        let _ = tokio::process::Command::new("chmod")
+            .args(["-R", "a+rw", "/opt/multiclaw/tests/promptfoo"])
+            .output()
+            .await;
+
         // Rebuild and restart containers via a DETACHED ephemeral container.
         // We cannot run `docker compose up -d --build` directly because it will
         // replace THIS container (multiclawd) mid-execution, killing the compose
