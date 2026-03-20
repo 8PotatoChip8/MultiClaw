@@ -63,23 +63,62 @@ function UpdateBanner() {
                 method: 'POST',
                 headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' }
             });
-            setStatus('Containers rebuilding — will reload when ready...');
-            // Poll /v1/health until the new server is up (instead of blind 30s timeout)
-            setTimeout(async () => {
-                for (let i = 0; i < 120; i++) {
-                    await new Promise(r => setTimeout(r, 2000));
+            setStatus('Pulling update — waiting for rebuild...');
+            // The updater rebuilds containers, which kills the current multiclawd.
+            // Strategy: remember current commit, wait for server to come back with a DIFFERENT commit.
+            let oldCommit: string | null = null;
+            try {
+                const info = await fetch(`${apiUrl}/system/update-check`, {
+                    headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                    signal: AbortSignal.timeout(3000),
+                }).then(r => r.json());
+                oldCommit = info?.current_version || null;
+            } catch { /* ok, will fall back to down-then-up detection */ }
+
+            // Phase 1: Wait for server to go down (rebuild kills multiclawd) — up to 5 minutes
+            let wentDown = false;
+            for (let i = 0; i < 150; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const resp = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
+                    if (!resp.ok) { wentDown = true; break; }
+                } catch { wentDown = true; break; }
+            }
+            if (!wentDown) {
+                // Server never went down — check if commit changed anyway (in-place update edge case)
+                if (oldCommit) {
                     try {
-                        const resp = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
-                        if (resp.ok) {
+                        const info = await fetch(`${apiUrl}/system/update-check`, {
+                            headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json' },
+                            signal: AbortSignal.timeout(3000),
+                        }).then(r => r.json());
+                        if (info?.current_version && info.current_version !== oldCommit) {
                             setStatus('Update complete! Reloading...');
                             setTimeout(() => window.location.reload(), 1500);
                             return;
                         }
-                    } catch { /* server not up yet */ }
+                    } catch { }
                 }
-                setStatus('Server not responding after 4 minutes — update may have failed.');
+                setStatus('Server did not restart after 5 minutes — update may have failed.');
                 setUpdating(false);
-            }, 5000);
+                return;
+            }
+
+            // Phase 2: Server is down — wait for it to come back (up to 5 more minutes)
+            setStatus('Containers rebuilding — will reload when ready...');
+            for (let i = 0; i < 150; i++) {
+                await new Promise(r => setTimeout(r, 2000));
+                try {
+                    const resp = await fetch(`${apiUrl}/health`, { signal: AbortSignal.timeout(2000) });
+                    if (resp.ok) {
+                        setStatus('Update complete! Reloading...');
+                        setTimeout(() => window.location.reload(), 1500);
+                        return;
+                    }
+                } catch { /* server not up yet */ }
+            }
+            setStatus('Server not responding after rebuild — update may have failed.');
+            setUpdating(false);
         } catch {
             setStatus('Failed to start update');
             setUpdating(false);
