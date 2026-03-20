@@ -5993,6 +5993,13 @@ async fn system_reset(
         instances.clear();
     }
 
+    // Preserve system settings that should survive a reset (update channel, deployed commit, etc.)
+    let preserved_keys = ["update_channel", "deployed_commit", "heartbeat_interval_secs",
+                          "rewrite_model", "recovery_prompts_enabled", "concurrency_probe_interval_secs"];
+    let preserved: Vec<(String, String)> = sqlx::query_as(
+        "SELECT key, value FROM system_meta WHERE key = ANY($1)"
+    ).bind(&preserved_keys[..]).fetch_all(&state.db).await.unwrap_or_default();
+
     // Step 2: Truncate all tables (CASCADE handles foreign keys)
     let truncate_result = sqlx::query(
         "DO $$ DECLARE r RECORD;
@@ -6091,6 +6098,17 @@ async fn system_reset(
     let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('available_models', $1) ON CONFLICT (key) DO NOTHING")
         .bind(serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default())
         .execute(&state.db).await;
+
+    // Restore preserved system settings
+    for (key, value) in &preserved {
+        let _ = sqlx::query(
+            "INSERT INTO system_meta (key, value, updated_at) VALUES ($1, $2, NOW()) ON CONFLICT (key) DO UPDATE SET value = $2, updated_at = NOW()"
+        ).bind(key).bind(value).execute(&state.db).await;
+    }
+    if !preserved.is_empty() {
+        let keys: Vec<&str> = preserved.iter().map(|(k, _)| k.as_str()).collect();
+        tracing::info!("Restored preserved settings: {:?}", keys);
+    }
 
     tracing::info!("System reset complete. New holding '{}' with MainAgent '{}'", holding_name, agent_name);
     (StatusCode::OK, Json(json!({
