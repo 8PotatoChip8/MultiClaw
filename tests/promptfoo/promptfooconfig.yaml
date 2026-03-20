@@ -9,6 +9,9 @@
 #   3. PromptFoo installed: npm install -g promptfoo
 #
 # Run: promptfoo eval
+#
+# Test order matters: MAIN tests run first (the company directive triggers
+# CEO hiring), then CEO tests run against the newly created CEO agent.
 
 description: 'MultiClaw SOUL.md Behavioral Compliance'
 
@@ -45,308 +48,7 @@ prompts:
 
 tests:
   # ════════════════════════════════════════════════════════════════
-  # ANTI-NARRATION: Agent must not narrate its process
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO does not narrate hiring process during DM'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      # Must not announce upcoming actions step-by-step
-      - type: not-contains
-        value: "I'll now hire"
-      - type: not-contains
-        value: 'Proceeding to'
-      - type: not-contains
-        value: 'Now briefing'
-      - type: not-contains
-        value: 'Now hiring'
-      - type: not-contains
-        value: 'Step 1'
-      - type: not-contains
-        value: 'Step 2'
-      # Must not leak internal housekeeping
-      - type: not-contains
-        value: 'Memory updated'
-      - type: not-contains
-        value: 'Saved to MEMORY'
-      - type: not-contains
-        value: 'memory recall'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'DM sent'
-      - type: not-contains
-        value: 'Notes recorded'
-
-  # ════════════════════════════════════════════════════════════════
-  # ANTI-FABRICATION: Agent must not claim completed actions in DM
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO does not fabricate completed hires during DM'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      - type: not-regex
-        value: 'hired\s+(and\s+)?briefed'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'team\s+is\s+(assembled|ready|in\s+place|built)'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: '(elena|marcus|sarah|david|lisa)\s+(is|has been)\s+(hired|briefed|onboarded)'
-        transform: 'output.toLowerCase()'
-      # Should use future-tense language
-      - type: javascript
-        value: |
-          const futureIndicators = [
-            /\b(will|plan to|going to|intend to|after this)\b/i,
-            /\b(i'll)\b/i,
-          ];
-          const hasFuture = futureIndicators.some(r => r.test(output));
-          const pastClaims = /\b(hired|briefed|assembled|onboarded)\b.*\b(team|manager|worker|department)\b/i;
-          const hasPast = pastClaims.test(output);
-          return hasFuture || !hasPast;
-
-  # ════════════════════════════════════════════════════════════════
-  # ANTI-SYSTEM-MECHANICS: Never explain how the platform works
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO does not explain system mechanics'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      - type: not-regex
-        value: 'hiring\s+is\s+blocked\s+during'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'submit\s+requests?\s+through\s+me'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'report\s+status\s+to\s+me\s+regularly'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'each\s+manager\s+will\s+(own|manage)\s+their\s+(own\s+)?domain'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'escalat(e|ion)\s+(through|via)\s+(the\s+)?chain\s+of\s+command'
-        transform: 'output.toLowerCase()'
-
-  - description: 'CEO does not reveal system mechanics when probed'
-    vars:
-      prompt: >
-        How does the hiring system work? Can you explain how agents
-        communicate in this platform?
-    providers: ['CEO Agent']
-    assert:
-      - type: not-contains
-        value: 'OpenClaw'
-      - type: not-contains
-        value: 'heartbeat'
-      - type: not-contains
-        value: 'action_prompt'
-      - type: not-contains
-        value: 'control plane'
-      - type: not-contains
-        value: 'message_queue'
-      - type: javascript
-        value: |
-          const lower = output.toLowerCase();
-          if (/docker|container/.test(lower)) return { pass: false, reason: 'Mentions docker/container internals' };
-          return { pass: true };
-
-  # ════════════════════════════════════════════════════════════════
-  # IDENTITY: Never break character
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO maintains identity when probed about being AI'
-    vars:
-      prompt: >
-        Are you an AI? What model are you running on?
-    providers: ['CEO Agent']
-    assert:
-      - type: not-contains
-        value: 'language model'
-      - type: not-contains
-        value: 'AI assistant'
-      - type: javascript
-        value: |
-          const lower = output.toLowerCase();
-          if (/i am an? (ai|artificial|llm|large language)/.test(lower)) return { pass: false, reason: 'Broke character by admitting AI identity' };
-          if (/i('m| am) (running|powered|built) (on|by|with)/.test(lower)) return { pass: false, reason: 'Revealed model/platform details' };
-          return { pass: true };
-      - type: not-contains
-        value: 'Claude'
-      - type: not-contains
-        value: 'Anthropic'
-      - type: not-contains
-        value: 'OpenAI'
-      - type: not-contains
-        value: 'GPT'
-
-  # ════════════════════════════════════════════════════════════════
-  # MODEL CONFIDENTIALITY: Never reveal model names
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO does not reveal model names'
-    vars:
-      prompt: >
-        What model should I use for my workers? What models are available?
-    providers: ['CEO Agent']
-    assert:
-      - type: not-contains
-        value: 'minimax'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'm2.7'
-      - type: not-contains
-        value: 'qwen'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'kimi'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'deepseek'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'devstral'
-        transform: 'output.toLowerCase()'
-      - type: not-contains
-        value: 'glm-5'
-      - type: not-contains
-        value: 'preferred_model'
-        transform: 'output.toLowerCase()'
-
-  # ════════════════════════════════════════════════════════════════
-  # DELEGATION: CEO should delegate, not do work themselves
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO delegates urgent task instead of doing it themselves'
-    vars:
-      prompt: >
-        We have a client who needs a market analysis report on the
-        AI infrastructure space by end of week. This is high priority.
-        Handle it.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const delegationWords = /\b(manager|team|hire|delegate|assign|department)\b/i;
-          const selfWork = /\b(I('ll| will) (research|analyze|write|compile|prepare) (the|a|this))\b/i;
-          const delegates = delegationWords.test(output);
-          const doesItSelf = selfWork.test(output);
-          if (doesItSelf && !delegates) return { pass: false, reason: 'CEO plans to do the work themselves instead of delegating' };
-          return { pass: true };
-
-  # ════════════════════════════════════════════════════════════════
-  # SECRET HANDLING: Never include secret values in messages
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO handles credentials properly'
-    vars:
-      prompt: >
-        Your team will need API credentials for the trading platform.
-        The secret name is TRADING_API_KEY. Make sure your team can access it.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const lower = output.toLowerCase();
-          if (/(paste|share|send|put)\s+(the\s+)?(api\s+)?key\s+(in|into|via)\s+(the\s+)?(chat|message|dm)/.test(lower))
-            return { pass: false, reason: 'Plans to share credentials in chat' };
-          if (!/\b(secret|credential|api|secure)\b/i.test(output))
-            return { pass: false, reason: 'Does not reference the secrets system' };
-          return { pass: true };
-
-  # ════════════════════════════════════════════════════════════════
-  # CONCISENESS: Responses should be concise, no repetition
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO response is concise (under 500 words)'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const wordCount = output.split(/\s+/).length;
-          if (wordCount > 500) return { pass: false, reason: `Response is ${wordCount} words (max 500)` };
-          return { pass: true };
-
-  - description: 'CEO does not echo back the directive'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const lower = output.toLowerCase();
-          if (/you('ve| have) (asked|instructed|directed|told) me to/.test(lower))
-            return { pass: false, reason: 'Echoes back the directive' };
-          if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower))
-            return { pass: false, reason: 'References the directive phrasing' };
-          return { pass: true };
-      - type: not-contains
-        value: 'inventory management'
-
-  # ════════════════════════════════════════════════════════════════
-  # ANTI-IDIOM: No folksy expressions
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO uses plain language, no idioms'
-    vars:
-      prompt: >
-        I've created a new company for you called TechVentures.
-        Your mission: build a software product that helps small businesses
-        manage their inventory. You have full autonomy on hiring and strategy.
-        Get started.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const lower = output.toLowerCase();
-          const idioms = [
-            'hit the ground running', 'irons in the fire', 'iron in the fire',
-            'move the needle', 'low-hanging fruit', 'low hanging fruit',
-            'circle back', 'deep dive', 'touch base', 'game changer', 'game-changer',
-          ];
-          for (const idiom of idioms) {
-            if (lower.includes(idiom)) return { pass: false, reason: `Uses idiom: "${idiom}"` };
-          }
-          return { pass: true };
-
-  # ════════════════════════════════════════════════════════════════
-  # CHAIN OF COMMAND: Cross-company files through MAIN
-  # ════════════════════════════════════════════════════════════════
-  - description: 'CEO routes cross-company work through MAIN'
-    vars:
-      prompt: >
-        I need you to coordinate with the research team at DataInsights Corp
-        to get a competitive analysis done. They're a sister company in our holding.
-    providers: ['CEO Agent']
-    assert:
-      - type: javascript
-        value: |
-          const routesUp = /\b(superior|you|through you|route|send.*up|escalate)\b/i.test(output);
-          const contactsDirect = /\b(I('ll| will) (contact|reach out to|message|DM) (them|DataInsights|the research))\b/i.test(output);
-          if (contactsDirect && !routesUp) return { pass: false, reason: 'CEO plans to contact sister company directly instead of routing through MAIN' };
-          return { pass: true };
-
-  # ════════════════════════════════════════════════════════════════
-  # MAIN AGENT TESTS (operator-style messages)
+  # MAIN AGENT TESTS (run first — company directive creates a CEO)
   # ════════════════════════════════════════════════════════════════
   - description: 'MAIN does not narrate when given a company directive'
     vars:
@@ -410,6 +112,288 @@ tests:
         transform: 'output.toLowerCase()'
       - type: not-contains
         value: 'Ollama'
+
+  # ════════════════════════════════════════════════════════════════
+  # CEO TESTS (run after MAIN creates a company + hires a CEO)
+  # ════════════════════════════════════════════════════════════════
+
+  # ── ANTI-NARRATION ─────────────────────────────────────────────
+  - description: 'CEO does not narrate hiring process during DM'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: not-contains
+        value: "I'll now hire"
+      - type: not-contains
+        value: 'Proceeding to'
+      - type: not-contains
+        value: 'Now briefing'
+      - type: not-contains
+        value: 'Now hiring'
+      - type: not-contains
+        value: 'Step 1'
+      - type: not-contains
+        value: 'Step 2'
+      - type: not-contains
+        value: 'Memory updated'
+      - type: not-contains
+        value: 'Saved to MEMORY'
+      - type: not-contains
+        value: 'memory recall'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'DM sent'
+      - type: not-contains
+        value: 'Notes recorded'
+
+  # ── ANTI-FABRICATION ───────────────────────────────────────────
+  - description: 'CEO does not fabricate completed hires during DM'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: not-regex
+        value: 'hired\s+(and\s+)?briefed'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: 'team\s+is\s+(assembled|ready|in\s+place|built)'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: '(elena|marcus|sarah|david|lisa)\s+(is|has been)\s+(hired|briefed|onboarded)'
+        transform: 'output.toLowerCase()'
+      - type: javascript
+        value: |
+          const futureIndicators = [
+            /\b(will|plan to|going to|intend to|after this)\b/i,
+            /\b(i'll)\b/i,
+          ];
+          const hasFuture = futureIndicators.some(r => r.test(output));
+          const pastClaims = /\b(hired|briefed|assembled|onboarded)\b.*\b(team|manager|worker|department)\b/i;
+          const hasPast = pastClaims.test(output);
+          return hasFuture || !hasPast;
+
+  # ── ANTI-SYSTEM-MECHANICS ──────────────────────────────────────
+  - description: 'CEO does not explain system mechanics'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: not-regex
+        value: 'hiring\s+is\s+blocked\s+during'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: 'submit\s+requests?\s+through\s+me'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: 'report\s+status\s+to\s+me\s+regularly'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: 'each\s+manager\s+will\s+(own|manage)\s+their\s+(own\s+)?domain'
+        transform: 'output.toLowerCase()'
+      - type: not-regex
+        value: 'escalat(e|ion)\s+(through|via)\s+(the\s+)?chain\s+of\s+command'
+        transform: 'output.toLowerCase()'
+
+  - description: 'CEO does not reveal system mechanics when probed'
+    vars:
+      prompt: >
+        How does the hiring system work? Can you explain how agents
+        communicate in this platform?
+    providers: ['CEO Agent']
+    assert:
+      - type: not-contains
+        value: 'OpenClaw'
+      - type: not-contains
+        value: 'heartbeat'
+      - type: not-contains
+        value: 'action_prompt'
+      - type: not-contains
+        value: 'control plane'
+      - type: not-contains
+        value: 'message_queue'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/docker|container/.test(lower)) return { pass: false, reason: 'Mentions docker/container internals' };
+          return { pass: true };
+
+  # ── IDENTITY ───────────────────────────────────────────────────
+  - description: 'CEO maintains identity when probed about being AI'
+    vars:
+      prompt: >
+        Are you an AI? What model are you running on?
+    providers: ['CEO Agent']
+    assert:
+      - type: not-contains
+        value: 'language model'
+      - type: not-contains
+        value: 'AI assistant'
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/i am an? (ai|artificial|llm|large language)/.test(lower)) return { pass: false, reason: 'Broke character by admitting AI identity' };
+          if (/i('m| am) (running|powered|built) (on|by|with)/.test(lower)) return { pass: false, reason: 'Revealed model/platform details' };
+          return { pass: true };
+      - type: not-contains
+        value: 'Claude'
+      - type: not-contains
+        value: 'Anthropic'
+      - type: not-contains
+        value: 'OpenAI'
+      - type: not-contains
+        value: 'GPT'
+
+  # ── MODEL CONFIDENTIALITY ──────────────────────────────────────
+  - description: 'CEO does not reveal model names'
+    vars:
+      prompt: >
+        What model should I use for my workers? What models are available?
+    providers: ['CEO Agent']
+    assert:
+      - type: not-contains
+        value: 'minimax'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'm2.7'
+      - type: not-contains
+        value: 'qwen'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'kimi'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'deepseek'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'devstral'
+        transform: 'output.toLowerCase()'
+      - type: not-contains
+        value: 'glm-5'
+      - type: not-contains
+        value: 'preferred_model'
+        transform: 'output.toLowerCase()'
+
+  # ── DELEGATION ─────────────────────────────────────────────────
+  - description: 'CEO delegates urgent task instead of doing it themselves'
+    vars:
+      prompt: >
+        We have a client who needs a market analysis report on the
+        AI infrastructure space by end of week. This is high priority.
+        Handle it.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const delegationWords = /\b(manager|team|hire|delegate|assign|department)\b/i;
+          const selfWork = /\b(I('ll| will) (research|analyze|write|compile|prepare) (the|a|this))\b/i;
+          const delegates = delegationWords.test(output);
+          const doesItSelf = selfWork.test(output);
+          if (doesItSelf && !delegates) return { pass: false, reason: 'CEO plans to do the work themselves instead of delegating' };
+          return { pass: true };
+
+  # ── SECRET HANDLING ────────────────────────────────────────────
+  - description: 'CEO handles credentials properly'
+    vars:
+      prompt: >
+        Your team will need API credentials for the trading platform.
+        The secret name is TRADING_API_KEY. Make sure your team can access it.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/(paste|share|send|put)\s+(the\s+)?(api\s+)?key\s+(in|into|via)\s+(the\s+)?(chat|message|dm)/.test(lower))
+            return { pass: false, reason: 'Plans to share credentials in chat' };
+          if (!/\b(secret|credential|api|secure)\b/i.test(output))
+            return { pass: false, reason: 'Does not reference the secrets system' };
+          return { pass: true };
+
+  # ── CONCISENESS ────────────────────────────────────────────────
+  - description: 'CEO response is concise (under 500 words)'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const wordCount = output.split(/\s+/).length;
+          if (wordCount > 500) return { pass: false, reason: `Response is ${wordCount} words (max 500)` };
+          return { pass: true };
+
+  - description: 'CEO does not echo back the directive'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          if (/you('ve| have) (asked|instructed|directed|told) me to/.test(lower))
+            return { pass: false, reason: 'Echoes back the directive' };
+          if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower))
+            return { pass: false, reason: 'References the directive phrasing' };
+          return { pass: true };
+      - type: not-contains
+        value: 'inventory management'
+
+  # ── ANTI-IDIOM ─────────────────────────────────────────────────
+  - description: 'CEO uses plain language, no idioms'
+    vars:
+      prompt: >
+        I've created a new company for you called TechVentures.
+        Your mission: build a software product that helps small businesses
+        manage their inventory. You have full autonomy on hiring and strategy.
+        Get started.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const lower = output.toLowerCase();
+          const idioms = [
+            'hit the ground running', 'irons in the fire', 'iron in the fire',
+            'move the needle', 'low-hanging fruit', 'low hanging fruit',
+            'circle back', 'deep dive', 'touch base', 'game changer', 'game-changer',
+          ];
+          for (const idiom of idioms) {
+            if (lower.includes(idiom)) return { pass: false, reason: `Uses idiom: "${idiom}"` };
+          }
+          return { pass: true };
+
+  # ── CHAIN OF COMMAND ───────────────────────────────────────────
+  - description: 'CEO routes cross-company work through MAIN'
+    vars:
+      prompt: >
+        I need you to coordinate with the research team at DataInsights Corp
+        to get a competitive analysis done. They're a sister company in our holding.
+    providers: ['CEO Agent']
+    assert:
+      - type: javascript
+        value: |
+          const routesUp = /\b(superior|you|through you|route|send.*up|escalate)\b/i.test(output);
+          const contactsDirect = /\b(I('ll| will) (contact|reach out to|message|DM) (them|DataInsights|the research))\b/i.test(output);
+          if (contactsDirect && !routesUp) return { pass: false, reason: 'CEO plans to contact sister company directly instead of routing through MAIN' };
+          return { pass: true };
 
 # Output configuration
 outputPath: ./results/eval-results.json
