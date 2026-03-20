@@ -28,11 +28,6 @@ Tests SOUL.md behavioral compliance by sending messages to live MultiClaw agents
    docker compose up -d
    ```
 
-3. **psql** available (for database reset):
-   ```bash
-   sudo apt install postgresql-client
-   ```
-
 ## Quick Start
 
 ```bash
@@ -41,28 +36,27 @@ cd tests/promptfoo
 ```
 
 This will:
-1. Wipe the database and stop all OpenClaw containers
-2. Initialize a fresh holding with a MAIN agent
-3. Wait for the MAIN agent to hire a CEO and the CEO to hire managers
+1. Reset the holding via the API (wipes DB, stops containers, reinitializes)
+2. Wait for the MAIN agent to boot and hire a CEO
+3. Wait for the CEO to hire managers
 4. Run all behavioral tests against live agents
 5. Save results to `results/eval-results.json`
 
 ## Usage
 
 ```bash
-# Full run (teardown → setup → eval)
+# Full run (reset → setup → eval)
 ./run.sh
 
-# Run eval against an existing holding (no teardown)
+# Run eval against an existing holding (no reset)
 ./run.sh --skip-setup
 
 # Only set up a fresh holding (no eval)
 ./run.sh --setup-only
 
 # Setup script directly
-node setup.mjs              # Full setup
-node setup.mjs --quick      # Init only, don't wait for org tree
-node setup.mjs --teardown   # Cleanup only
+node setup.mjs              # Full setup (reset + wait for org tree)
+node setup.mjs --quick      # Reset + wait for MAIN only, skip org tree
 node setup.mjs --status     # Show current agents
 ```
 
@@ -78,7 +72,6 @@ Edit `promptfooconfig.yaml` to:
 | Variable | Default | Description |
 |---|---|---|
 | `MULTICLAW_URL` | `http://localhost:8080` | Control plane URL |
-| `MULTICLAW_DB_URL` | `postgresql://multiclaw:multiclaw_pass@localhost:5432/multiclaw` | Postgres connection |
 
 ## Viewing Results
 

@@ -4,26 +4,21 @@
  * MultiClaw PromptFoo Test Setup
  *
  * Prepares a fresh holding for PromptFoo evaluation:
- *   1. Wipes existing database state (drops and recreates tables)
- *   2. Stops all existing OpenClaw containers
- *   3. Initializes a new holding via POST /v1/install/init
- *   4. Waits for the MAIN agent to boot and become responsive
- *   5. Waits for MAIN to hire at least one CEO (organic behavior)
- *   6. Optionally waits for the CEO to hire managers
+ *   1. Calls POST /v1/system/reset to wipe everything and reinitialize
+ *   2. Waits for the MAIN agent to boot and become responsive
+ *   3. Waits for MAIN to hire at least one CEO (organic behavior)
+ *   4. Optionally waits for the CEO to hire managers
  *
  * Usage:
- *   node setup.mjs                    # Full setup: init + wait for CEO
- *   node setup.mjs --quick            # Just init, don't wait for org tree
- *   node setup.mjs --teardown         # Cleanup only (stop containers, wipe DB)
+ *   node setup.mjs                    # Full setup: reset + wait for CEO
+ *   node setup.mjs --quick            # Just reset, don't wait for org tree
  *   node setup.mjs --status           # Show current holding status
  *
  * Environment variables:
  *   MULTICLAW_URL    Control plane URL (default: http://localhost:8080)
- *   MULTICLAW_DB_URL Postgres connection string (default: postgresql://multiclaw:multiclaw_pass@localhost:5432/multiclaw)
  */
 
 const BASE_URL = process.env.MULTICLAW_URL || 'http://localhost:8080';
-const DB_URL = process.env.MULTICLAW_DB_URL || 'postgresql://multiclaw:multiclaw_pass@localhost:5432/multiclaw';
 
 // How long to wait for various stages (seconds)
 const MAIN_BOOT_TIMEOUT = 180;
@@ -45,76 +40,6 @@ async function fetchJson(url, options = {}) {
     return { status: res.status, data: JSON.parse(text) };
   } catch {
     return { status: res.status, data: { raw: text } };
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Database Operations
-// ═══════════════════════════════════════════════════════════════
-
-/**
- * Wipe all data from the database. Uses psql directly since we can't
- * import pg in a zero-dependency script.
- */
-async function wipeDatabase() {
-  const { execSync } = await import('child_process');
-
-  console.log('  Wiping database...');
-
-  // Parse DB URL for psql
-  const url = new URL(DB_URL);
-  const env = {
-    ...process.env,
-    PGHOST: url.hostname,
-    PGPORT: url.port || '5432',
-    PGUSER: url.username,
-    PGPASSWORD: url.password,
-    PGDATABASE: url.pathname.slice(1),
-  };
-
-  const sql = `
-    DO $$ DECLARE r RECORD;
-    BEGIN
-      FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
-        EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE';
-      END LOOP;
-    END $$;
-  `;
-
-  try {
-    execSync(`psql -c "${sql.replace(/"/g, '\\"')}"`, { env, stdio: 'pipe' });
-    console.log('  Database wiped.');
-  } catch (err) {
-    console.error('  Failed to wipe database:', err.message);
-    console.error('  Make sure psql is installed and the database is reachable.');
-    process.exit(1);
-  }
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Container Operations
-// ═══════════════════════════════════════════════════════════════
-
-async function stopAllOpenClawContainers() {
-  const { execSync } = await import('child_process');
-
-  console.log('  Stopping OpenClaw containers...');
-  try {
-    const containers = execSync(
-      'docker ps -a --filter "name=openclaw-" --format "{{.Names}}"',
-      { encoding: 'utf-8' }
-    ).trim();
-
-    if (containers) {
-      const names = containers.split('\n').filter(Boolean);
-      console.log(`  Found ${names.length} OpenClaw container(s) to stop.`);
-      execSync(`docker rm -f ${names.join(' ')}`, { stdio: 'pipe' });
-      console.log('  Containers stopped.');
-    } else {
-      console.log('  No OpenClaw containers running.');
-    }
-  } catch (err) {
-    console.warn('  Warning: could not stop containers:', err.message);
   }
 }
 
@@ -164,12 +89,12 @@ async function printStatus() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Initialization
+// Reset via API
 // ═══════════════════════════════════════════════════════════════
 
-async function initHolding() {
-  console.log('  Initializing new holding...');
-  const { status, data } = await fetchJson(`${BASE_URL}/v1/install/init`, {
+async function resetHolding() {
+  console.log('  Resetting via POST /v1/system/reset...');
+  const { status, data } = await fetchJson(`${BASE_URL}/v1/system/reset`, {
     method: 'POST',
     body: JSON.stringify({
       holding_name: 'PromptFoo Test Holding',
@@ -177,14 +102,17 @@ async function initHolding() {
     }),
   });
 
-  if (data.status === 'already_initialized') {
-    console.log('  Holding already initialized — skipping (use --teardown first for a clean slate).');
-    return false;
+  if (status !== 200 || data.status !== 'reset_complete') {
+    throw new Error(`Reset failed: ${JSON.stringify(data)}`);
   }
 
-  console.log('  Holding initialized.');
-  return true;
+  console.log(`  Reset complete. Holding "${data.holding_name}" created with agent "${data.main_agent_name}".`);
+  return data;
 }
+
+// ═══════════════════════════════════════════════════════════════
+// Wait for Agents
+// ═══════════════════════════════════════════════════════════════
 
 async function waitForMainAgent() {
   console.log(`  Waiting for MAIN agent to boot (up to ${MAIN_BOOT_TIMEOUT}s)...`);
@@ -242,41 +170,29 @@ async function waitForManager() {
 // Main
 // ═══════════════════════════════════════════════════════════════
 
-async function teardown() {
-  console.log('\n=== MultiClaw Teardown ===\n');
-  await stopAllOpenClawContainers();
-  await wipeDatabase();
-  console.log('\nTeardown complete.\n');
-}
-
 async function setup(quick = false) {
   console.log('\n=== MultiClaw PromptFoo Setup ===\n');
 
-  // Step 1: Teardown existing state
-  console.log('[1/5] Cleaning previous state...');
-  await stopAllOpenClawContainers();
-  await wipeDatabase();
-
-  // Step 2: Wait for control plane
-  console.log('[2/5] Checking control plane...');
+  // Step 1: Check control plane is up
+  console.log('[1/4] Checking control plane...');
   await waitForHealthy();
 
-  // Step 3: Init holding
-  console.log('[3/5] Creating fresh holding...');
-  await initHolding();
+  // Step 2: Reset everything via API
+  console.log('[2/4] Resetting holding (wipe + reinitialize)...');
+  await resetHolding();
 
-  // Step 4: Wait for MAIN
-  console.log('[4/5] Waiting for MAIN agent...');
+  // Step 3: Wait for MAIN
+  console.log('[3/4] Waiting for MAIN agent...');
   await waitForMainAgent();
 
   if (quick) {
-    console.log('[5/5] Quick mode — skipping org tree wait.\n');
+    console.log('[4/4] Quick mode — skipping org tree wait.\n');
     console.log('Setup complete (quick mode). MAIN agent is ready.\n');
     return;
   }
 
-  // Step 5: Wait for org tree to populate
-  console.log('[5/5] Waiting for org tree...');
+  // Step 4: Wait for org tree to populate
+  console.log('[4/4] Waiting for org tree...');
   await waitForCeo();
   await waitForManager();
 
@@ -289,9 +205,7 @@ async function setup(quick = false) {
 // CLI
 const args = process.argv.slice(2);
 
-if (args.includes('--teardown')) {
-  teardown().catch(err => { console.error(err); process.exit(1); });
-} else if (args.includes('--status')) {
+if (args.includes('--status')) {
   printStatus().catch(err => { console.error(err); process.exit(1); });
 } else {
   const quick = args.includes('--quick');

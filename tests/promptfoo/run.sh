@@ -4,11 +4,10 @@ set -euo pipefail
 # MultiClaw PromptFoo Evaluation Runner
 #
 # One-command script to:
-#   1. Teardown any existing holding
-#   2. Initialize a fresh holding
-#   3. Wait for agents to boot and org tree to populate
-#   4. Run PromptFoo evaluation
-#   5. Show results
+#   1. Reset the holding via API (wipe + reinitialize)
+#   2. Wait for agents to boot and org tree to populate
+#   3. Run PromptFoo evaluation
+#   4. Show results
 #
 # Usage:
 #   ./run.sh              # Full run (setup + eval + results)
@@ -29,12 +28,11 @@ for arg in "$@"; do
     --help|-h)
       echo "Usage: $0 [--skip-setup] [--setup-only]"
       echo ""
-      echo "  --skip-setup  Run eval against existing holding (no teardown/init)"
+      echo "  --skip-setup  Run eval against existing holding (no reset)"
       echo "  --setup-only  Only set up a fresh holding, don't run eval"
       echo ""
       echo "Environment:"
       echo "  MULTICLAW_URL     Control plane URL (default: http://localhost:8080)"
-      echo "  MULTICLAW_DB_URL  Postgres URL (default: postgresql://multiclaw:multiclaw_pass@localhost:5432/multiclaw)"
       exit 0
       ;;
   esac
