@@ -154,6 +154,11 @@ export const api = {
     updateSettings: (data: Record<string, string>) =>
         request('/system/settings', { method: 'PUT', body: JSON.stringify(data) }),
 
+    // Holding Config & Reset
+    getHoldingConfig: () => request('/system/holding'),
+    systemReset: (data: { holding_name?: string; main_agent_name?: string; default_model?: string }) =>
+        request('/system/reset', { method: 'POST', body: JSON.stringify(data) }),
+
     // Rewrite
     rewrite: (data: { text: string; model?: string }) =>
         request('/rewrite', { method: 'POST', body: JSON.stringify(data) }),

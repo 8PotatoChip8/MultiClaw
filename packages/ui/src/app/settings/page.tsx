@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useState } from 'react';
 import { api } from '../../lib/api';
-import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart, Cpu, X, Star, Plus, Sparkles } from 'lucide-react';
+import { Settings as SettingsIcon, ArrowUpCircle, Check, Info, Shield, GitBranch, Zap, Heart, Cpu, X, Star, Plus, Sparkles, Trash2, AlertTriangle } from 'lucide-react';
 
 type Channel = 'stable' | 'beta' | 'dev';
 
@@ -31,6 +31,21 @@ export default function SettingsPage() {
     const [rewriteSaving, setRewriteSaving] = useState(false);
     const [rewriteSaved, setRewriteSaved] = useState(false);
 
+    // Reset / Wipe state
+    const [holdingConfig, setHoldingConfig] = useState<{
+        initialized: boolean;
+        holding_name?: string;
+        main_agent_name?: string;
+        default_model?: string;
+    }>({ initialized: false });
+    const [resetHoldingName, setResetHoldingName] = useState('');
+    const [resetAgentName, setResetAgentName] = useState('');
+    const [resetModel, setResetModel] = useState('');
+    const [showResetModal, setShowResetModal] = useState(false);
+    const [resetConfirmText, setResetConfirmText] = useState('');
+    const [resetting, setResetting] = useState(false);
+    const [resetError, setResetError] = useState('');
+
     useEffect(() => {
         api.getSettings().then(data => {
             if (data && typeof data === 'object') {
@@ -43,6 +58,14 @@ export default function SettingsPage() {
         api.getModels().then(data => {
             if (data?.models) setModels(data.models);
             if (data?.default) setDefaultModel(data.default);
+        });
+        api.getHoldingConfig().then(data => {
+            if (data && typeof data === 'object') {
+                setHoldingConfig(data);
+                if (data.holding_name) setResetHoldingName(data.holding_name);
+                if (data.main_agent_name) setResetAgentName(data.main_agent_name);
+                if (data.default_model) setResetModel(data.default_model);
+            }
         });
     }, []);
 
@@ -485,7 +508,7 @@ export default function SettingsPage() {
             </div>
 
             {/* System Info */}
-            <div className="panel" style={{ maxWidth: '700px' }}>
+            <div className="panel" style={{ maxWidth: '700px', marginBottom: '24px' }}>
                 <h2 style={{ fontSize: '18px', fontWeight: 600, marginBottom: '12px' }}>System Info</h2>
                 <div style={{ display: 'grid', gridTemplateColumns: '140px 1fr', gap: '8px', fontSize: '13px' }}>
                     <span style={{ color: 'var(--text-muted)' }}>Version:</span>
@@ -494,6 +517,263 @@ export default function SettingsPage() {
                     <span>{channelInfo[selectedChannel]?.label}</span>
                 </div>
             </div>
+
+            {/* Reset / Wipe Holding */}
+            <div className="panel" style={{
+                maxWidth: '700px',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                background: 'linear-gradient(135deg, rgba(239,68,68,0.03), rgba(239,68,68,0.01))',
+            }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '4px' }}>
+                    <div style={{
+                        width: '36px', height: '36px', borderRadius: '8px',
+                        background: 'rgba(239,68,68,0.15)', display: 'flex',
+                        alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                    }}>
+                        <Trash2 size={18} style={{ color: '#ef4444' }} />
+                    </div>
+                    <div>
+                        <h2 style={{ fontSize: '18px', fontWeight: 600, color: '#ef4444' }}>Reset Holding Company</h2>
+                        <p style={{ fontSize: '13px', color: 'var(--text-muted)', marginTop: '2px' }}>
+                            Completely wipe all data and start fresh
+                        </p>
+                    </div>
+                </div>
+
+                <div style={{
+                    padding: '12px 16px', borderRadius: '8px', margin: '16px 0',
+                    background: 'rgba(239,68,68,0.08)', border: '1px solid rgba(239,68,68,0.15)',
+                    fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.6',
+                }}>
+                    <div style={{ display: 'flex', gap: '8px', alignItems: 'flex-start' }}>
+                        <AlertTriangle size={16} style={{ color: '#ef4444', flexShrink: 0, marginTop: '2px' }} />
+                        <div>
+                            <strong style={{ color: '#ef4444' }}>This action is irreversible.</strong> Resetting will permanently delete:
+                            <ul style={{ margin: '6px 0 0 16px', padding: 0 }}>
+                                <li>All companies, agents, managers, and workers</li>
+                                <li>All conversations, threads, and message history</li>
+                                <li>All memories, secrets, files, and meeting records</li>
+                                <li>All financial records, ledger entries, and orders</li>
+                                <li>All running agent containers (OpenClaw instances)</li>
+                            </ul>
+                            <p style={{ marginTop: '8px', marginBottom: 0 }}>
+                                A new holding will be created with the settings below, and a fresh MAIN agent will boot up.
+                                You can also use this to change your holding settings without needing to reinstall.
+                            </p>
+                        </div>
+                    </div>
+                </div>
+
+                {/* Editable Settings */}
+                <div style={{ marginBottom: '16px' }}>
+                    <h3 style={{ fontSize: '14px', fontWeight: 600, marginBottom: '12px', color: 'var(--text)' }}>
+                        Holding Settings
+                    </h3>
+                    <p style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                        Edit these values to change your configuration. These are the same settings from the initial install.
+                    </p>
+
+                    <div style={{ display: 'grid', gridTemplateColumns: '160px 1fr', gap: '10px', alignItems: 'center' }}>
+                        <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 500 }}>Holding Name</label>
+                        <input
+                            value={resetHoldingName}
+                            onChange={e => setResetHoldingName(e.target.value)}
+                            placeholder="Main Holding"
+                            style={{
+                                padding: '8px 12px', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                color: 'var(--text)', fontSize: '13px',
+                            }}
+                        />
+
+                        <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 500 }}>Main Agent Name</label>
+                        <input
+                            value={resetAgentName}
+                            onChange={e => setResetAgentName(e.target.value)}
+                            placeholder="KonnerBot"
+                            style={{
+                                padding: '8px 12px', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                color: 'var(--text)', fontSize: '13px',
+                            }}
+                        />
+
+                        <label style={{ fontSize: '13px', color: 'var(--text-muted)', fontWeight: 500 }}>Default Model</label>
+                        <input
+                            value={resetModel}
+                            onChange={e => setResetModel(e.target.value)}
+                            placeholder="minimax-m2.7:cloud"
+                            style={{
+                                padding: '8px 12px', borderRadius: '8px',
+                                background: 'rgba(255,255,255,0.05)', border: '1px solid var(--border)',
+                                color: 'var(--text)', fontSize: '13px', fontFamily: 'monospace',
+                            }}
+                        />
+                    </div>
+                </div>
+
+                <button
+                    className="button danger"
+                    onClick={() => { setShowResetModal(true); setResetConfirmText(''); setResetError(''); }}
+                    style={{
+                        fontSize: '13px', padding: '10px 20px',
+                        display: 'flex', alignItems: 'center', gap: '8px',
+                        background: 'linear-gradient(135deg, #dc2626, #b91c1c)',
+                        border: '1px solid rgba(239,68,68,0.4)',
+                        color: '#fff', fontWeight: 600,
+                        borderRadius: '8px', cursor: 'pointer',
+                    }}
+                >
+                    <Trash2 size={16} />
+                    Wipe Everything & Reinitialize
+                </button>
+
+                <p style={{ fontSize: '11px', color: 'var(--text-muted)', marginTop: '8px' }}>
+                    You will be asked to confirm before anything is deleted.
+                </p>
+            </div>
+
+            {/* Reset Confirmation Modal */}
+            {showResetModal && (
+                <div className="modal-overlay" onClick={() => setShowResetModal(false)} style={{
+                    position: 'fixed', top: 0, left: 0, right: 0, bottom: 0,
+                    background: 'rgba(0,0,0,0.7)', backdropFilter: 'blur(4px)',
+                    display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    zIndex: 1000,
+                }}>
+                    <div className="modal" onClick={e => e.stopPropagation()} style={{
+                        background: 'var(--bg)', border: '1px solid rgba(239,68,68,0.3)',
+                        borderRadius: '12px', padding: '28px', maxWidth: '480px', width: '90%',
+                        boxShadow: '0 20px 60px rgba(0,0,0,0.5)',
+                    }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '16px' }}>
+                            <div style={{
+                                width: '40px', height: '40px', borderRadius: '10px',
+                                background: 'rgba(239,68,68,0.15)', display: 'flex',
+                                alignItems: 'center', justifyContent: 'center',
+                            }}>
+                                <AlertTriangle size={22} style={{ color: '#ef4444' }} />
+                            </div>
+                            <div>
+                                <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#ef4444' }}>Confirm Reset</h2>
+                                <p style={{ fontSize: '12px', color: 'var(--text-muted)' }}>This cannot be undone</p>
+                            </div>
+                        </div>
+
+                        <div style={{
+                            padding: '12px 14px', borderRadius: '8px', marginBottom: '16px',
+                            background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.12)',
+                            fontSize: '13px', color: 'var(--text-muted)', lineHeight: '1.5',
+                        }}>
+                            You are about to <strong style={{ color: '#ef4444' }}>permanently delete all data</strong> in
+                            your MultiClaw installation — every company, agent, conversation, memory, secret, and
+                            financial record. A new holding will be created with these settings:
+                        </div>
+
+                        <div style={{
+                            padding: '10px 14px', borderRadius: '8px', marginBottom: '16px',
+                            background: 'rgba(255,255,255,0.03)', border: '1px solid var(--border)',
+                            fontSize: '13px', fontFamily: 'monospace',
+                        }}>
+                            <div style={{ display: 'grid', gridTemplateColumns: '130px 1fr', gap: '4px' }}>
+                                <span style={{ color: 'var(--text-muted)' }}>Holding:</span>
+                                <span>{resetHoldingName || 'Main Holding'}</span>
+                                <span style={{ color: 'var(--text-muted)' }}>Main Agent:</span>
+                                <span>{resetAgentName || 'MainAgent'}</span>
+                                <span style={{ color: 'var(--text-muted)' }}>Model:</span>
+                                <span>{resetModel || 'minimax-m2.7:cloud'}</span>
+                            </div>
+                        </div>
+
+                        <div style={{ marginBottom: '16px' }}>
+                            <label style={{ fontSize: '13px', color: 'var(--text-muted)', display: 'block', marginBottom: '6px' }}>
+                                Type <strong style={{ color: 'var(--text)', fontFamily: 'monospace' }}>CONFIRM</strong> to proceed:
+                            </label>
+                            <input
+                                value={resetConfirmText}
+                                onChange={e => setResetConfirmText(e.target.value)}
+                                placeholder="Type CONFIRM"
+                                autoFocus
+                                style={{
+                                    width: '100%', padding: '10px 12px', borderRadius: '8px',
+                                    background: 'rgba(255,255,255,0.05)',
+                                    border: resetConfirmText === 'CONFIRM'
+                                        ? '1px solid rgba(239,68,68,0.5)'
+                                        : '1px solid var(--border)',
+                                    color: 'var(--text)', fontSize: '14px', fontFamily: 'monospace',
+                                    textAlign: 'center', letterSpacing: '2px',
+                                    boxSizing: 'border-box',
+                                }}
+                            />
+                        </div>
+
+                        {resetError && (
+                            <div style={{
+                                padding: '8px 12px', borderRadius: '6px', marginBottom: '12px',
+                                background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.2)',
+                                fontSize: '12px', color: '#ef4444',
+                            }}>
+                                {resetError}
+                            </div>
+                        )}
+
+                        <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
+                            <button
+                                onClick={() => setShowResetModal(false)}
+                                style={{
+                                    padding: '10px 20px', borderRadius: '8px', fontSize: '13px',
+                                    background: 'transparent', border: '1px solid var(--border)',
+                                    color: 'var(--text)', cursor: 'pointer', fontWeight: 500,
+                                }}
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                disabled={resetConfirmText !== 'CONFIRM' || resetting}
+                                onClick={async () => {
+                                    setResetting(true);
+                                    setResetError('');
+                                    try {
+                                        const result = await api.systemReset({
+                                            holding_name: resetHoldingName || undefined,
+                                            main_agent_name: resetAgentName || undefined,
+                                            default_model: resetModel || undefined,
+                                        });
+                                        if (result?.status === 'reset_complete') {
+                                            setShowResetModal(false);
+                                            // Refresh the page to reload all state
+                                            window.location.reload();
+                                        } else if (result?.error) {
+                                            setResetError(result.error);
+                                        } else {
+                                            setResetError('Unexpected response from server.');
+                                        }
+                                    } catch (err: any) {
+                                        setResetError(err.message || 'Reset failed — check the server logs.');
+                                    }
+                                    setResetting(false);
+                                }}
+                                style={{
+                                    padding: '10px 24px', borderRadius: '8px', fontSize: '13px',
+                                    background: resetConfirmText === 'CONFIRM' && !resetting
+                                        ? 'linear-gradient(135deg, #dc2626, #b91c1c)'
+                                        : 'rgba(239,68,68,0.2)',
+                                    border: '1px solid rgba(239,68,68,0.4)',
+                                    color: resetConfirmText === 'CONFIRM' && !resetting ? '#fff' : 'rgba(255,255,255,0.3)',
+                                    cursor: resetConfirmText === 'CONFIRM' && !resetting ? 'pointer' : 'not-allowed',
+                                    fontWeight: 700, display: 'flex', alignItems: 'center', gap: '6px',
+                                }}
+                            >
+                                {resetting ? (
+                                    <>Resetting...</>
+                                ) : (
+                                    <><Trash2 size={14} /> Wipe & Reset</>
+                                )}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 }

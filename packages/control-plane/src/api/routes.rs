@@ -1007,6 +1007,8 @@ pub fn app_router(state: AppState) -> Router {
         // System
         .route("/v1/system/settings", get(get_system_settings))
         .route("/v1/system/settings", put(update_system_settings))
+        .route("/v1/system/holding", get(get_holding_config))
+        .route("/v1/system/reset", post(system_reset))
         .route("/v1/system/update-check", get(system_update_check))
         .route("/v1/system/update", post(system_update))
         .route("/v1/system/containers", get(list_containers))
@@ -5917,6 +5919,181 @@ async fn update_system_settings(State(state): State<AppState>, Json(body): Json<
         }
     }
     (StatusCode::OK, Json(json!({"status":"updated"})))
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Holding Config & System Reset
+// ═══════════════════════════════════════════════════════════════
+
+/// Return the current holding configuration (name, main agent name, default model).
+async fn get_holding_config(State(state): State<AppState>) -> impl IntoResponse {
+    let holding: Option<Holding> = sqlx::query_as(
+        "SELECT id, owner_user_id, name, main_agent_name, created_at FROM holdings LIMIT 1"
+    ).fetch_optional(&state.db).await.unwrap_or(None);
+
+    let default_model: String = sqlx::query_scalar::<_, String>(
+        "SELECT value FROM system_meta WHERE key = 'default_model'"
+    ).fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "minimax-m2.7:cloud".into());
+
+    match holding {
+        Some(h) => (StatusCode::OK, Json(json!({
+            "initialized": true,
+            "holding_id": h.id,
+            "holding_name": h.name,
+            "main_agent_name": h.main_agent_name,
+            "default_model": default_model,
+            "created_at": h.created_at,
+        }))),
+        None => (StatusCode::OK, Json(json!({
+            "initialized": false,
+        }))),
+    }
+}
+
+#[derive(Deserialize)]
+struct SystemResetRequest {
+    pub holding_name: Option<String>,
+    pub main_agent_name: Option<String>,
+    pub default_model: Option<String>,
+}
+
+/// Wipe all holding data and reinitialize with new settings.
+/// Stops all OpenClaw containers, truncates all tables, then calls init.
+async fn system_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<SystemResetRequest>,
+) -> impl IntoResponse {
+    tracing::warn!("SYSTEM RESET requested — wiping all data and reinitializing");
+
+    // Step 1: Stop all OpenClaw containers
+    let containers = tokio::process::Command::new("docker")
+        .args(["ps", "-a", "--filter", "name=openclaw-", "--format", "{{.Names}}"])
+        .output().await;
+    if let Ok(output) = containers {
+        let names = String::from_utf8_lossy(&output.stdout);
+        let container_names: Vec<&str> = names.trim().split('\n').filter(|s| !s.is_empty()).collect();
+        if !container_names.is_empty() {
+            tracing::info!("Stopping {} OpenClaw containers", container_names.len());
+            let mut args = vec!["rm", "-f"];
+            args.extend(container_names.iter());
+            let _ = tokio::process::Command::new("docker").args(&args).output().await;
+        }
+    }
+
+    // Clear in-memory state
+    {
+        let mut instances = state.openclaw.instances_mut().await;
+        instances.clear();
+    }
+
+    // Step 2: Truncate all tables (CASCADE handles foreign keys)
+    let truncate_result = sqlx::query(
+        "DO $$ DECLARE r RECORD;
+         BEGIN
+           FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+             EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE';
+           END LOOP;
+         END $$;"
+    ).execute(&state.db).await;
+
+    if let Err(e) = truncate_result {
+        tracing::error!("Failed to truncate tables: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Database wipe failed: {}", e)})));
+    }
+
+    tracing::info!("All tables truncated. Reinitializing...");
+
+    // Step 3: Reinitialize (same logic as handle_init but inline to avoid the "already_initialized" guard)
+    let holding_name = payload.holding_name.unwrap_or_else(|| "Main Holding".into());
+    let agent_name = payload.main_agent_name.unwrap_or_else(|| "MainAgent".into());
+    let model = payload.default_model.unwrap_or_else(|| "minimax-m2.7:cloud".into());
+
+    let holding_id = Uuid::new_v4();
+    let owner_id = Uuid::new_v4();
+
+    // Create holding
+    if let Err(e) = sqlx::query(
+        "INSERT INTO holdings (id, owner_user_id, name, main_agent_name) VALUES ($1, $2, $3, $4)"
+    ).bind(holding_id).bind(owner_id).bind(&holding_name).bind(&agent_name)
+    .execute(&state.db).await {
+        tracing::error!("Failed to create holding during reset: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("{}", e)})));
+    }
+
+    // Create default tool policies
+    let ceo_policy_id = Uuid::new_v4();
+    let mgr_policy_id = Uuid::new_v4();
+    let wkr_policy_id = Uuid::new_v4();
+    let main_policy_id = Uuid::new_v4();
+
+    for (id, name, allow, deny) in [
+        (main_policy_id, "main_agent_policy", json!(["*"]), json!([])),
+        (ceo_policy_id, "ceo_policy", json!(["browser","files","coding","sessions"]), json!(["vm_provisioning"])),
+        (mgr_policy_id, "manager_policy", json!(["browser","files"]), json!(["system.run"])),
+        (wkr_policy_id, "worker_policy", json!(["browser","files"]), json!(["system.run","admin"])),
+    ] {
+        let _ = sqlx::query(
+            "INSERT INTO tool_policies (id, name, allowlist, denylist, notes) VALUES ($1, $2, $3, $4, $5)"
+        ).bind(id).bind(name).bind(&allow).bind(&deny).bind("Default policy")
+        .execute(&state.db).await;
+    }
+
+    // Create MainAgent
+    let agent_id = Uuid::new_v4();
+    let _ = sqlx::query(
+        "INSERT INTO agents (id, holding_id, company_id, role, name, specialty, effective_model, system_prompt, tool_policy_id, status) \
+         VALUES ($1, $2, NULL, 'MAIN', $3, 'Holding Company Management', $4, $5, $6, 'ACTIVE')"
+    )
+    .bind(agent_id).bind(holding_id).bind(&agent_name).bind(&model)
+    .bind(format!("You are {}, the Main Agent managing this holding company.", agent_name))
+    .bind(main_policy_id)
+    .execute(&state.db).await;
+
+    // Spawn OpenClaw instance for MainAgent in background
+    state.openclaw.register_pending_spawn(agent_id).await;
+    let openclaw = state.openclaw.clone();
+    let agent_name_clone = agent_name.clone();
+    let model_clone = model.clone();
+    let holding_name_clone = holding_name.clone();
+    let probe_ceiling = state.config.probe_ceiling;
+    tokio::spawn(async move {
+        openclaw.probe_concurrency(&model_clone, probe_ceiling).await;
+
+        let config = crate::openclaw::AgentConfig {
+            agent_id,
+            agent_name: agent_name_clone,
+            role: "MAIN".to_string(),
+            company_name: holding_name_clone.clone(),
+            company_type: None,
+            company_description: None,
+            company_id: None,
+            holding_name: holding_name_clone,
+            specialty: Some("Holding Company Management".to_string()),
+            model: model_clone,
+            system_prompt: None,
+        };
+        match openclaw.spawn_instance(&config).await {
+            Ok(inst) => tracing::info!("OpenClaw instance spawned for MainAgent on port {} (post-reset)", inst.port),
+            Err(e) => tracing::error!("Failed to spawn OpenClaw instance for MainAgent after reset: {}", e),
+        }
+    });
+
+    // Store default model and seed available models
+    let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('default_model', $1) ON CONFLICT (key) DO UPDATE SET value = $1, updated_at = NOW()")
+        .bind(&model).execute(&state.db).await;
+    let _ = sqlx::query("INSERT INTO system_meta (key, value) VALUES ('available_models', $1) ON CONFLICT (key) DO NOTHING")
+        .bind(serde_json::to_string(&DEFAULT_MODELS).unwrap_or_default())
+        .execute(&state.db).await;
+
+    tracing::info!("System reset complete. New holding '{}' with MainAgent '{}'", holding_name, agent_name);
+    (StatusCode::OK, Json(json!({
+        "status": "reset_complete",
+        "holding_id": holding_id,
+        "main_agent_id": agent_id,
+        "holding_name": holding_name,
+        "main_agent_name": agent_name,
+        "default_model": model,
+    })))
 }
 
 // ═══════════════════════════════════════════════════════════════
