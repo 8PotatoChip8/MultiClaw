@@ -24,14 +24,14 @@ Tests SOUL.md behavioral compliance by sending messages to live MultiClaw agents
 
 2. **MultiClaw** running (control plane + postgres + ollama-proxy):
    ```bash
-   cd infra/docker
+   cd /opt/multiclaw/infra/docker
    docker compose up -d
    ```
 
 ## Quick Start
 
 ```bash
-cd tests/promptfoo
+cd /opt/multiclaw/tests/promptfoo
 ./run.sh
 ```
 
@@ -43,6 +43,8 @@ This will:
 5. Save results to `results/eval-results.json`
 
 ## Usage
+
+All commands assume you're in the test directory (`cd /opt/multiclaw/tests/promptfoo`):
 
 ```bash
 # Full run (reset → setup → eval)

@@ -94,7 +94,7 @@ curl -X POST http://127.0.0.1:8080/v1/system/reset \
 MultiClaw includes behavioral compliance tests using [PromptFoo](https://promptfoo.dev/) in `tests/promptfoo/`. These tests verify agents follow SOUL.md rules (no narration, no fabrication, no system mechanics leaks, identity protection, etc.).
 
 ```bash
-cd tests/promptfoo
+cd /opt/multiclaw/tests/promptfoo
 node setup.mjs          # Reset holding and wait for agents to boot
 promptfoo eval           # Run all behavioral tests
 promptfoo view           # View results in browser
