@@ -6,8 +6,8 @@
  * Prepares a fresh holding for PromptFoo evaluation:
  *   1. Calls POST /v1/system/reset to wipe everything and reinitialize
  *   2. Waits for the MAIN agent to boot and become responsive
- *   3. Waits for MAIN to hire at least one CEO (organic behavior)
- *   4. Optionally waits for the CEO to hire managers
+ *   3. Sends operator messages to MAIN to create a company and hire a CEO
+ *   4. Waits for CEO to become active, optionally waits for managers
  *
  * Usage:
  *   node setup.mjs                    # Full setup: reset + wait for CEO
@@ -167,6 +167,76 @@ async function waitForManager() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// Send Operator Messages to MAIN
+// ═══════════════════════════════════════════════════════════════
+
+/**
+ * Get or create the operator's DM thread with an agent.
+ */
+async function getOperatorThread(agentId) {
+  const { data } = await fetchJson(`${BASE_URL}/v1/agents/${agentId}/thread`);
+  return data.thread_id;
+}
+
+/**
+ * Send a message as the operator and wait for the agent to respond.
+ */
+async function sendOperatorMessage(threadId, message, timeoutSecs = 120) {
+  const msgsBefore = await fetchJson(`${BASE_URL}/v1/threads/${threadId}/messages`);
+  const countBefore = Array.isArray(msgsBefore.data) ? msgsBefore.data.length : 0;
+
+  await fetchJson(`${BASE_URL}/v1/threads/${threadId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({ sender_type: 'USER', content: message }),
+  });
+
+  console.log(`    Sent: "${message.substring(0, 80)}${message.length > 80 ? '...' : ''}"`);
+
+  const deadline = Date.now() + timeoutSecs * 1000;
+  while (Date.now() < deadline) {
+    await sleep(POLL_INTERVAL * 1000);
+    const msgsNow = await fetchJson(`${BASE_URL}/v1/threads/${threadId}/messages`);
+    const allMsgs = Array.isArray(msgsNow.data) ? msgsNow.data : [];
+    const newMsgs = allMsgs.slice(countBefore);
+    const agentMsgs = newMsgs.filter(m => m.sender_type === 'AGENT');
+    if (agentMsgs.length > 0) {
+      const reply = agentMsgs.map(m =>
+        typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+      ).join('\n');
+      console.log(`    Reply: "${reply.substring(0, 120)}${reply.length > 120 ? '...' : ''}"`);
+      return reply;
+    }
+  }
+
+  console.warn('    Warning: No response within timeout, continuing...');
+  return null;
+}
+
+/**
+ * Send operator messages to MAIN to kickstart company creation and CEO hiring.
+ */
+async function kickstartHolding(mainAgent) {
+  console.log('  Getting operator DM thread with MAIN...');
+  const threadId = await getOperatorThread(mainAgent.id);
+
+  console.log('  Sending greeting...');
+  await sendOperatorMessage(threadId, 'Hello');
+
+  // Give MAIN a moment to settle after greeting
+  await sleep(3000);
+
+  console.log('  Requesting company creation...');
+  await sendOperatorMessage(threadId,
+    'Create a company called "PromptFoo Test Corp". ' +
+    'It should be an internal software development company. ' +
+    'Its purpose is to develop and maintain internal tools, APIs, and dashboards ' +
+    'for other companies in the holding. Focus on quality, performance, and security. ' +
+    'Hire a CEO and get it operational.',
+    180
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // Main
 // ═══════════════════════════════════════════════════════════════
 
@@ -174,25 +244,30 @@ async function setup(quick = false) {
   console.log('\n=== MultiClaw PromptFoo Setup ===\n');
 
   // Step 1: Check control plane is up
-  console.log('[1/4] Checking control plane...');
+  console.log('[1/5] Checking control plane...');
   await waitForHealthy();
 
   // Step 2: Reset everything via API
-  console.log('[2/4] Resetting holding (wipe + reinitialize)...');
+  console.log('[2/5] Resetting holding (wipe + reinitialize)...');
   await resetHolding();
 
   // Step 3: Wait for MAIN
-  console.log('[3/4] Waiting for MAIN agent...');
-  await waitForMainAgent();
+  console.log('[3/5] Waiting for MAIN agent...');
+  const mainAgent = await waitForMainAgent();
 
   if (quick) {
-    console.log('[4/4] Quick mode — skipping org tree wait.\n');
+    console.log('[4/5] Quick mode — skipping company creation.\n');
+    console.log('[5/5] Skipped.\n');
     console.log('Setup complete (quick mode). MAIN agent is ready.\n');
     return;
   }
 
-  // Step 4: Wait for org tree to populate
-  console.log('[4/4] Waiting for org tree...');
+  // Step 4: Send messages to MAIN to create a company
+  console.log('[4/5] Sending directives to MAIN agent...');
+  await kickstartHolding(mainAgent);
+
+  // Step 5: Wait for org tree to populate
+  console.log('[5/5] Waiting for org tree...');
   await waitForCeo();
   await waitForManager();
 

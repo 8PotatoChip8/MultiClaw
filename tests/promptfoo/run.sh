@@ -53,7 +53,7 @@ fi
 echo "Checking control plane at $MULTICLAW_URL..."
 if ! curl -sf "$MULTICLAW_URL/v1/health" >/dev/null 2>&1; then
   echo "ERROR: Control plane not reachable at $MULTICLAW_URL"
-  echo "Make sure MultiClaw is running: cd infra/docker && docker compose up -d"
+  echo "Make sure MultiClaw is running: cd /opt/multiclaw/infra/docker && docker compose up -d"
   exit 1
 fi
 echo "Control plane is healthy."

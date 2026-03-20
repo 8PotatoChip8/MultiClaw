@@ -37,10 +37,11 @@ cd /opt/multiclaw/tests/promptfoo
 
 This will:
 1. Reset the holding via the API (wipes DB, stops containers, reinitializes)
-2. Wait for the MAIN agent to boot and hire a CEO
-3. Wait for the CEO to hire managers
-4. Run all behavioral tests against live agents
-5. Save results to `results/eval-results.json`
+2. Wait for the MAIN agent to boot
+3. Send operator messages to MAIN to create a company and hire a CEO
+4. Wait for the CEO to become active and hire managers
+5. Run all behavioral tests against live agents
+6. Save results to `results/eval-results.json`
 
 ## Usage
 
