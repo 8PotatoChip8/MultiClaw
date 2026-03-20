@@ -126,11 +126,24 @@ async function sendDmAndWaitForResponse(baseUrl, senderId, targetId, message, ti
     messagesBefore = msgs.length;
   }
 
-  // Send the DM
-  await fetchJson(`${baseUrl}/v1/agents/${senderId}/dm`, {
-    method: 'POST',
-    body: JSON.stringify({ target: targetId, message }),
-  });
+  // Send the DM (retry on 409 — agent may be in an active DM conversation)
+  const dmDeadline = Date.now() + timeoutSecs * 1000;
+  while (true) {
+    try {
+      await fetchJson(`${baseUrl}/v1/agents/${senderId}/dm`, {
+        method: 'POST',
+        body: JSON.stringify({ target: targetId, message }),
+      });
+      break;
+    } catch (err) {
+      if (err.message.includes('HTTP 409') && Date.now() < dmDeadline) {
+        console.log(`  DM blocked (agent in conversation) — retrying in ${pollInterval}s...`);
+        await sleep(pollInterval * 1000);
+        continue;
+      }
+      throw err;
+    }
+  }
 
   // Poll for the target's response
   const deadline = Date.now() + timeoutSecs * 1000;

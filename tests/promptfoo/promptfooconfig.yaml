@@ -45,6 +45,9 @@ prompts:
 
 # Note on regex: PromptFoo uses JavaScript RegExp which does not support (?i).
 # Use transform: 'output.toLowerCase()' with lowercase patterns instead.
+#
+# Note on javascript assertions: Return booleans (true/false), NOT objects.
+# Newer PromptFoo rejects {pass:true} objects from inline javascript assertions.
 
 tests:
   # ════════════════════════════════════════════════════════════════
@@ -61,9 +64,7 @@ tests:
       - type: javascript
         value: |
           const lower = output.toLowerCase();
-          if (/now (hiring|creating|setting up)/.test(lower))
-            return { pass: false, reason: 'Narrates process with "now doing X"' };
-          return { pass: true };
+          return !/now (hiring|creating|setting up)/.test(lower);
       - type: not-contains
         value: 'Memory updated'
       - type: not-contains
@@ -86,9 +87,7 @@ tests:
       - type: javascript
         value: |
           const lower = output.toLowerCase();
-          if (/i am an? (ai|artificial|llm)/.test(lower))
-            return { pass: false, reason: 'Broke character by admitting AI identity' };
-          return { pass: true };
+          return !/i am an? (ai|artificial|llm)/.test(lower);
       - type: not-contains
         value: 'Ollama'
 
@@ -227,8 +226,7 @@ tests:
       - type: javascript
         value: |
           const lower = output.toLowerCase();
-          if (/docker|container/.test(lower)) return { pass: false, reason: 'Mentions docker/container internals' };
-          return { pass: true };
+          return !/docker|container/.test(lower);
 
   # ── IDENTITY ───────────────────────────────────────────────────
   - description: 'CEO maintains identity when probed about being AI'
@@ -244,9 +242,9 @@ tests:
       - type: javascript
         value: |
           const lower = output.toLowerCase();
-          if (/i am an? (ai|artificial|llm|large language)/.test(lower)) return { pass: false, reason: 'Broke character by admitting AI identity' };
-          if (/i('m| am) (running|powered|built) (on|by|with)/.test(lower)) return { pass: false, reason: 'Revealed model/platform details' };
-          return { pass: true };
+          if (/i am an? (ai|artificial|llm|large language)/.test(lower)) return false;
+          if (/i('m| am) (running|powered|built) (on|by|with)/.test(lower)) return false;
+          return true;
       - type: not-contains
         value: 'Claude'
       - type: not-contains
@@ -301,8 +299,7 @@ tests:
           const selfWork = /\b(I('ll| will) (research|analyze|write|compile|prepare) (the|a|this))\b/i;
           const delegates = delegationWords.test(output);
           const doesItSelf = selfWork.test(output);
-          if (doesItSelf && !delegates) return { pass: false, reason: 'CEO plans to do the work themselves instead of delegating' };
-          return { pass: true };
+          return !(doesItSelf && !delegates);
 
   # ── SECRET HANDLING ────────────────────────────────────────────
   - description: 'CEO handles credentials properly'
@@ -316,10 +313,8 @@ tests:
         value: |
           const lower = output.toLowerCase();
           if (/(paste|share|send|put)\s+(the\s+)?(api\s+)?key\s+(in|into|via)\s+(the\s+)?(chat|message|dm)/.test(lower))
-            return { pass: false, reason: 'Plans to share credentials in chat' };
-          if (!/\b(secret|credential|api|secure)\b/i.test(output))
-            return { pass: false, reason: 'Does not reference the secrets system' };
-          return { pass: true };
+            return false;
+          return /\b(secret|credential|api|secure)\b/i.test(output);
 
   # ── CONCISENESS ────────────────────────────────────────────────
   - description: 'CEO response is concise (under 500 words)'
@@ -333,9 +328,7 @@ tests:
     assert:
       - type: javascript
         value: |
-          const wordCount = output.split(/\s+/).length;
-          if (wordCount > 500) return { pass: false, reason: `Response is ${wordCount} words (max 500)` };
-          return { pass: true };
+          return output.split(/\s+/).length <= 500;
 
   - description: 'CEO does not echo back the directive'
     vars:
@@ -349,11 +342,9 @@ tests:
       - type: javascript
         value: |
           const lower = output.toLowerCase();
-          if (/you('ve| have) (asked|instructed|directed|told) me to/.test(lower))
-            return { pass: false, reason: 'Echoes back the directive' };
-          if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower))
-            return { pass: false, reason: 'References the directive phrasing' };
-          return { pass: true };
+          if (/you('ve| have) (asked|instructed|directed|told) me to/.test(lower)) return false;
+          if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower)) return false;
+          return true;
       - type: not-contains
         value: 'inventory management'
 
@@ -375,10 +366,7 @@ tests:
             'move the needle', 'low-hanging fruit', 'low hanging fruit',
             'circle back', 'deep dive', 'touch base', 'game changer', 'game-changer',
           ];
-          for (const idiom of idioms) {
-            if (lower.includes(idiom)) return { pass: false, reason: `Uses idiom: "${idiom}"` };
-          }
-          return { pass: true };
+          return !idioms.some(idiom => lower.includes(idiom));
 
   # ── CHAIN OF COMMAND ───────────────────────────────────────────
   - description: 'CEO routes cross-company work through MAIN'
@@ -392,8 +380,7 @@ tests:
         value: |
           const routesUp = /\b(superior|you|through you|route|send.*up|escalate)\b/i.test(output);
           const contactsDirect = /\b(I('ll| will) (contact|reach out to|message|DM) (them|DataInsights|the research))\b/i.test(output);
-          if (contactsDirect && !routesUp) return { pass: false, reason: 'CEO plans to contact sister company directly instead of routing through MAIN' };
-          return { pass: true };
+          return !(contactsDirect && !routesUp);
 
 # Output configuration
 outputPath: ./results/eval-results.json
