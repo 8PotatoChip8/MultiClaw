@@ -17,6 +17,16 @@ curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/i
 curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash
 ```
 
+### Pre-Stage Dependencies Only
+If you have a slow internet connection, you can install all system dependencies first (Docker, Incus, Ollama, QEMU/KVM, etc.) and do the full MultiClaw setup later:
+```bash
+# Step 1: Install dependencies only (can take a while on slow connections)
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash -s -- --deps-only
+
+# Step 2: Later, run the full install — it will skip already-installed dependencies
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash
+```
+
 ## Architecture
 
 - **multiclawd (Control Plane)**: Rust backend containing the rules engine and agent supervision logic.
@@ -68,6 +78,29 @@ Under the hood, this pulls the model to the host Ollama context and adjusts the 
 
 ## Concurrent Model Requests
 MultiClaw sends multiple agent requests to Ollama in parallel. The install script configures `OLLAMA_NUM_PARALLEL` (default: 4) and passes `MULTICLAW_MAX_CONCURRENT_OLLAMA` to the control plane. On startup, multiclawd probes Ollama with 10 concurrent test requests to auto-discover the actual concurrency limit and adjusts its internal semaphore accordingly.
+
+## System Reset (Wipe & Reinitialize)
+You can completely reset the holding company from the **Settings** page in the dashboard. This wipes all agents, companies, threads, and data, then reinitializes with fresh settings. You can also change your holding name, main agent name, and default model during the reset — no reinstall needed.
+
+Alternatively, use the API directly:
+```bash
+curl -X POST http://127.0.0.1:8080/v1/system/reset \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"holding_name": "My Holding", "main_agent_name": "KonnerBot", "default_model": "minimax-m2.7:cloud"}'
+```
+
+## Testing (PromptFoo)
+MultiClaw includes behavioral compliance tests using [PromptFoo](https://promptfoo.dev/) in `tests/promptfoo/`. These tests verify agents follow SOUL.md rules (no narration, no fabrication, no system mechanics leaks, identity protection, etc.).
+
+```bash
+cd tests/promptfoo
+node setup.mjs          # Reset holding and wait for agents to boot
+promptfoo eval           # Run all behavioral tests
+promptfoo view           # View results in browser
+```
+
+See `tests/promptfoo/README.md` for details.
 
 ## Security Warning
 This software enables autonomous agents to execute code and use web browsers. Running agents in strict mode and preserving approvals boundaries for structural changes is strongly recommended.

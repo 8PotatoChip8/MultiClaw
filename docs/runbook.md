@@ -4,7 +4,7 @@
 ### Are the Host services running?
 ```bash
 sudo systemctl status multiclaw-stack
-docker compose -f /opt/multiclaw/docker-compose.yml ps
+docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml ps
 sudo systemctl status ollama
 ```
 
@@ -68,6 +68,15 @@ The heartbeat loop waits for OpenClaw container recovery to complete (signaled v
 After a restart, multiclawd sends role-appropriate recovery prompts to all active agents in hierarchical order (MAIN → CEO → MANAGER → WORKER, 60s between tiers). This tells agents the system restarted and asks them to check memory and resume work.
 
 ### Disable recovery prompts
+Via API:
+```bash
+curl -X PUT http://127.0.0.1:8080/v1/system/settings \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"recovery_prompts_enabled": "false"}'
+```
+
+Or via SQL:
 ```sql
 INSERT INTO system_meta (key, value) VALUES ('recovery_prompts_enabled', 'false')
   ON CONFLICT (key) DO UPDATE SET value = 'false';
@@ -75,7 +84,30 @@ INSERT INTO system_meta (key, value) VALUES ('recovery_prompts_enabled', 'false'
 
 ### Check recovery prompt status in logs
 ```bash
-docker compose logs multiclawd | grep -i "recovery prompt"
+docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml logs multiclawd | grep -i "recovery prompt"
+```
+
+## System Reset (Wipe & Reinitialize)
+To completely wipe the holding and start fresh, use the **Settings** page "Reset Holding Company" panel, or call the API:
+
+```bash
+curl -X POST http://127.0.0.1:8080/v1/system/reset \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"holding_name": "My Holding", "main_agent_name": "KonnerBot", "default_model": "minimax-m2.7:cloud"}'
+```
+
+All fields are optional. This will:
+1. Stop all OpenClaw agent containers.
+2. Clear in-memory state.
+3. Truncate all database tables (CASCADE).
+4. Reinitialize with a fresh holding, tool policies, and MAIN agent.
+5. Spawn a new MAIN agent container.
+
+### Check current holding config
+```bash
+curl http://127.0.0.1:8080/v1/system/holding \
+  -H "Authorization: Bearer <token>"
 ```
 
 ## Ollama Concurrency
@@ -83,14 +115,14 @@ multiclawd gates concurrent LLM requests through a semaphore. On startup it prob
 
 ### Check current concurrency config
 ```bash
-docker compose exec multiclawd env | grep CONCURRENT
+docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml exec multiclawd env | grep CONCURRENT
 # or check logs:
-docker compose logs multiclawd | grep -i "concurrency"
+docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml logs multiclawd | grep -i "concurrency"
 ```
 
 ### Adjust concurrency
 Set `OLLAMA_NUM_PARALLEL` on the Ollama service and `MULTICLAW_MAX_CONCURRENT_OLLAMA` in the multiclawd environment. They should match.
-Default: 4. Set in `/etc/systemd/system/ollama.service.d/concurrency.conf` and `/opt/multiclaw/.env`.
+Default: 4. Set in `/etc/systemd/system/ollama.service.d/concurrency.conf` and `/opt/multiclaw/infra/docker/.env`.
 
 ## Message Queue Troubleshooting
 
@@ -124,8 +156,15 @@ GROUP BY agent_id ORDER BY pending DESC;
 
 ### Check logs for timeouts
 ```bash
-docker compose logs multiclawd | grep "timed out after 300s"
+docker compose -f /opt/multiclaw/infra/docker/docker-compose.yml logs multiclawd | grep "timed out after 300s"
 ```
+
+## Pre-Staging Dependencies
+On machines with slow internet, you can install all system dependencies first without setting up MultiClaw:
+```bash
+curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash -s -- --deps-only
+```
+This installs Docker, Incus, Ollama, QEMU/KVM, curl, jq, and git. Run the full installer later to complete setup — it will skip already-installed dependencies.
 
 ## Provisioning Secrets for Agents
 Store API keys, credentials, and other sensitive values using the Secrets API. **Never paste secrets into chat messages or DMs** — use the secrets store instead.

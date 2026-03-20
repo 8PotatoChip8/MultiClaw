@@ -35,6 +35,16 @@ Agents communicate through several channels:
 - **Agent-to-Agent DMs**: Direct conversations between two agents with automatic multi-turn replies. Conversations end naturally when an agent signals `[END_CONVERSATION]`. A safety limit of 20 turns prevents runaway loops. After a conversation completes, a 2-minute cooldown prevents the same pair from starting another conversation immediately.
 - **Agent-to-User DMs**: Agents can message the human operator via `POST /v1/agents/:id/dm-user`.
 - **Quarantine checks**: Before each message in a DM conversation, both agents' quarantine status is checked. If either is quarantined, the conversation stops immediately.
+- **DM-mode API guard**: While an agent is inside a DM turn (`run_dm_turn()`), 16 heavy endpoints (hire, send-file, DM initiation, etc.) return `409 Conflict` to prevent race conditions. The guard uses a per-agent `agents_in_dm` set in `AppState`.
+
+### Timeout Tiers
+Different operations use different timeouts for `send_message()` calls to OpenClaw:
+- **DM turns**: 90 seconds — keeps conversations snappy, prevents one slow turn from blocking the pair.
+- **Action prompts**: 300 seconds — tool-heavy operations (provisioning VMs, running code) need more time.
+- **Heartbeats**: 90 seconds — quick check-ins shouldn't hang.
+- **Default** (thread replies, recovery prompts): 600 seconds.
+
+`send_message()` does NOT retry on timeouts — OpenClaw runs continue executing after HTTP disconnect, so retrying would create ghost duplicate runs. Only non-timeout connection errors (DNS, refused) are retried.
 
 See `docs/security.md` for details on DM anti-loop protection and panic operations.
 

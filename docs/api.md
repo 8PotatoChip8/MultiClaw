@@ -33,6 +33,11 @@ Authorization: Bearer <token>
 | GET | `/v1/companies/:id/ledger` | Get company financial ledger |
 | POST | `/v1/companies/:id/ledger` | Create a ledger entry |
 | GET | `/v1/companies/:id/balance` | Get balance breakdown by currency |
+| GET | `/v1/companies/:id/orders` | List trade orders (filterable by status, symbol) |
+| POST | `/v1/companies/:id/orders` | Create a trade order |
+| PATCH | `/v1/companies/:id/orders/:order_id` | Update order (fill, cancel, etc.) |
+| GET | `/v1/companies/:id/positions` | Get current trading positions |
+| GET | `/v1/companies/:id/budget` | Get company budget summary |
 
 **Create Ledger Entry body:**
 ```json
@@ -54,7 +59,22 @@ Types: `CAPITAL_INJECTION`, `REVENUE`, `EXPENSE`, `INTERNAL_TRANSFER`. Currency 
 {
   "name": "Agent Name",
   "specialty": "domain expertise",
-  "preferred_model": "model-name"  // optional, overrides default
+  "preferred_model": "minimax-m2.7:cloud"
+}
+```
+`preferred_model` is optional — overrides the system default.
+
+**Create Order body:**
+```json
+{
+  "agent_id": "uuid",
+  "exchange": "binance",
+  "symbol": "BTC/USD",
+  "side": "BUY",
+  "order_type": "LIMIT",
+  "quantity": 0.5,
+  "price": 45000.00,
+  "quote_currency": "USD"
 }
 ```
 
@@ -70,45 +90,53 @@ Types: `CAPITAL_INJECTION`, `REVENUE`, `EXPENSE`, `INTERNAL_TRANSFER`. Currency 
 | POST | `/v1/agents/:id/hire-manager` | Hire a manager (policy-checked) |
 | POST | `/v1/agents/:id/hire-worker` | Hire a worker (policy-checked) |
 | POST | `/v1/agents/:id/panic` | Quarantine agent — stops container, blocks all DMs |
+| POST | `/v1/agents/:id/restart` | Restart agent's OpenClaw container |
+| GET | `/v1/agents/:id/health` | Check agent container health |
+| GET | `/v1/agents/:id/queue` | Get agent's message queue status |
 | GET | `/v1/agents/:id/thread` | Get or create a DM thread with this agent |
 | POST | `/v1/agents/:id/dm` | Send agent-to-agent DM (auto-conversation loop) |
 | POST | `/v1/agents/:id/dm-user` | Agent sends a message to the human operator |
 | POST | `/v1/agents/:id/send-file` | Send a file to another agent (policy-checked, max 10 MB) |
 | GET | `/v1/agents/:id/file-transfers` | List file transfers involving this agent |
 | GET | `/v1/agents/:id/threads` | Get all threads this agent participates in |
+| GET | `/v1/agents/:id/recent-messages` | Get agent's recent messages across all threads |
 | GET | `/v1/agents/:id/memories` | List agent memories/knowledge base |
 | POST | `/v1/agents/:id/memories` | Create or update an agent memory |
 | DELETE | `/v1/agents/:id/memories/:mid` | Delete a memory entry |
 | GET | `/v1/agents/:id/openclaw-files` | Read agent's OpenClaw workspace files |
+| POST | `/v1/agents/:id/knowledge` | Push knowledge content to agent's workspace |
 | GET | `/v1/agents/:id/secrets` | List secrets accessible to this agent (names and descriptions, never values) |
 | GET | `/v1/agents/:id/secrets/:name` | Fetch a secret by name (hierarchical lookup) |
 
 **Agent-to-Agent DM body:**
 ```json
 {
-  "from_agent_id": "uuid",
+  "target": "uuid-or-handle",
   "message": "text content"
 }
 ```
-DM conversations auto-loop until agents naturally conclude the discussion. A safety ceiling of 20 turns prevents runaway loops, and a 2-minute cooldown between the same pair prevents re-initiation. Both agents' quarantine status is checked before each message.
+The `target` field accepts a UUID or an agent handle (e.g., `@ceo-acme`). The sender is the agent in the URL path (`:id`). DM conversations auto-loop until agents naturally conclude the discussion. A safety ceiling of 20 turns prevents runaway loops, and a 2-minute cooldown between the same pair prevents re-initiation. Both agents' quarantine status is checked before each message.
 
 **Send File body:**
 ```json
 {
-  "to_agent_id": "uuid",
-  "file_path": "/path/on/sender/vm",
-  "description": "what this file is"
+  "target": "uuid-or-handle",
+  "src_path": "/path/on/sender/vm",
+  "dest_path": "/path/on/receiver/vm",
+  "encoding": "text"
 }
 ```
+`dest_path` and `encoding` are optional.
 
 **Hire Manager/Worker body:**
 ```json
 {
   "name": "Agent Name",
   "specialty": "domain expertise",
-  "preferred_model": "model-name"  // optional
+  "preferred_model": "minimax-m2.7:cloud"
 }
 ```
+`preferred_model` is optional — overrides the system default.
 
 ---
 
@@ -157,6 +185,39 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 
 ---
 
+## Shared VMs
+
+Shared VMs are company-scoped Incus VMs accessible to multiple agents within a company or department.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/shared-vms` | List shared VMs (filterable by `company_id`, `vm_purpose`) |
+| POST | `/v1/shared-vms` | Provision a shared VM |
+| GET | `/v1/shared-vms/:id` | Get shared VM details |
+| DELETE | `/v1/shared-vms/:id` | Destroy a shared VM |
+| POST | `/v1/shared-vms/:id/start` | Start a shared VM |
+| POST | `/v1/shared-vms/:id/stop` | Stop a shared VM |
+| POST | `/v1/shared-vms/:id/rebuild` | Rebuild a shared VM |
+| POST | `/v1/shared-vms/:id/exec` | Execute a command on a shared VM |
+| GET | `/v1/shared-vms/:id/info` | Get shared VM state and IP |
+| POST | `/v1/shared-vms/:id/file/push` | Write a file to a shared VM |
+| POST | `/v1/shared-vms/:id/file/pull` | Read a file from a shared VM |
+
+**Provision Shared VM body:**
+```json
+{
+  "requester_agent_id": "uuid",
+  "company_id": "uuid",
+  "vm_purpose": "development",
+  "department_manager_id": "uuid",
+  "label": "Team Dev Server",
+  "resources": {}
+}
+```
+`department_manager_id`, `label`, and `resources` are optional.
+
+---
+
 ## Threads & Messaging
 
 | Method | Path | Description |
@@ -191,6 +252,7 @@ DM conversations auto-loop until agents naturally conclude the discussion. A saf
 |--------|------|-------------|
 | GET | `/v1/secrets` | List secret metadata (names and scopes, never plaintext values) |
 | POST | `/v1/secrets` | Create an encrypted secret |
+| GET | `/v1/secrets/audit` | Get secret access audit log |
 | DELETE | `/v1/secrets/:id` | Delete a secret |
 
 **Create Secret body:**
@@ -224,16 +286,60 @@ For single-value secrets, a legacy `"value": "..."` field is also accepted inste
 
 ---
 
+## Meetings
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/v1/meetings` | List meetings |
+| POST | `/v1/meetings` | Create a meeting |
+| GET | `/v1/meetings/:id` | Get meeting details |
+| POST | `/v1/meetings/:id/close` | Close a meeting |
+
+**Create Meeting body:**
+```json
+{
+  "topic": "Q1 Strategy Review",
+  "organizer_id": "uuid",
+  "participant_ids": ["uuid", "uuid"],
+  "scheduled_for": "2026-03-25T14:00:00Z"
+}
+```
+`scheduled_for` is optional.
+
+---
+
 ## System Management
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/v1/system/settings` | Get all system settings |
 | PUT | `/v1/system/settings` | Update system settings |
+| GET | `/v1/system/holding` | Get current holding config (name, main agent, model, initialized status) |
+| POST | `/v1/system/reset` | Wipe all data and reinitialize holding (stops all containers, truncates tables) |
 | GET | `/v1/system/update-check` | Check for updates (stable/beta/dev channels) |
 | POST | `/v1/system/update` | Trigger system update |
 | GET | `/v1/system/containers` | List all Docker containers and status |
 | GET | `/v1/system/containers/:id/logs` | Get container logs (tail-able) |
+
+**System Reset body:**
+```json
+{
+  "holding_name": "My Holding",
+  "main_agent_name": "KonnerBot",
+  "default_model": "minimax-m2.7:cloud"
+}
+```
+All fields are optional — defaults are used if omitted. This stops all OpenClaw containers, clears in-memory state, truncates all database tables, and reinitializes with a fresh holding and MAIN agent.
+
+**Holding Config response:**
+```json
+{
+  "holding_name": "My Holding",
+  "main_agent_name": "KonnerBot",
+  "default_model": "minimax-m2.7:cloud",
+  "initialized": true
+}
+```
 
 ---
 
@@ -265,15 +371,15 @@ For single-value secrets, a legacy `"value": "..."` field is also accepted inste
 **Pull Model body:**
 ```json
 {
-  "model": "glm-5:cloud"
+  "model": "minimax-m2.7:cloud"
 }
 ```
 
 **List Models response:**
 ```json
 {
-  "models": ["glm-5:cloud", "qwen3-coder-next:cloud"],
-  "default": "glm-5:cloud"
+  "models": ["minimax-m2.7:cloud", "qwen3-coder:480b-cloud", "kimi-k2.5:cloud"],
+  "default": "minimax-m2.7:cloud"
 }
 ```
 
@@ -289,7 +395,7 @@ For single-value secrets, a legacy `"value": "..."` field is also accepted inste
 ```json
 {
   "text": "hey can u check on the thing we talked about",
-  "model": "glm-5:cloud"
+  "model": "minimax-m2.7:cloud"
 }
 ```
 `model` is optional — defaults to the `rewrite_model` system setting, or the system default model.
