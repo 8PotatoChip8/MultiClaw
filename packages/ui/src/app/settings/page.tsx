@@ -13,7 +13,7 @@ const channelInfo: Record<Channel, { label: string; desc: string; icon: any; col
 
 export default function SettingsPage() {
     const [settings, setSettings] = useState<Record<string, string>>({});
-    const [selectedChannel, setSelectedChannel] = useState<Channel>('stable');
+    const [selectedChannel, setSelectedChannel] = useState<Channel | null>(null);
     const [saving, setSaving] = useState(false);
     const [saved, setSaved] = useState(false);
     const [updateInfo, setUpdateInfo] = useState<any>(null);
@@ -50,11 +50,16 @@ export default function SettingsPage() {
         api.getSettings().then(data => {
             if (data && typeof data === 'object') {
                 setSettings(data);
-                if (data.update_channel) setSelectedChannel(data.update_channel as Channel);
+                setSelectedChannel((data.update_channel as Channel) || 'stable');
                 if (data.heartbeat_interval_secs) setHeartbeatSecs(data.heartbeat_interval_secs);
                 if (data.rewrite_model) setRewriteModel(data.rewrite_model);
             }
-        });
+        }).catch(() => setSelectedChannel('stable'));
+        // Auto-fetch update status so it's visible immediately
+        api.checkForUpdate().then(info => {
+            setUpdateInfo(info);
+            if (info) localStorage.setItem('_update_info', JSON.stringify(info));
+        }).catch(() => {});
         api.getModels().then(data => {
             if (data?.models) setModels(data.models);
             if (data?.default) setDefaultModel(data.default);
@@ -148,7 +153,9 @@ export default function SettingsPage() {
                 </div>
 
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                    {(Object.keys(channelInfo) as Channel[]).map(ch => {
+                    {!selectedChannel ? (
+                        <div style={{ padding: '16px 20px', color: 'var(--text-muted)', fontSize: '13px' }}>Loading channel settings...</div>
+                    ) : (Object.keys(channelInfo) as Channel[]).map(ch => {
                         const info = channelInfo[ch];
                         const isSelected = selectedChannel === ch;
                         const Icon = info.icon;
@@ -191,7 +198,7 @@ export default function SettingsPage() {
                                 </div>
                             </div>
                         );
-                    })}
+                    }))}
                 </div>
             </div>
 
@@ -514,7 +521,7 @@ export default function SettingsPage() {
                     <span style={{ color: 'var(--text-muted)' }}>Version:</span>
                     <span style={{ fontFamily: 'monospace' }}>{settings.version || 'unknown'}</span>
                     <span style={{ color: 'var(--text-muted)' }}>Update channel:</span>
-                    <span>{channelInfo[selectedChannel]?.label}</span>
+                    <span>{selectedChannel ? channelInfo[selectedChannel]?.label : '...'}</span>
                 </div>
             </div>
 
