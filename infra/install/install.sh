@@ -3,13 +3,32 @@ set -e
 
 # MultiClaw MVP Installer Script
 # Host strictly Ubuntu 24.04
+#
+# Usage:
+#   Full install:        curl -fsSL .../install.sh | sudo bash
+#   Dependencies only:   curl -fsSL .../install.sh | sudo bash -s -- --deps-only
+#
+# The --deps-only flag installs all system dependencies (Docker, Incus, Ollama,
+# QEMU/KVM, etc.) without cloning the repo, building containers, pulling models,
+# or initializing the holding. Useful for pre-staging a machine before the full
+# install, especially on slow internet connections.
+#
+# After running --deps-only, run the full install normally — it will skip
+# dependencies that are already present and go straight to setup.
+
+DEPS_ONLY=false
+for arg in "$@"; do
+  case "$arg" in
+    --deps-only) DEPS_ONLY=true ;;
+  esac
+done
 
 log() {
   echo -e "\033[1;32m[multiclaw-install]\033[0m $1"
 }
 
 if [[ $EUID -ne 0 ]]; then
-   echo "This script must be run as root (or with sudo)" 
+   echo "This script must be run as root (or with sudo)"
    exit 1
 fi
 
@@ -116,6 +135,23 @@ if command -v ufw &> /dev/null; then
   ufw allow 3000/tcp comment "MultiClaw Dashboard" || true
   ufw allow 8080/tcp comment "MultiClaw API" || true
   ufw allow 11434/tcp comment "Ollama API" || true
+fi
+
+# ── Dependencies-only exit point ──
+if [ "$DEPS_ONLY" = true ]; then
+  echo ""
+  log "=============================================="
+  log "  Dependencies installed successfully!"
+  log "=============================================="
+  log ""
+  log "Installed: Docker, Incus, Ollama, QEMU/KVM, curl, jq, git"
+  log ""
+  log "To complete the MultiClaw installation, run the full installer:"
+  log "  curl -fsSL https://raw.githubusercontent.com/8PotatoChip8/MultiClaw/main/infra/install/install.sh | sudo bash"
+  log ""
+  log "The full install will skip these dependencies (already present)"
+  log "and go straight to cloning the repo, building, and initializing."
+  exit 0
 fi
 
 log "Generating Master Key..."
