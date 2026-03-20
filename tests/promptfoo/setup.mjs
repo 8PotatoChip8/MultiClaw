@@ -118,17 +118,30 @@ async function waitForMainAgent() {
   console.log(`  Waiting for MAIN agent to boot (up to ${MAIN_BOOT_TIMEOUT}s)...`);
   const deadline = Date.now() + MAIN_BOOT_TIMEOUT * 1000;
 
+  let main = null;
   while (Date.now() < deadline) {
     const agents = await getAgents();
-    const main = agents.find(a => a.role === 'MAIN' && a.status === 'ACTIVE');
-    if (main) {
-      console.log(`  MAIN agent "${main.name}" is active.`);
-      return main;
-    }
+    main = agents.find(a => a.role === 'MAIN' && a.status === 'ACTIVE');
+    if (main) break;
     await sleep(POLL_INTERVAL * 1000);
   }
 
-  throw new Error(`MAIN agent did not become active within ${MAIN_BOOT_TIMEOUT}s`);
+  if (!main) throw new Error(`MAIN agent did not become active within ${MAIN_BOOT_TIMEOUT}s`);
+
+  // Wait for OpenClaw container to be healthy (ACTIVE in DB doesn't mean runtime is ready)
+  console.log(`  MAIN agent "${main.name}" is active. Waiting for OpenClaw runtime...`);
+  while (Date.now() < deadline) {
+    try {
+      const { data } = await fetchJson(`${BASE_URL}/v1/agents/${main.id}/health`);
+      if (data?.container?.healthy) {
+        console.log(`  OpenClaw runtime is healthy.`);
+        return main;
+      }
+    } catch { /* not ready yet */ }
+    await sleep(POLL_INTERVAL * 1000);
+  }
+
+  throw new Error(`MAIN agent OpenClaw runtime did not become healthy within ${MAIN_BOOT_TIMEOUT}s`);
 }
 
 async function waitForCeo() {
@@ -201,7 +214,7 @@ async function sendOperatorMessage(threadId, message, timeoutSecs = 120) {
     const agentMsgs = newMsgs.filter(m => m.sender_type === 'AGENT');
     if (agentMsgs.length > 0) {
       const reply = agentMsgs.map(m =>
-        typeof m.content === 'string' ? m.content : JSON.stringify(m.content)
+        typeof m.content === 'string' ? m.content : (m.content?.text || JSON.stringify(m.content))
       ).join('\n');
       console.log(`    Reply: "${reply.substring(0, 120)}${reply.length > 120 ? '...' : ''}"`);
       return reply;

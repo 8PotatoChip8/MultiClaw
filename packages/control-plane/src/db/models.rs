@@ -102,20 +102,6 @@ pub struct Vm {
 
 // ─── Shared VMs ───────────────────────────────────────────────
 
-#[derive(Debug, Serialize, Deserialize, FromRow)]
-pub struct SharedVm {
-    pub id: Uuid,
-    pub vm_id: Uuid,
-    pub scope_type: String,
-    pub company_id: Uuid,
-    pub department_manager_id: Option<Uuid>,
-    pub vm_purpose: String,
-    pub provisioned_by_agent_id: Uuid,
-    pub label: Option<String>,
-    pub resource_limits: JsonValue,
-    pub created_at: DateTime<Utc>,
-}
-
 /// Joined view returned by list/get endpoints.
 #[derive(Debug, Serialize, Deserialize, FromRow)]
 pub struct SharedVmDetail {

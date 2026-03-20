@@ -6674,7 +6674,7 @@ async fn check_shared_vm_access(
     let svm: Option<(String, Uuid, Option<Uuid>, String)> = sqlx::query_as(
         "SELECT scope_type, company_id, department_manager_id, vm_purpose FROM shared_vms WHERE id = $1"
     ).bind(shared_vm_id).fetch_optional(db).await.ok().flatten();
-    let (scope_type, vm_company_id, dept_manager_id, vm_purpose) = match svm {
+    let (_scope_type, vm_company_id, dept_manager_id, vm_purpose) = match svm {
         Some(s) => s,
         None => return Err((StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"})))),
     };
@@ -7278,7 +7278,7 @@ async fn trigger_shared_vm_provisioning(state: &AppState, request_id: Uuid) {
         "SELECT type, payload FROM requests WHERE id = $1"
     ).bind(request_id).fetch_optional(&state.db).await.ok().flatten();
 
-    let (req_type, payload) = match row {
+    let (_req_type, payload) = match row {
         Some(r) if r.0 == "REQUEST_SHARED_VM" => r,
         _ => return,
     };
