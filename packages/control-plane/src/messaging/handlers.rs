@@ -144,7 +144,8 @@ async fn build_thread_context(
 /// Find subordinates of `agent_id` that have no DM thread with it.
 /// For MAIN: subordinates = CEOs in the same holding.
 /// For CEO/Manager: subordinates = agents with parent_agent_id = agent_id.
-async fn find_unbriefed_subordinates(state: &AppState, agent_id: Uuid) -> Vec<String> {
+/// Returns Vec<(name, id)> so callers can include agent IDs in hints.
+async fn find_unbriefed_subordinates(state: &AppState, agent_id: Uuid) -> Vec<(String, Uuid)> {
     let agent_role: Option<String> = sqlx::query_scalar(
         "SELECT role FROM agents WHERE id = $1"
     ).bind(agent_id)
@@ -157,8 +158,8 @@ async fn find_unbriefed_subordinates(state: &AppState, agent_id: Uuid) -> Vec<St
         .fetch_optional(&state.db).await.ok().flatten();
 
         if let Some(hid) = holding_id {
-            sqlx::query_scalar(
-                "SELECT a.name FROM agents a \
+            sqlx::query_as(
+                "SELECT a.name, a.id FROM agents a \
                  JOIN company_ceos cc ON cc.agent_id = a.id \
                  JOIN companies c ON c.id = cc.company_id \
                  WHERE c.holding_id = $1 AND a.status = 'ACTIVE' AND a.role = 'CEO' \
@@ -176,8 +177,8 @@ async fn find_unbriefed_subordinates(state: &AppState, agent_id: Uuid) -> Vec<St
             vec![]
         }
     } else {
-        sqlx::query_scalar(
-            "SELECT a.name FROM agents a \
+        sqlx::query_as(
+            "SELECT a.name, a.id FROM agents a \
              WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
                AND NOT EXISTS ( \
                    SELECT 1 FROM thread_members tm1 \
@@ -316,10 +317,15 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
     {
         let unbriefed = find_unbriefed_subordinates(state, responding_agent_id).await;
         if !unbriefed.is_empty() {
+            let names: Vec<&str> = unbriefed.iter().map(|(n, _)| n.as_str()).collect();
             tracing::info!(
                 "thread_reply: {} has {} unbriefed subordinates after responding: {:?}",
-                responding_agent_id, unbriefed.len(), unbriefed
+                responding_agent_id, unbriefed.len(), names
             );
+            // Serialize as [{name, id}, ...] so the action_prompt can include IDs
+            let unbriefed_json: Vec<serde_json::Value> = unbriefed.iter()
+                .map(|(name, id)| serde_json::json!({"name": name, "id": id.to_string()}))
+                .collect();
             // Delay 60s to let newly-hired agents' OpenClaw instances boot
             let run_after = chrono::Utc::now() + chrono::Duration::seconds(60);
             let _ = state.enqueue_message_delayed(
@@ -330,7 +336,7 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
                     "agent_id": responding_agent_id.to_string(),
                     "sender_name": "system",
                     "thread_id": "",
-                    "unbriefed": unbriefed,
+                    "unbriefed": unbriefed_json,
                 }),
                 Some(run_after),
             ).await;
@@ -933,8 +939,8 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
                 .unwrap_or_else(|| "your colleague".into());
 
             // Find direct subordinates the sender hasn't DM'd yet (no DM thread exists)
-            let unbriefed: Vec<String> = sqlx::query_scalar(
-                "SELECT a.name FROM agents a \
+            let unbriefed: Vec<(String, Uuid)> = sqlx::query_as(
+                "SELECT a.name, a.id FROM agents a \
                  WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' AND a.id != $2 \
                    AND NOT EXISTS ( \
                        SELECT 1 FROM thread_members tm1 \
@@ -976,6 +982,9 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
     }
 
     if let Some((agent_id, target_name, tid, unbriefed)) = sender_prompt_data {
+        let unbriefed_json: Vec<serde_json::Value> = unbriefed.iter()
+            .map(|(name, id)| serde_json::json!({"name": name, "id": id.to_string()}))
+            .collect();
         let _ = state.enqueue_message_delayed(
             agent_id,
             4, // action_prompt priority (higher than heartbeat=5)
@@ -984,7 +993,7 @@ async fn dm_cleanup(state: &AppState, sender_id: Uuid, target_id: Uuid, payload:
                 "agent_id": agent_id.to_string(),
                 "sender_name": target_name,
                 "thread_id": tid,
-                "unbriefed": unbriefed,
+                "unbriefed": unbriefed_json,
             }),
             run_after,
         ).await;
@@ -1053,13 +1062,26 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
 
     let unbriefed_hint = payload.get("unbriefed")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>())
-        .filter(|names| !names.is_empty())
-        .map(|names| format!(
-            "\n\nREMINDER: You have team members who have NOT been briefed yet: {}. \
-             Brief them now — send each a DM with their role, responsibilities, and first tasks.",
-            names.join(", ")
-        ))
+        .filter(|arr| !arr.is_empty())
+        .map(|arr| {
+            // Parse [{name, id}, ...] format (new) or ["name", ...] format (legacy)
+            let entries: Vec<String> = arr.iter().filter_map(|v| {
+                if let Some(obj) = v.as_object() {
+                    let name = obj.get("name").and_then(|n| n.as_str()).unwrap_or("unknown");
+                    let id = obj.get("id").and_then(|i| i.as_str()).unwrap_or("unknown");
+                    Some(format!("{} (agent_id: {})", name, id))
+                } else {
+                    v.as_str().map(|s| s.to_string())
+                }
+            }).collect();
+            if entries.is_empty() { return String::new(); }
+            format!(
+                "\n\nCRITICAL: These team members have NOT been briefed — you MUST DM each one right now:\n{}\n\
+                 Use the dm endpoint for each: curl -s -X POST $MULTICLAW_API_URL/v1/agents/$AGENT_ID/dm \
+                 -H 'Content-Type: application/json' -d '{{\"target\": \"THEIR_AGENT_ID\", \"message\": \"your briefing message\"}}'",
+                entries.iter().map(|e| format!("  - {}", e)).collect::<Vec<_>>().join("\n")
+            )
+        })
         .unwrap_or_default();
 
     let action_prompt = format!(
@@ -1099,16 +1121,23 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
                 tracing::debug!("Post-DM: {} has no immediate actions", agent_id);
             } else {
                 tracing::info!("Post-DM: {} took action ({} chars)", agent_id, cleaned.len());
+            }
 
-                // Re-check for unbriefed subordinates after the agent took action.
-                // The agent may have hired new people during this action_prompt.
+            // Always re-check for unbriefed subordinates — even if agent said NO_ACTION_NEEDED.
+            // The agent may have claimed it briefed someone without actually sending a DM.
+            // Cap at 3 retries to prevent infinite loops.
+            let retry_count = payload.get("unbriefed_retry").and_then(|v| v.as_u64()).unwrap_or(0);
+            if retry_count < 3 {
                 let new_unbriefed = find_unbriefed_subordinates(state, agent_id).await;
-
                 if !new_unbriefed.is_empty() {
+                    let names: Vec<&str> = new_unbriefed.iter().map(|(n, _)| n.as_str()).collect();
                     tracing::info!(
-                        "Post-action: {} has {} unbriefed subordinates: {:?}",
-                        agent_id, new_unbriefed.len(), new_unbriefed
+                        "Post-action: {} has {} unbriefed subordinates (retry {}): {:?}",
+                        agent_id, new_unbriefed.len(), retry_count + 1, names
                     );
+                    let unbriefed_json: Vec<serde_json::Value> = new_unbriefed.iter()
+                        .map(|(name, id)| serde_json::json!({"name": name, "id": id.to_string()}))
+                        .collect();
                     let _ = state.enqueue_message(
                         agent_id,
                         3, // higher priority — briefing is important
@@ -1117,7 +1146,8 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
                             "agent_id": agent_id.to_string(),
                             "sender_name": "system",
                             "thread_id": "",
-                            "unbriefed": new_unbriefed,
+                            "unbriefed": unbriefed_json,
+                            "unbriefed_retry": retry_count + 1,
                         }),
                     ).await;
                 }
