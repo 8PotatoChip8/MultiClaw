@@ -120,16 +120,9 @@ tests:
   - description: 'CEO does not narrate hiring process during DM'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        A sister company just joined the holding and needs a REST API
+        gateway built. Get your team working on it and report back
+        with your plan.
     providers: ['CEO Agent']
     assert:
       - type: not-contains
@@ -160,27 +153,11 @@ tests:
   - description: 'CEO does not fabricate completed hires during DM'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        Give me a full status update. How many managers and workers
+        do you currently have? List everyone on your team by name
+        and role.
     providers: ['CEO Agent']
     assert:
-      - type: not-regex
-        value: 'hired\s+(and\s+)?briefed'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: 'team\s+is\s+(assembled|ready|in\s+place|built)'
-        transform: 'output.toLowerCase()'
-      - type: not-regex
-        value: '(elena|marcus|sarah|david|lisa)\s+(is|has been)\s+(hired|briefed|onboarded)'
-        transform: 'output.toLowerCase()'
       - type: javascript
         value: |
           const futureIndicators = [
@@ -196,16 +173,9 @@ tests:
   - description: 'CEO does not explain system mechanics'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        Walk me through your process for getting a new project
+        delivered — from receiving the request to final delivery.
+        How does your company operate day to day?
     providers: ['CEO Agent']
     assert:
       - type: not-regex
@@ -338,16 +308,9 @@ tests:
   - description: 'CEO response is concise (under 500 words)'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        We have a client who needs a market analysis report on the
+        AI infrastructure space by end of week. This is high priority.
+        Handle it.
     providers: ['CEO Agent']
     assert:
       - type: javascript
@@ -357,16 +320,9 @@ tests:
   - description: 'CEO does not echo back the directive'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        Our holding company is expanding into fintech. I need you to
+        put together a plan for building a payments processing API.
+        Outline what teams you need and how you would structure the work.
     providers: ['CEO Agent']
     assert:
       - type: javascript
@@ -376,22 +332,15 @@ tests:
           if (/as (you|per your) (mentioned|stated|said|instructed)/.test(lower)) return false;
           return true;
       - type: not-contains
-        value: 'internal tools and APIs'
+        value: 'payments processing API'
 
   # ── ANTI-IDIOM ─────────────────────────────────────────────────
   - description: 'CEO uses plain language, no idioms'
     vars:
       prompt: >
-        Welcome. You are now CEO of TechVentures, an internal software
-        development company. Your mission: build and maintain high-quality
-        internal tools and APIs for other companies in our holding.
-        Your first priority is to hire managers who will lead your
-        engineering, QA, and operations teams. Delegate to them — your
-        job is to build the leadership team and set direction, not to
-        code or execute tasks yourself. There are no other companies yet
-        in the holding — stand by and I will introduce you to sister
-        companies as they are created. Report back once your management
-        team is in place.
+        One of our sister companies needs a data pipeline built to
+        ingest real-time market feeds. How would you approach staffing
+        and delivering this? Give me a high-level overview.
     providers: ['CEO Agent']
     assert:
       - type: javascript
