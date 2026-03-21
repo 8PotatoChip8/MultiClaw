@@ -1368,15 +1368,30 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
         .fetch_optional(&state.db).await.ok().flatten().unwrap_or_else(|| "minimax-m2.7:cloud".into());
     let model = payload.preferred_model.unwrap_or(system_default);
     let agent_id = Uuid::new_v4();
-    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let base_handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let handle = {
+        let mut candidate = base_handle.clone();
+        let mut suffix = 2u32;
+        while sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agents WHERE handle = $1")
+            .bind(&candidate).fetch_one(&state.db).await.unwrap_or(0) > 0 {
+            candidate = format!("{}-{}", base_handle, suffix);
+            suffix += 1;
+        }
+        candidate
+    };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'CEO',$4,$5,$6,$7,$8,'ACTIVE')"
     ).bind(agent_id).bind(holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(&model).bind(policy_id)
-    .execute(&state.db).await;
+    .execute(&state.db).await {
+        tracing::error!("hire_ceo: failed to insert agent: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to create agent: {}", e)})));
+    }
 
-    let _ = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
-        .bind(company_id).bind(agent_id).execute(&state.db).await;
+    if let Err(e) = sqlx::query("INSERT INTO company_ceos (company_id, agent_id) VALUES ($1, $2)")
+        .bind(company_id).bind(agent_id).execute(&state.db).await {
+        tracing::error!("hire_ceo: failed to insert company_ceos: {}", e);
+    }
 
     // Spawn OpenClaw instance in background
     state.openclaw.register_pending_spawn(agent_id).await;
@@ -1521,12 +1536,25 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
     let policy_id = mgr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let model = payload.preferred_model.unwrap_or_else(|| ceo.effective_model.clone());
     let agent_id = Uuid::new_v4();
-    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let base_handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let handle = {
+        let mut candidate = base_handle.clone();
+        let mut suffix = 2u32;
+        while sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agents WHERE handle = $1")
+            .bind(&candidate).fetch_one(&state.db).await.unwrap_or(0) > 0 {
+            candidate = format!("{}-{}", base_handle, suffix);
+            suffix += 1;
+        }
+        candidate
+    };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'MANAGER',$4,$5,$6,$7,$8,$9,'ACTIVE')"
     ).bind(agent_id).bind(ceo.holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(ceo_id).bind(&model).bind(policy_id)
-    .execute(&state.db).await;
+    .execute(&state.db).await {
+        tracing::error!("hire_manager: failed to insert agent: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to create agent: {}", e)})));
+    }
 
     // Spawn OpenClaw instance in background
     state.openclaw.register_pending_spawn(agent_id).await;
@@ -1680,12 +1708,25 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
     let policy_id = wkr_policy.map(|p| p.id).unwrap_or(Uuid::new_v4());
     let model = payload.preferred_model.unwrap_or_else(|| mgr.effective_model.clone());
     let agent_id = Uuid::new_v4();
-    let handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let base_handle = format!("@{}", payload.name.to_lowercase().replace(' ', "-"));
+    let handle = {
+        let mut candidate = base_handle.clone();
+        let mut suffix = 2u32;
+        while sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agents WHERE handle = $1")
+            .bind(&candidate).fetch_one(&state.db).await.unwrap_or(0) > 0 {
+            candidate = format!("{}-{}", base_handle, suffix);
+            suffix += 1;
+        }
+        candidate
+    };
 
-    let _ = sqlx::query(
+    if let Err(e) = sqlx::query(
         "INSERT INTO agents (id, holding_id, company_id, role, name, handle, specialty, parent_agent_id, effective_model, tool_policy_id, status) VALUES ($1,$2,$3,'WORKER',$4,$5,$6,$7,$8,$9,'ACTIVE')"
     ).bind(agent_id).bind(mgr.holding_id).bind(company_id).bind(&payload.name).bind(&handle).bind(&payload.specialty).bind(mgr_id).bind(&model).bind(policy_id)
-    .execute(&state.db).await;
+    .execute(&state.db).await {
+        tracing::error!("hire_worker: failed to insert agent: {}", e);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": format!("Failed to create agent: {}", e)})));
+    }
 
     // Spawn OpenClaw instance in background
     state.openclaw.register_pending_spawn(agent_id).await;
