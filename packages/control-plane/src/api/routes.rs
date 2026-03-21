@@ -700,10 +700,7 @@ async fn check_dm_mode(state: &AppState, agent_id: Uuid) -> Option<(StatusCode, 
         Some((
             StatusCode::CONFLICT,
             Json(json!({
-                "error": "You are currently in a DM conversation. Focus on responding to the message. \
-                          Heavy actions (hiring, DMs, provisioning) are blocked during conversations. \
-                          You will receive a separate action prompt after this conversation ends \
-                          where you can execute these actions."
+                "error": "Finish your current conversation first. You can take these actions after the conversation ends."
             })),
         ))
     } else {
@@ -894,6 +891,8 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
                 || lower.contains("system prompt")
                 || lower.contains("system_prompt")
                 || (lower.contains("once this conversation closes") && lower.contains("receive"))
+                || (lower.contains("blocked") && lower.contains("during") && lower.contains("conversation"))
+                || (lower.contains("hiring") && lower.contains("blocked"))
             );
             if !is_internal_leak {
                 cleaned.push(*line);
