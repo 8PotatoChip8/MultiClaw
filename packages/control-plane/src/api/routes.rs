@@ -909,8 +909,19 @@ pub(crate) fn strip_agent_tags(response: &str) -> (String, bool) {
         }
     }
     // Also strip bench/on-demand models that aren't in DEFAULT_MODELS
-    for extra in &["nemotron-4-super:cloud", "deepseek-v3:cloud"] {
+    for extra in &["nemotron-4-super:cloud", "deepseek-v3:cloud", "kimi-k2:cloud"] {
         text = text.replace(extra, "[model]");
+    }
+    // Models may render size suffixes with colons instead of hyphens
+    // (e.g. "qwen3-coder:480b:cloud" instead of "qwen3-coder:480b-cloud").
+    // Do a second pass replacing hyphen-cloud with colon-cloud variants.
+    for model_name in DEFAULT_MODELS {
+        if model_name.contains("-cloud") {
+            let colon_variant = model_name.replace("-cloud", ":cloud");
+            if text.contains(&colon_variant) {
+                text = text.replace(&colon_variant, "[model]");
+            }
+        }
     }
     // Strip pure narration lines (runs AFTER newline/word fixes so streaming fragments
     // like "Let\nme check my memory..." are cleaned to "Let me check my memory..." first)
