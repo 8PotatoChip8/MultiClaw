@@ -141,6 +141,57 @@ async fn build_thread_context(
     format!("You are {} ({}). {}", agent_name_ctx, role_str, with_history)
 }
 
+/// Find subordinates of `agent_id` that have no DM thread with it.
+/// For MAIN: subordinates = CEOs in the same holding.
+/// For CEO/Manager: subordinates = agents with parent_agent_id = agent_id.
+async fn find_unbriefed_subordinates(state: &AppState, agent_id: Uuid) -> Vec<String> {
+    let agent_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM agents WHERE id = $1"
+    ).bind(agent_id)
+    .fetch_optional(&state.db).await.ok().flatten();
+
+    if agent_role.as_deref() == Some("MAIN") {
+        let holding_id: Option<Uuid> = sqlx::query_scalar(
+            "SELECT holding_id FROM agents WHERE id = $1"
+        ).bind(agent_id)
+        .fetch_optional(&state.db).await.ok().flatten();
+
+        if let Some(hid) = holding_id {
+            sqlx::query_scalar(
+                "SELECT a.name FROM agents a \
+                 JOIN company_ceos cc ON cc.agent_id = a.id \
+                 JOIN companies c ON c.id = cc.company_id \
+                 WHERE c.holding_id = $1 AND a.status = 'ACTIVE' AND a.role = 'CEO' \
+                   AND NOT EXISTS ( \
+                       SELECT 1 FROM thread_members tm1 \
+                       JOIN thread_members tm2 ON tm1.thread_id = tm2.thread_id \
+                       JOIN threads t ON t.id = tm1.thread_id \
+                       WHERE t.type = 'DM' \
+                         AND tm1.member_type = 'AGENT' AND tm1.member_id = $2 \
+                         AND tm2.member_type = 'AGENT' AND tm2.member_id = a.id \
+                   )"
+            ).bind(hid).bind(agent_id)
+            .fetch_all(&state.db).await.unwrap_or_default()
+        } else {
+            vec![]
+        }
+    } else {
+        sqlx::query_scalar(
+            "SELECT a.name FROM agents a \
+             WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
+               AND NOT EXISTS ( \
+                   SELECT 1 FROM thread_members tm1 \
+                   JOIN thread_members tm2 ON tm1.thread_id = tm2.thread_id \
+                   JOIN threads t ON t.id = tm1.thread_id \
+                   WHERE t.type = 'DM' \
+                     AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
+                     AND tm2.member_type = 'AGENT' AND tm2.member_id = a.id \
+               )"
+        ).bind(agent_id)
+        .fetch_all(&state.db).await.unwrap_or_default()
+    }
+}
+
 /// Handles a message in a thread that needs a single agent's response.
 /// Payload: { thread_id, message_text, sender_id, sender_type, reply_depth, responding_agent_id }
 ///
@@ -256,6 +307,34 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
     // Clear the responding-to-user tracking
     if !is_agent_sender && thread_type == "DM" {
         state.responding_to_user.write().await.remove(&responding_agent_id);
+    }
+
+    // After the agent responds, check if it hired subordinates but didn't brief
+    // them (no DM thread exists). This catches models that claim "briefed on
+    // mission" without actually calling the DM endpoint. We enqueue an
+    // action_prompt with the unbriefed list so the agent gets another turn.
+    {
+        let unbriefed = find_unbriefed_subordinates(state, responding_agent_id).await;
+        if !unbriefed.is_empty() {
+            tracing::info!(
+                "thread_reply: {} has {} unbriefed subordinates after responding: {:?}",
+                responding_agent_id, unbriefed.len(), unbriefed
+            );
+            // Delay 60s to let newly-hired agents' OpenClaw instances boot
+            let run_after = chrono::Utc::now() + chrono::Duration::seconds(60);
+            let _ = state.enqueue_message_delayed(
+                responding_agent_id,
+                3,
+                "action_prompt",
+                serde_json::json!({
+                    "agent_id": responding_agent_id.to_string(),
+                    "sender_name": "system",
+                    "thread_id": "",
+                    "unbriefed": unbriefed,
+                }),
+                Some(run_after),
+            ).await;
+        }
     }
 
     Ok(())
@@ -1023,19 +1102,7 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
 
                 // Re-check for unbriefed subordinates after the agent took action.
                 // The agent may have hired new people during this action_prompt.
-                let new_unbriefed: Vec<String> = sqlx::query_scalar(
-                    "SELECT a.name FROM agents a \
-                     WHERE a.parent_agent_id = $1 AND a.status = 'ACTIVE' \
-                       AND NOT EXISTS ( \
-                           SELECT 1 FROM thread_members tm1 \
-                           JOIN thread_members tm2 ON tm1.thread_id = tm2.thread_id \
-                           JOIN threads t ON t.id = tm1.thread_id \
-                           WHERE t.type = 'DM' \
-                             AND tm1.member_type = 'AGENT' AND tm1.member_id = $1 \
-                             AND tm2.member_type = 'AGENT' AND tm2.member_id = a.id \
-                       )"
-                ).bind(agent_id)
-                .fetch_all(&state.db).await.unwrap_or_default();
+                let new_unbriefed = find_unbriefed_subordinates(state, agent_id).await;
 
                 if !new_unbriefed.is_empty() {
                     tracing::info!(
