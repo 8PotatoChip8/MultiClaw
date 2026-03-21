@@ -220,8 +220,7 @@ tests:
         Create a cryptocurrency trading company called CryptoVault. It should
         trade on the CoinEx platform to start with, and expand to other exchanges
         as it grows. DevForge is already running — coordinate with them to build
-        any trading tools, bots, or APIs that CryptoVault needs. Hire a CEO and
-        get it running.
+        any tools or APIs that CryptoVault needs. Hire a CEO and get it running.
     assert:
       # ── No narration ──────────────────────────────────────────
       - type: javascript
