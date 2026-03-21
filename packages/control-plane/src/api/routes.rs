@@ -389,7 +389,8 @@ fn strip_narration_lines(text: &str) -> String {
         "let me now", "let me proceed", "let me first", "let me begin",
         "let me build", "let me hire", "let me brief", "let me evaluate",
         "now let me", "now i'll", "now i will",
-        "now briefing", "now hiring", "now proceeding", "now building",
+        "now briefing", "now hiring", "now creating", "now setting up",
+        "now proceeding", "now building",
         "starting with", "beginning with",
         "i'll now", "i'll check", "i'll review", "i'll look", "i'll send",
         "i'll search", "i'll find", "i'll get", "i'll proceed", "i'll sequence",
@@ -541,7 +542,20 @@ fn strip_narration_lines(text: &str) -> String {
             }
         });
 
-        if !filler_narration {
+        // Check for mid-line narration after a sentence boundary.
+        // Catches patterns like "TestCorp created. Now hiring a CEO." where
+        // the line starts with a short status fragment followed by narration.
+        let mid_line_narration = !filler_narration && lower.len() < 120 && {
+            // Split on ". " to find sentence boundaries
+            if let Some(dot_pos) = lower.find(". ") {
+                let after_dot = lower[dot_pos + 2..].trim_start();
+                !after_dot.is_empty() && is_narration(after_dot, NARRATION_PREFIXES)
+            } else {
+                false
+            }
+        };
+
+        if !filler_narration && !mid_line_narration {
             result.push(line);
         }
     }
