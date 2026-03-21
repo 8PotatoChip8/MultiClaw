@@ -177,9 +177,11 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
     "requester_agent_id": "{{AGENT_ID}}",
     "company_id": "{{COMPANY_ID}}",
     "vm_purpose": "company_test",
-    "label": "COMPANY_NAME Test Server"
+    "label": "COMPANY_NAME Test Server",
+    "resources": {"vcpus": 2, "memory_mb": 2048, "disk_gb": 20}
   }'
 ```
+The `resources` field is optional — defaults to 2 vCPUs, 2GB RAM, 20GB disk. To change specs on an existing test server, destroy it and create a new one with the specs you need.
 
 **Request a company production server:**
 ```bash
@@ -189,9 +191,11 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
     "requester_agent_id": "{{AGENT_ID}}",
     "company_id": "{{COMPANY_ID}}",
     "vm_purpose": "company_prod",
-    "label": "COMPANY_NAME Production"
+    "label": "COMPANY_NAME Production",
+    "resources": {"vcpus": 4, "memory_mb": 4096, "disk_gb": 50}
   }'
 ```
+**Production servers are permanent.** Size them correctly at creation — they cannot be rebuilt, destroyed, or resized. Only provision a production server when you are ready to deploy.
 
 **List all shared VMs in your company:**
 ```bash

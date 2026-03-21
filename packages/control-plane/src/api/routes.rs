@@ -7109,6 +7109,20 @@ async fn destroy_shared_vm(
         None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
     };
 
+    // Production servers cannot be destroyed by anyone except MAIN (system-level cleanup only)
+    if vm_purpose == "company_prod" {
+        let caller_role: Option<String> = if let Some(aid) = params.get("agent_id").and_then(|s| Uuid::parse_str(s).ok()) {
+            sqlx::query_scalar::<_, String>("SELECT role FROM agents WHERE id = $1")
+                .bind(aid)
+                .fetch_optional(&state.db).await.ok().flatten()
+        } else { None };
+        if caller_role.as_deref() != Some("MAIN") {
+            return (StatusCode::FORBIDDEN, Json(json!({
+                "error": "Production servers cannot be destroyed. They are permanent infrastructure."
+            })));
+        }
+    }
+
     // Permission check: who can destroy what?
     if let Some(agent_id_str) = params.get("agent_id") {
         if let Ok(agent_id) = Uuid::parse_str(agent_id_str) {
@@ -7123,7 +7137,10 @@ async fn destroy_shared_vm(
                 }
                 match role.as_str() {
                     "MAIN" => { /* can destroy anything */ }
-                    "CEO" => { /* can destroy anything in their company */ }
+                    "CEO" => {
+                        // CEOs can destroy dept_test and company_test in their company
+                        // (company_prod already blocked above)
+                    }
                     "MANAGER" => {
                         // Managers can only destroy their own dept_test servers
                         if vm_purpose != "dept_test" || dept_manager_id != Some(agent_id) {
