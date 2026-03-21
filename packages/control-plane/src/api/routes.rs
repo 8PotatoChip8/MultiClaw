@@ -6040,10 +6040,12 @@ async fn system_reset(
     ).bind(&preserved_keys[..]).fetch_all(&state.db).await.unwrap_or_default();
 
     // Step 2: Truncate all tables (CASCADE handles foreign keys)
+    // Exclude _sqlx_migrations — sqlx uses it to track which migrations have run.
+    // Truncating it makes sqlx re-run CREATE TABLE on next startup, which crashes.
     let truncate_result = sqlx::query(
         "DO $$ DECLARE r RECORD;
          BEGIN
-           FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public') LOOP
+           FOR r IN (SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename != '_sqlx_migrations') LOOP
              EXECUTE 'TRUNCATE TABLE ' || quote_ident(r.tablename) || ' CASCADE';
            END LOOP;
          END $$;"
