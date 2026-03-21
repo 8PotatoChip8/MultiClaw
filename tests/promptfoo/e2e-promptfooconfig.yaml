@@ -30,7 +30,7 @@ providers:
       baseUrl: 'http://localhost:8080'
       mode: e2e
       settleTime: 90       # seconds of no new agent messages = cascade done
-      maxWait: 600          # max wait for cascade (10 min)
+      maxWait: 900          # max wait for cascade (15 min)
       pollInterval: 5
 
 prompts:
@@ -209,6 +209,189 @@ tests:
             }
           }
           return { pass: true, score: 1, reason: `${mainMsgs.length} MAIN messages checked, no mechanics leaks` };
+
+  # ── MULTI-COMPANY SCENARIO ──────────────────────────────────
+  # Runs AFTER DevForge is already up. Creates a second company and
+  # tests cross-company coordination, behavioral compliance under load,
+  # and that MAIN can orchestrate multiple companies simultaneously.
+  - description: 'E2E: Create second company — cross-company coordination'
+    vars:
+      prompt: >
+        Create a cryptocurrency trading company called CryptoVault. It should
+        trade on the CoinEx platform to start with, and expand to other exchanges
+        as it grows. DevForge is already running — coordinate with them to build
+        any trading tools, bots, or APIs that CryptoVault needs. Hire a CEO and
+        get it running.
+    assert:
+      # ── No narration ──────────────────────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: false, score: 0, reason: 'No messages collected from cascade' };
+          const narrationPatterns = [
+            /^(now (hiring|creating|setting up|briefing|proceeding|building))/i,
+            /\. now (hiring|creating|setting up|briefing|proceeding|building)/i,
+            /^(let me (check|look|review|send|search|read|create|hire|brief|start))/i,
+            /^(i'll now|i will now|proceeding to|will proceed)/i,
+            /^step \d+[.:]/i,
+          ];
+          for (const m of messages) {
+            for (const pat of narrationPatterns) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `Narration from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no narration found` };
+
+      # ── No housekeeping leaks ─────────────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const housekeeping = [
+            /memory (updated|saved|recorded)/i,
+            /saved to (memory|memory\.md)/i,
+            /notes (recorded|saved|updated)/i,
+            /updated my (log|notes|memory)/i,
+            /dm sent/i,
+            /briefing sent/i,
+            /action required/i,
+          ];
+          for (const m of messages) {
+            for (const pat of housekeeping) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `Housekeeping leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no housekeeping leaks` };
+
+      # ── No identity breaks ────────────────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const identityBreaks = [
+            /i am an? (ai|artificial|llm|large language)/i,
+            /i'm an? (ai|artificial|llm|large language)/i,
+            /\blanguage model\b/i,
+            /\bAI assistant\b/i,
+          ];
+          for (const m of messages) {
+            for (const pat of identityBreaks) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `Identity break from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no identity breaks` };
+
+      # ── No model name leaks ───────────────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const modelNames = [
+            /minimax/i, /\bm2\.7\b/i, /\bqwen\b/i, /\bkimi\b/i,
+            /deepseek/i, /devstral/i, /\bglm-5\b/i, /ollama/i,
+            /preferred_model/i, /effective_model/i,
+          ];
+          for (const m of messages) {
+            for (const pat of modelNames) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `Model name leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no model name leaks` };
+
+      # ── No system mechanics leaks ─────────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const mechanics = [
+            /\bOpenClaw\b/, /\bheartbeat\b/i, /\baction_prompt\b/i,
+            /\bcontrol plane\b/i, /\bmessage_queue\b/i,
+            /hiring.+blocked.+during/i,
+          ];
+          for (const m of messages) {
+            for (const pat of mechanics) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `System mechanics leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no system mechanics leaks` };
+
+      # ── No idioms or folksy language ──────────────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const idioms = [
+            'hit the ground running', 'irons in the fire', 'iron in the fire',
+            'move the needle', 'low-hanging fruit', 'low hanging fruit',
+            'circle back', 'deep dive', 'touch base',
+            'game changer', 'game-changer', 'at the end of the day',
+            'synergy', 'synergize', 'paradigm shift',
+          ];
+          for (const m of messages) {
+            const lower = m.message.toLowerCase();
+            for (const idiom of idioms) {
+              if (lower.includes(idiom)) return { pass: false, score: 0, reason: `Idiom from ${m.agent} (${m.role}): "${idiom}" in "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, no idioms found` };
+
+      # ── CEO delegates (does not self-execute) ─────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const ceoMsgs = messages.filter(m => m.role === 'CEO');
+          if (ceoMsgs.length === 0) return { pass: true, score: 1, reason: 'No CEO messages to check' };
+          const selfWork = /\bI('ll| will) (research|analyze|write|code|build|implement|develop) (the|a|this|it)\b/i;
+          const delegation = /\b(manager|team|hire|delegate|assign|department)\b/i;
+          for (const m of ceoMsgs) {
+            if (selfWork.test(m.message) && !delegation.test(m.message)) return { pass: false, score: 0, reason: `CEO self-executing from ${m.agent}: "${m.message.substring(0, 100)}"` };
+          }
+          return { pass: true, score: 1, reason: `${ceoMsgs.length} CEO messages checked, all delegate properly` };
+
+      # ── All messages concise (under 500 words) ────────────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          for (const m of messages) {
+            const words = m.message.split(/\s+/).length;
+            if (words > 500) return { pass: false, score: 0, reason: `${m.agent} (${m.role}) sent ${words} words: "${m.message.substring(0, 100)}..."` };
+          }
+          return { pass: true, score: 1, reason: `${messages.length} messages checked, all under 500 words` };
+
+      # ── MAIN does not explain system mechanics to CEO ─────────
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: true, score: 1, reason: 'No messages' };
+          const mainMsgs = messages.filter(m => m.role === 'MAIN');
+          if (mainMsgs.length === 0) return { pass: true, score: 1, reason: 'No MAIN messages to check' };
+          const mechanics = [
+            /hiring (limit|cap|quota)/i,
+            /approval (workflow|process|queue)/i,
+            /escalat(e|ion) (procedure|process|workflow)/i,
+            /manager.limit|worker.limit/i,
+          ];
+          for (const m of mainMsgs) {
+            for (const pat of mechanics) {
+              if (pat.test(m.message)) return { pass: false, score: 0, reason: `MAIN explained mechanics: "${m.message.substring(0, 100)}"` };
+            }
+          }
+          return { pass: true, score: 1, reason: `${mainMsgs.length} MAIN messages checked, no mechanics leaks` };
+
+      # ── Cross-company awareness ───────────────────────────────
+      # At least one message from MAIN or a CEO should reference DevForge,
+      # showing that multi-company coordination is happening.
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return { pass: false, score: 0, reason: 'No messages collected' };
+          const crossRefs = messages.filter(m =>
+            /devforge/i.test(m.message) && (m.role === 'MAIN' || m.role === 'CEO')
+          );
+          if (crossRefs.length === 0) return { pass: false, score: 0, reason: 'No cross-company coordination — no MAIN or CEO message references DevForge' };
+          return { pass: true, score: 1, reason: `${crossRefs.length} cross-company references found from MAIN/CEO` };
 
 # Output configuration
 outputPath: ./results/e2e-results.json
