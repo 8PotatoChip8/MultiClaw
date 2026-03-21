@@ -3,3 +3,4 @@ openclaw-data/
 target/
 node_modules/
 .next/
+infra/docker/.env

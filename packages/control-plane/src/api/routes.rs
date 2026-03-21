@@ -4993,6 +4993,11 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
 
         let is_stable = !matches!(channel.as_str(), "beta" | "dev");
 
+        // Back up .env before git operations — git reset --hard can overwrite it
+        // if it was tracked in older commits, destroying real credentials.
+        let env_path = "/opt/multiclaw/infra/docker/.env";
+        let env_backup = tokio::fs::read_to_string(env_path).await.ok();
+
         if is_stable {
             // Stable channel: fetch the latest release tag from GitHub and checkout that tag
             let client = reqwest::Client::builder()
@@ -5152,6 +5157,15 @@ async fn system_update(State(state): State<AppState>) -> impl IntoResponse {
                     let _ = state_clone.tx.send(json!({"type":"system_update","status":"failed","error": e.to_string()}).to_string());
                     return;
                 }
+            }
+        }
+
+        // Restore .env after git operations — ensures credentials survive updates.
+        if let Some(ref env_contents) = env_backup {
+            if let Err(e) = tokio::fs::write(env_path, env_contents).await {
+                tracing::warn!("Failed to restore .env after git update: {}", e);
+            } else {
+                tracing::info!("Restored .env after git update");
             }
         }
 
