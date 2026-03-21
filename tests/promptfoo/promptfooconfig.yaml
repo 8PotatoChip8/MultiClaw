@@ -315,7 +315,8 @@ tests:
     assert:
       - type: javascript
         value: |
-          return output.split(/\s+/).length <= 500;
+          const words = output.split(/\s+/).length;
+          return words <= 500;
 
   - description: 'CEO does not echo back the directive'
     vars:
