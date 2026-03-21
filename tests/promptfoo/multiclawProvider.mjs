@@ -272,6 +272,25 @@ async function observeHeartbeatBehavior(baseUrl, agentId, timeoutSecs, pollInter
  * can check every individual message for behavioral compliance.
  */
 async function sendDirectiveAndCollectAll(baseUrl, mainAgentId, message, settleTime, maxWait, pollInterval) {
+  // Wait for MAIN agent's OpenClaw to be ready before sending directive.
+  // After a restart/rebuild, the control plane health check passes immediately
+  // but OpenClaw containers take ~60s to start. Sending a directive during this
+  // window gets a "currently unavailable" canned response instead of real processing.
+  const readyDeadline = Date.now() + 180 * 1000; // wait up to 3 minutes
+  while (Date.now() < readyDeadline) {
+    try {
+      const health = await fetchJson(`${baseUrl}/v1/health`);
+      if (health.openclaw_ready) {
+        console.log(`  [E2E] OpenClaw instances ready.`);
+        break;
+      }
+      console.log(`  [E2E] Waiting for OpenClaw instances to be ready...`);
+    } catch (e) {
+      console.log(`  [E2E] Health check failed: ${e.message}`);
+    }
+    await sleep(5000);
+  }
+
   // Build agent lookup table
   const agents = await fetchJson(`${baseUrl}/v1/agents`);
   const agentMap = new Map();

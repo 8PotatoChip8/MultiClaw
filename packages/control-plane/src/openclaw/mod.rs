@@ -129,6 +129,11 @@ impl OpenClawManager {
         &self.data_dir
     }
 
+    /// Returns a read guard to the instances map (for health checks).
+    pub async fn instances_read(&self) -> tokio::sync::RwLockReadGuard<'_, HashMap<Uuid, OpenClawInstance>> {
+        self.instances.read().await
+    }
+
     /// Returns a mutable write guard to the instances map (for restart endpoint).
     pub async fn instances_mut(&self) -> tokio::sync::RwLockWriteGuard<'_, HashMap<Uuid, OpenClawInstance>> {
         self.instances.write().await

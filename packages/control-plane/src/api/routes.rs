@@ -1064,10 +1064,20 @@ pub fn app_router(state: AppState) -> Router {
 
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
     let db_ok = sqlx::query("SELECT 1").fetch_one(&state.db).await.is_ok();
+    // Check if all ACTIVE agents have Running OpenClaw instances
+    let openclaw_ready = {
+        let active_agents: Vec<(uuid::Uuid,)> = sqlx::query_as(
+            "SELECT id FROM agents WHERE status = 'ACTIVE'"
+        ).fetch_all(&state.db).await.unwrap_or_default();
+        let instances = state.openclaw.instances_read().await;
+        !active_agents.is_empty() && active_agents.iter().all(|(id,)| {
+            instances.get(id).map_or(false, |inst| inst.status == crate::openclaw::InstanceStatus::Running)
+        })
+    };
     if db_ok {
-        (StatusCode::OK, Json(json!({"status": "ok", "db": "ok"})))
+        (StatusCode::OK, Json(json!({"status": "ok", "db": "ok", "openclaw_ready": openclaw_ready})))
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "degraded", "db": "unreachable"})))
+        (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "degraded", "db": "unreachable", "openclaw_ready": false})))
     }
 }
 
