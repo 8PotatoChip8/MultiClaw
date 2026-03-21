@@ -6098,6 +6098,23 @@ async fn system_reset(
         instances.clear();
     }
 
+    // Step 1b: Destroy all Incus VMs (agent desktops, sandboxes, shared servers)
+    // These must be destroyed before truncating the DB, which deletes the provider_ref records.
+    if let Some(ref provider) = state.vm_provider {
+        let vm_refs: Vec<String> = sqlx::query_scalar(
+            "SELECT provider_ref FROM vms WHERE provider_ref IS NOT NULL"
+        ).fetch_all(&state.db).await.unwrap_or_default();
+
+        if !vm_refs.is_empty() {
+            tracing::info!("Destroying {} Incus VMs", vm_refs.len());
+            for vm_ref in &vm_refs {
+                if let Err(e) = provider.destroy(vm_ref).await {
+                    tracing::warn!("Failed to destroy VM '{}': {} (may already be gone)", vm_ref, e);
+                }
+            }
+        }
+    }
+
     // Preserve system settings that should survive a reset (update channel, deployed commit, etc.)
     let preserved_keys = ["update_channel", "deployed_commit", "heartbeat_interval_secs",
                           "rewrite_model", "recovery_prompts_enabled", "concurrency_probe_interval_secs"];
