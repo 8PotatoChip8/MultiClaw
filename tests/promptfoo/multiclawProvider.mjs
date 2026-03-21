@@ -313,15 +313,29 @@ async function sendDirectiveAndCollectAll(baseUrl, mainAgentId, message, settleT
 
   console.log(`  [E2E] Directive sent to MAIN. Waiting for cascade to settle...`);
 
-  // Wait for cascade to settle: no new messages for settleTime seconds
+  // Wait for cascade to settle: no new AGENT messages for settleTime seconds.
+  // Only agent messages count — user/system messages are ignored for settle detection.
+  // A minimum wait (minWait) ensures we don't settle before agents have time to respond
+  // (container creation, VM provisioning, etc. can take 60-120s).
+  const minWait = 90; // seconds — don't settle before this, even if idle
   const deadline = Date.now() + maxWait * 1000;
-  let lastNewMsgTime = Date.now();
-  let lastTotalMsgs = totalMsgsBefore;
+  const minWaitDeadline = Date.now() + minWait * 1000;
+  let lastNewAgentMsgTime = Date.now();
+  let lastAgentMsgCount = 0;
+
+  // Count agent messages before sending (baseline)
+  for (const t of uniqueThreadsBefore) {
+    const msgs = await getThreadMessages(baseUrl, t.id);
+    for (const m of msgs) {
+      if (m.sender_type === 'AGENT') lastAgentMsgCount++;
+    }
+  }
+  let baselineAgentMsgs = lastAgentMsgCount;
 
   while (Date.now() < deadline) {
     await sleep(pollInterval * 1000);
 
-    // Count total messages across all threads (including newly created ones)
+    // Count agent messages across all threads (including newly created ones)
     const agentThreads = await fetchJson(`${baseUrl}/v1/threads?agent_only=true`);
     const userThreads = await fetchJson(`${baseUrl}/v1/threads`);
     const allThreads = [...agentThreads, ...userThreads];
@@ -332,23 +346,34 @@ async function sendDirectiveAndCollectAll(baseUrl, mainAgentId, message, settleT
       return true;
     });
 
-    let currentTotal = 0;
+    let currentAgentMsgs = 0;
     for (const t of unique) {
       const msgs = await getThreadMessages(baseUrl, t.id);
-      currentTotal += msgs.length;
+      for (const m of msgs) {
+        if (m.sender_type === 'AGENT') currentAgentMsgs++;
+      }
     }
 
-    if (currentTotal > lastTotalMsgs) {
-      const delta = currentTotal - lastTotalMsgs;
-      console.log(`  [E2E] +${delta} new messages (total: ${currentTotal}). Resetting settle timer...`);
-      lastTotalMsgs = currentTotal;
-      lastNewMsgTime = Date.now();
+    if (currentAgentMsgs > lastAgentMsgCount) {
+      const delta = currentAgentMsgs - lastAgentMsgCount;
+      console.log(`  [E2E] +${delta} new agent messages (total: ${currentAgentMsgs}). Resetting settle timer...`);
+      lastAgentMsgCount = currentAgentMsgs;
+      lastNewAgentMsgTime = Date.now();
     }
 
-    const settledFor = (Date.now() - lastNewMsgTime) / 1000;
-    if (settledFor >= settleTime && currentTotal > totalMsgsBefore) {
-      console.log(`  [E2E] Cascade settled (no new messages for ${Math.round(settledFor)}s).`);
+    const settledFor = (Date.now() - lastNewAgentMsgTime) / 1000;
+    const pastMinWait = Date.now() >= minWaitDeadline;
+    const hasNewAgentMsgs = currentAgentMsgs > baselineAgentMsgs;
+
+    if (settledFor >= settleTime && pastMinWait && hasNewAgentMsgs) {
+      console.log(`  [E2E] Cascade settled (no new agent messages for ${Math.round(settledFor)}s).`);
       break;
+    }
+
+    // Log waiting status periodically if still in min-wait period
+    if (!pastMinWait && settledFor >= settleTime && !hasNewAgentMsgs) {
+      const remaining = Math.round((minWaitDeadline - Date.now()) / 1000);
+      console.log(`  [E2E] Waiting for first agent response (${remaining}s of min-wait remaining)...`);
     }
   }
 
