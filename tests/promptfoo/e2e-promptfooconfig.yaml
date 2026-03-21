@@ -29,7 +29,7 @@ providers:
     config:
       baseUrl: 'http://localhost:8080'
       mode: e2e
-      settleTime: 60       # seconds of no new agent messages = cascade done
+      settleTime: 90       # seconds of no new agent messages = cascade done
       maxWait: 600          # max wait for cascade (10 min)
       pollInterval: 5
 

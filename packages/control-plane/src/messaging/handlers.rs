@@ -326,8 +326,8 @@ pub async fn handle_thread_reply(state: &AppState, payload: &serde_json::Value) 
             let unbriefed_json: Vec<serde_json::Value> = unbriefed.iter()
                 .map(|(name, id)| serde_json::json!({"name": name, "id": id.to_string()}))
                 .collect();
-            // Delay 60s to let newly-hired agents' OpenClaw instances boot
-            let run_after = chrono::Utc::now() + chrono::Duration::seconds(60);
+            // Delay 30s to let newly-hired agents' OpenClaw instances boot
+            let run_after = chrono::Utc::now() + chrono::Duration::seconds(30);
             let _ = state.enqueue_message_delayed(
                 responding_agent_id,
                 3,
