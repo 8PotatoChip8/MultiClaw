@@ -1334,8 +1334,35 @@ async fn patch_agent(State(state): State<AppState>, Path(id): Path<String>, Json
 // Hiring (CEO / Manager / Worker) — wired to policy engine
 // ═══════════════════════════════════════════════════════════════
 
+/// Validate that a hire name looks like a real human name (first + last, not a job title).
+fn validate_hire_name(name: &str) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    let parts: Vec<&str> = name.split_whitespace().collect();
+    if parts.len() < 2 {
+        return Err((StatusCode::BAD_REQUEST, Json(json!({
+            "error": format!("'{}' is not a valid name. Provide a realistic full name with first and last name (e.g., 'Sarah Chen', 'David Kim').", name)
+        }))));
+    }
+    // Reject names that look like job titles (contain common title words)
+    let title_words = ["analyst", "manager", "engineer", "developer", "specialist",
+                       "coordinator", "director", "lead", "officer", "assistant",
+                       "consultant", "architect", "designer", "administrator", "intern",
+                       "trader", "researcher", "strategist", "operator", "supervisor"];
+    let lower = name.to_lowercase();
+    for tw in &title_words {
+        if lower.contains(tw) {
+            return Err((StatusCode::BAD_REQUEST, Json(json!({
+                "error": format!("'{}' looks like a job title, not a person's name. Provide a realistic human name (e.g., 'Sarah Chen', 'David Kim'). The specialty field is where you describe their role.", name)
+            }))));
+        }
+    }
+    Ok(())
+}
+
 async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let company_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
+
+    if let Err(resp) = validate_hire_name(&payload.name) { return resp; }
+
     // Count existing CEOs
     let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM company_ceos WHERE company_id = $1")
         .bind(company_id).fetch_one(&state.db).await.unwrap_or((0,));
@@ -1442,6 +1469,7 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
 async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let ceo_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     if let Some(resp) = check_dm_mode(&state, ceo_id).await { return resp; }
+    if let Err(resp) = validate_hire_name(&payload.name) { return resp; }
     let ceo: Option<Agent> = sqlx::query_as(
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'CEO'"
     ).bind(ceo_id).fetch_optional(&state.db).await.unwrap_or(None);
@@ -1616,6 +1644,7 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
 async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
     let mgr_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
     if let Some(resp) = check_dm_mode(&state, mgr_id).await { return resp; }
+    if let Err(resp) = validate_hire_name(&payload.name) { return resp; }
     let mgr: Option<Agent> = sqlx::query_as(
         "SELECT id, holding_id, company_id, role, name, specialty, parent_agent_id, preferred_model, effective_model, system_prompt, tool_policy_id, vm_id, sandbox_vm_id, handle, status, created_at FROM agents WHERE id = $1 AND role = 'MANAGER'"
     ).bind(mgr_id).fetch_optional(&state.db).await.unwrap_or(None);
@@ -2430,22 +2459,24 @@ async fn create_thread(State(state): State<AppState>, Json(p): Json<CreateThread
     // Enforce communication hierarchy for GROUP threads with agent members
     if p.r#type == "GROUP" {
         if let Some(ref member_ids) = p.member_ids {
-            // Load role, company_id, parent_agent_id for each agent member
-            let mut agents: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>)> = Vec::new();
+            // Load role, company_id, parent_agent_id, holding_id for each agent member
+            let mut agents: Vec<(Uuid, String, Option<Uuid>, Option<Uuid>, Option<Uuid>)> = Vec::new();
             for mid in member_ids {
-                if let Ok(Some(row)) = sqlx::query_as::<_, (String, Option<Uuid>, Option<Uuid>)>(
-                    "SELECT role, company_id, parent_agent_id FROM agents WHERE id = $1"
+                if let Ok(Some(row)) = sqlx::query_as::<_, (String, Option<Uuid>, Option<Uuid>, Option<Uuid>)>(
+                    "SELECT role, company_id, parent_agent_id, holding_id FROM agents WHERE id = $1"
                 ).bind(mid).fetch_optional(&state.db).await {
-                    agents.push((*mid, row.0, row.1, row.2));
+                    agents.push((*mid, row.0, row.1, row.2, row.3));
                 }
             }
             // Check every pair: each must be allowed to DM the other
             for i in 0..agents.len() {
                 for j in (i+1)..agents.len() {
-                    let (id_a, ref role_a, company_a, parent_a) = agents[i];
-                    let (id_b, ref role_b, company_b, parent_b) = agents[j];
+                    let (id_a, ref role_a, company_a, parent_a, holding_a) = agents[i];
+                    let (id_b, ref role_b, company_b, parent_b, holding_b) = agents[j];
                     let allowed =
                         role_a == "MAIN" || role_b == "MAIN"
+                        // CEOs in the same holding can communicate (cross-company coordination)
+                        || (role_a == "CEO" && role_b == "CEO" && holding_a.is_some() && holding_a == holding_b)
                         // Direct parent-child
                         || parent_a == Some(id_b)
                         || parent_b == Some(id_a)
@@ -4244,10 +4275,21 @@ async fn agent_dm(
             let target_parent: Option<Uuid> = sqlx::query_scalar("SELECT parent_agent_id FROM agents WHERE id = $1")
                 .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
 
+            // Check if both are CEOs in the same holding (for cross-company DMs)
+            let same_holding = if sender_role.as_deref() == Some("CEO") && target_role.as_deref() == Some("CEO") {
+                let sender_holding: Option<Uuid> = sqlx::query_scalar("SELECT holding_id FROM agents WHERE id = $1")
+                    .bind(sender_id).fetch_optional(&state.db).await.ok().flatten();
+                let target_holding: Option<Uuid> = sqlx::query_scalar("SELECT holding_id FROM agents WHERE id = $1")
+                    .bind(target_id).fetch_optional(&state.db).await.ok().flatten();
+                sender_holding.is_some() && sender_holding == target_holding
+            } else { false };
+
             let allowed = match (sender_role.as_deref(), target_role.as_deref()) {
                 // Only CEOs can DM MAIN
                 (Some("CEO"), Some("MAIN")) => true,
                 (_, Some("MAIN")) => false,
+                // CEOs in the same holding can DM each other (cross-company coordination)
+                (Some("CEO"), Some("CEO")) if same_holding => true,
                 // Can DM your direct parent
                 _ if sender_parent == Some(target_id) => true,
                 // Can DM your direct child
