@@ -167,9 +167,11 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/shared-vms \
     "company_id": "{{COMPANY_ID}}",
     "vm_purpose": "dept_test",
     "department_manager_id": "{{AGENT_ID}}",
-    "label": "DEPARTMENT_NAME Test Server"
+    "label": "DEPARTMENT_NAME Test Server",
+    "resources": {"vcpus": 2, "memory_mb": 2048, "disk_gb": 20}
   }'
 ```
+The `resources` field is optional — defaults to 2 vCPUs, 2GB RAM, 20GB disk. Adjust as needed for your team's workload. To change specs on an existing server, destroy it and create a new one with the specs you need.
 
 **List available shared VMs in your company:**
 ```bash
@@ -200,6 +202,12 @@ curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/start"
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/stop"
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
 ```
+
+**Destroy your department test server:**
+```bash
+curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID?agent_id={{AGENT_ID}}"
+```
+You can only destroy your own department test server. To create a new one with different specs (e.g., more CPU, RAM, or disk), destroy the old one first, then create a new one with the specs you need.
 
 > **Access:** You can access your department's test server and the company test server. You cannot access the company production server — deploy through your CEO.
 >

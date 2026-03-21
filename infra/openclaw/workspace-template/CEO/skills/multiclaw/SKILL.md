@@ -222,7 +222,7 @@ curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
 
 **Destroy a shared server (permanent):**
 ```bash
-curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID"
+curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID?agent_id={{AGENT_ID}}"
 ```
 
 > **Access:** You have full access to all shared VMs in your company (department test, company test, company production).

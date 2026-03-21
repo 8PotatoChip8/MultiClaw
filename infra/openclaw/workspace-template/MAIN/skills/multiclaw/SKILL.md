@@ -197,7 +197,7 @@ curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/exec" \
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/start"
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/stop"
 curl -s -X POST "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID/rebuild"
-curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID"
+curl -s -X DELETE "{{MULTICLAW_API_URL}}/v1/shared-vms/SHARED_VM_ID?agent_id={{AGENT_ID}}"
 ```
 
 > **Note:** Production servers cannot be rebuilt. When CEOs request shared VMs (REQUEST_SHARED_VM), you approve or reject them like any other request.

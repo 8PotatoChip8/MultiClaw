@@ -7091,18 +7091,54 @@ async fn provision_shared_vm(
 
 // ── Destroy shared VM ────────────────────────────────────────────
 
-async fn destroy_shared_vm(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+async fn destroy_shared_vm(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(params): Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
     let uid = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid ID"}))) };
 
-    // Get the VM's provider_ref before deleting
-    let vm_info: Option<(Uuid, String)> = sqlx::query_as(
-        "SELECT sv.vm_id, v.provider_ref FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id WHERE sv.id = $1"
+    // Get the VM info before deleting
+    let vm_info: Option<(Uuid, String, String, Uuid, Option<Uuid>)> = sqlx::query_as(
+        "SELECT sv.vm_id, v.provider_ref, sv.vm_purpose, sv.company_id, sv.department_manager_id \
+         FROM shared_vms sv JOIN vms v ON sv.vm_id = v.id WHERE sv.id = $1"
     ).bind(uid).fetch_optional(&state.db).await.ok().flatten();
 
-    let (vm_id, provider_ref) = match vm_info {
+    let (vm_id, provider_ref, vm_purpose, vm_company_id, dept_manager_id) = match vm_info {
         Some(i) => i,
         None => return (StatusCode::NOT_FOUND, Json(json!({"error": "Shared VM not found"}))),
     };
+
+    // Permission check: who can destroy what?
+    if let Some(agent_id_str) = params.get("agent_id") {
+        if let Ok(agent_id) = Uuid::parse_str(agent_id_str) {
+            let agent: Option<(String, Option<Uuid>)> = sqlx::query_as(
+                "SELECT role, company_id FROM agents WHERE id = $1"
+            ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+            if let Some((role, agent_company_id)) = agent {
+                // Must be in the same company (except MAIN)
+                if role != "MAIN" && agent_company_id != Some(vm_company_id) {
+                    return (StatusCode::FORBIDDEN, Json(json!({"error": "You cannot destroy shared VMs outside your company"})));
+                }
+                match role.as_str() {
+                    "MAIN" => { /* can destroy anything */ }
+                    "CEO" => { /* can destroy anything in their company */ }
+                    "MANAGER" => {
+                        // Managers can only destroy their own dept_test servers
+                        if vm_purpose != "dept_test" || dept_manager_id != Some(agent_id) {
+                            return (StatusCode::FORBIDDEN, Json(json!({
+                                "error": "Managers can only destroy their own department test servers"
+                            })));
+                        }
+                    }
+                    _ => {
+                        return (StatusCode::FORBIDDEN, Json(json!({"error": "You do not have permission to destroy shared VMs"})));
+                    }
+                }
+            }
+        }
+    }
 
     // Destroy the Incus VM
     if let Some(ref provider) = state.vm_provider {
