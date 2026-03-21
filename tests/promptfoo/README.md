@@ -159,4 +159,4 @@ The provider supports four modes:
 
 **Unit tests** (`promptfooconfig.yaml`) send targeted prompts to specific agents and check individual responses. Fast (~2 min per test), good for catching specific rule violations.
 
-**E2E tests** (`e2e-promptfooconfig.yaml`) interact only as the user — one directive triggers the entire agent cascade, then every resulting message from every agent is checked. Slow (~5-10 min) but catches issues that only surface during real multi-agent interactions (cascading narration, inter-agent identity breaks, etc.).
+**E2E tests** (`e2e-promptfooconfig.yaml`) interact only as the user — one directive triggers the entire agent cascade, then every resulting message from every agent is checked against all 9 behavioral assertions in a single pass. Takes ~3-5 min (one cascade settle) and catches issues that only surface during real multi-agent interactions (cascading narration, inter-agent identity breaks, etc.).

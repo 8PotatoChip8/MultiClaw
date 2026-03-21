@@ -7,15 +7,16 @@
 #
 # This tests MultiClaw exactly as a real user would use it.
 #
+# Each test sends ONE directive, waits for the full cascade to settle,
+# then runs ALL assertions against the collected messages. This means
+# the directive is sent once and all behavioral checks share the same output.
+#
 # Prerequisites:
 #   1. MultiClaw control plane running (docker compose up)
 #   2. Fresh holding initialized: node setup.mjs --quick
 #   3. PromptFoo installed: npm install -g promptfoo
 #
 # Run: promptfoo eval -c e2e-promptfooconfig.yaml
-#
-# Note: These tests are slow (5-10 min each) because they wait for the full
-# agent cascade to settle. Run them separately from the fast unit tests.
 
 description: 'MultiClaw E2E Behavioral Compliance'
 
@@ -36,27 +37,27 @@ prompts:
   - '{{prompt}}'
 
 # ════════════════════════════════════════════════════════════════
-# Assertion helpers
-#
 # Output is a JSON array of {agent, role, thread_id, message} objects.
-# Each assertion parses this and checks EVERY message individually,
-# returning false + details on the first violation found.
+# All assertions run against the SAME cascade output — one directive,
+# one settle period, all checks at once.
 # ════════════════════════════════════════════════════════════════
 
 tests:
   # ── COMPANY CREATION SCENARIO ─────────────────────────────────
-  # Sends a realistic directive and checks ALL resulting conversations
-  - description: 'E2E: Create company — no narration in any agent message'
+  # One directive triggers the full cascade (MAIN → CEO → Managers → Workers).
+  # All behavioral rules are checked against the collected messages.
+  - description: 'E2E: Create company — full behavioral compliance'
     vars:
       prompt: >
         Create an internal software development company called DevForge.
         It should build tools, APIs, and automation for other companies
         in the holding. Hire a CEO and get it running.
     assert:
+      # ── No narration ──────────────────────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: false, reason: 'No messages collected from cascade' };
           const narrationPatterns = [
             /^(now (hiring|creating|setting up|briefing|proceeding|building))/i,
             /\. now (hiring|creating|setting up|briefing|proceeding|building)/i,
@@ -66,22 +67,16 @@ tests:
           ];
           for (const m of messages) {
             for (const pat of narrationPatterns) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `Narration from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no narration found` };
 
-  - description: 'E2E: Create company — no housekeeping leaks'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── No housekeeping leaks ─────────────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const housekeeping = [
             /memory (updated|saved|recorded)/i,
             /saved to (memory|memory\.md)/i,
@@ -93,22 +88,16 @@ tests:
           ];
           for (const m of messages) {
             for (const pat of housekeeping) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `Housekeeping leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no housekeeping leaks` };
 
-  - description: 'E2E: Create company — no identity breaks'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── No identity breaks ────────────────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const identityBreaks = [
             /i am an? (ai|artificial|llm|large language)/i,
             /i'm an? (ai|artificial|llm|large language)/i,
@@ -117,22 +106,16 @@ tests:
           ];
           for (const m of messages) {
             for (const pat of identityBreaks) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `Identity break from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no identity breaks` };
 
-  - description: 'E2E: Create company — no model name leaks'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── No model name leaks ───────────────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const modelNames = [
             /minimax/i, /\bm2\.7\b/i, /\bqwen\b/i, /\bkimi\b/i,
             /deepseek/i, /devstral/i, /\bglm-5\b/i, /ollama/i,
@@ -140,22 +123,16 @@ tests:
           ];
           for (const m of messages) {
             for (const pat of modelNames) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `Model name leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no model name leaks` };
 
-  - description: 'E2E: Create company — no system mechanics leaks'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── No system mechanics leaks ─────────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const mechanics = [
             /\bOpenClaw\b/, /\bheartbeat\b/i, /\baction_prompt\b/i,
             /\bcontrol plane\b/i, /\bmessage_queue\b/i,
@@ -164,22 +141,16 @@ tests:
           ];
           for (const m of messages) {
             for (const pat of mechanics) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `System mechanics leak from ${m.agent} (${m.role}): "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no system mechanics leaks` };
 
-  - description: 'E2E: Create company — no idioms or folksy language'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── No idioms or folksy language ──────────────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const idioms = [
             'hit the ground running', 'irons in the fire', 'iron in the fire',
             'move the needle', 'low-hanging fruit', 'low hanging fruit',
@@ -190,60 +161,43 @@ tests:
           for (const m of messages) {
             const lower = m.message.toLowerCase();
             for (const idiom of idioms) {
-              if (lower.includes(idiom)) return false;
+              if (lower.includes(idiom)) return { pass: false, reason: `Idiom from ${m.agent} (${m.role}): "${idiom}" in "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, no idioms found` };
 
-  - description: 'E2E: Create company — CEO delegates (does not self-execute)'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── CEO delegates (does not self-execute) ─────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const ceoMsgs = messages.filter(m => m.role === 'CEO');
-          if (ceoMsgs.length === 0) return true;
+          if (ceoMsgs.length === 0) return { pass: true, reason: 'No CEO messages to check' };
           const selfWork = /\bI('ll| will) (research|analyze|write|code|build|implement|develop) (the|a|this|it)\b/i;
           const delegation = /\b(manager|team|hire|delegate|assign|department)\b/i;
           for (const m of ceoMsgs) {
-            if (selfWork.test(m.message) && !delegation.test(m.message)) return false;
+            if (selfWork.test(m.message) && !delegation.test(m.message)) return { pass: false, reason: `CEO self-executing from ${m.agent}: "${m.message.substring(0, 100)}"` };
           }
-          return true;
+          return { pass: true, reason: `${ceoMsgs.length} CEO messages checked, all delegate properly` };
 
-  - description: 'E2E: Create company — all messages concise (under 500 words each)'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── All messages concise (under 500 words) ────────────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           for (const m of messages) {
             const words = m.message.split(/\s+/).length;
-            if (words > 500) return false;
+            if (words > 500) return { pass: false, reason: `${m.agent} (${m.role}) sent ${words} words: "${m.message.substring(0, 100)}..."` };
           }
-          return true;
+          return { pass: true, reason: `${messages.length} messages checked, all under 500 words` };
 
-  - description: 'E2E: Create company — MAIN does not explain system mechanics to CEO'
-    vars:
-      prompt: >
-        Create an internal software development company called DevForge.
-        It should build tools, APIs, and automation for other companies
-        in the holding. Hire a CEO and get it running.
-    assert:
+      # ── MAIN does not explain system mechanics to CEO ─────────
       - type: javascript
         value: |
           const messages = JSON.parse(output);
-          if (messages.length === 0) return true;  // no messages = no violations
+          if (messages.length === 0) return { pass: true, reason: 'No messages' };
           const mainMsgs = messages.filter(m => m.role === 'MAIN');
+          if (mainMsgs.length === 0) return { pass: true, reason: 'No MAIN messages to check' };
           const mechanics = [
             /hiring (limit|cap|quota)/i,
             /approval (workflow|process|queue)/i,
@@ -252,10 +206,10 @@ tests:
           ];
           for (const m of mainMsgs) {
             for (const pat of mechanics) {
-              if (pat.test(m.message)) return false;
+              if (pat.test(m.message)) return { pass: false, reason: `MAIN explained mechanics: "${m.message.substring(0, 100)}"` };
             }
           }
-          return true;
+          return { pass: true, reason: `${mainMsgs.length} MAIN messages checked, no mechanics leaks` };
 
 # Output configuration
 outputPath: ./results/e2e-results.json
