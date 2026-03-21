@@ -1422,7 +1422,12 @@ async fn hire_ceo(State(state): State<AppState>, Path(id): Path<String>, Json(pa
     provision_agent_vm(state.clone(), agent_id, &payload.name, &model, "ceo_policy").await;
 
     let _ = state.tx.send(json!({"type":"ceo_hired","agent_id": agent_id,"company_id": company_id}).to_string());
-    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
+    (StatusCode::CREATED, Json(json!({
+        "status": "hired",
+        "agent_id": agent_id,
+        "handle": handle,
+        "action_required": "You MUST now send a DM to this CEO to brief them on their company's mission, your expectations, and what to do first. The CEO will not start working until they receive your briefing. Use the dm endpoint with their agent_id or handle as target."
+    })))
 }
 
 async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
@@ -1591,7 +1596,12 @@ async fn hire_manager(State(state): State<AppState>, Path(id): Path<String>, Jso
         &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
     ).await;
     state.invalidate_status_cache(ceo_id).await; // Team roster changed
-    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
+    (StatusCode::CREATED, Json(json!({
+        "status": "hired",
+        "agent_id": agent_id,
+        "handle": handle,
+        "action_required": "You MUST now send a DM to this manager to brief them on their role, responsibilities, and immediate priorities. They will not start working until briefed."
+    })))
 }
 
 async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json(payload): Json<HireRequest>) -> impl IntoResponse {
@@ -1763,7 +1773,12 @@ async fn hire_worker(State(state): State<AppState>, Path(id): Path<String>, Json
         &format!("{} (specialty: {})", payload.name, payload.specialty.as_deref().unwrap_or("general")),
     ).await;
     state.invalidate_status_cache(mgr_id).await; // Team roster changed
-    (StatusCode::CREATED, Json(json!({"status":"hired","agent_id": agent_id})))
+    (StatusCode::CREATED, Json(json!({
+        "status": "hired",
+        "agent_id": agent_id,
+        "handle": handle,
+        "action_required": "You MUST now send a DM to this worker to brief them on their tasks and priorities. They will not start working until briefed."
+    })))
 }
 
 // ═══════════════════════════════════════════════════════════════
