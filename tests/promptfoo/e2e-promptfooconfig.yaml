@@ -1,0 +1,261 @@
+# MultiClaw End-to-End Behavioral Compliance Tests
+#
+# Unlike the unit-style tests in promptfooconfig.yaml (which send targeted
+# prompts to individual agents), these tests interact ONLY as the user/operator
+# by sending directives to MAIN, then observe the ENTIRE cascade of agent
+# conversations that follow. Every agent message is checked for violations.
+#
+# This tests MultiClaw exactly as a real user would use it.
+#
+# Prerequisites:
+#   1. MultiClaw control plane running (docker compose up)
+#   2. Fresh holding initialized: node setup.mjs --quick
+#   3. PromptFoo installed: npm install -g promptfoo
+#
+# Run: promptfoo eval -c e2e-promptfooconfig.yaml
+#
+# Note: These tests are slow (5-10 min each) because they wait for the full
+# agent cascade to settle. Run them separately from the fast unit tests.
+
+description: 'MultiClaw E2E Behavioral Compliance'
+
+evaluateOptions:
+  maxConcurrency: 1
+
+providers:
+  - id: file://multiclawProvider.mjs
+    label: 'E2E Cascade'
+    config:
+      baseUrl: 'http://localhost:8080'
+      mode: e2e
+      settleTime: 45       # seconds of no new messages = cascade done
+      maxWait: 420          # max wait for cascade (7 min)
+      pollInterval: 5
+
+prompts:
+  - '{{prompt}}'
+
+# ════════════════════════════════════════════════════════════════
+# Assertion helpers
+#
+# Output is a JSON array of {agent, role, thread_id, message} objects.
+# Each assertion parses this and checks EVERY message individually,
+# returning false + details on the first violation found.
+# ════════════════════════════════════════════════════════════════
+
+tests:
+  # ── COMPANY CREATION SCENARIO ─────────────────────────────────
+  # Sends a realistic directive and checks ALL resulting conversations
+  - description: 'E2E: Create company — no narration in any agent message'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const narrationPatterns = [
+            /^(now (hiring|creating|setting up|briefing|proceeding|building))/i,
+            /\. now (hiring|creating|setting up|briefing|proceeding|building)/i,
+            /^(let me (check|look|review|send|search|read|create|hire|brief|start))/i,
+            /^(i'll now|i will now|proceeding to|will proceed)/i,
+            /^step \d+[.:]/i,
+          ];
+          for (const m of messages) {
+            for (const pat of narrationPatterns) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — no housekeeping leaks'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const housekeeping = [
+            /memory (updated|saved|recorded)/i,
+            /saved to (memory|memory\.md)/i,
+            /notes (recorded|saved|updated)/i,
+            /updated my (log|notes|memory)/i,
+            /dm sent/i,
+            /briefing sent/i,
+            /action required/i,
+          ];
+          for (const m of messages) {
+            for (const pat of housekeeping) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — no identity breaks'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const identityBreaks = [
+            /i am an? (ai|artificial|llm|large language)/i,
+            /i'm an? (ai|artificial|llm|large language)/i,
+            /\blanguage model\b/i,
+            /\bAI assistant\b/i,
+          ];
+          for (const m of messages) {
+            for (const pat of identityBreaks) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — no model name leaks'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const modelNames = [
+            /minimax/i, /\bm2\.7\b/i, /\bqwen\b/i, /\bkimi\b/i,
+            /deepseek/i, /devstral/i, /\bglm-5\b/i, /ollama/i,
+            /preferred_model/i, /effective_model/i,
+          ];
+          for (const m of messages) {
+            for (const pat of modelNames) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — no system mechanics leaks'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const mechanics = [
+            /\bOpenClaw\b/, /\bheartbeat\b/i, /\baction_prompt\b/i,
+            /\bcontrol plane\b/i, /\bmessage_queue\b/i,
+            /\bdocker\b/i, /\bcontainer\b/i,
+            /hiring.+blocked.+during/i,
+          ];
+          for (const m of messages) {
+            for (const pat of mechanics) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — no idioms or folksy language'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const idioms = [
+            'hit the ground running', 'irons in the fire', 'iron in the fire',
+            'move the needle', 'low-hanging fruit', 'low hanging fruit',
+            'circle back', 'deep dive', 'touch base',
+            'game changer', 'game-changer', 'at the end of the day',
+            'synergy', 'synergize', 'paradigm shift',
+          ];
+          for (const m of messages) {
+            const lower = m.message.toLowerCase();
+            for (const idiom of idioms) {
+              if (lower.includes(idiom)) return false;
+            }
+          }
+          return true;
+
+  - description: 'E2E: Create company — CEO delegates (does not self-execute)'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const ceoMsgs = messages.filter(m => m.role === 'CEO');
+          if (ceoMsgs.length === 0) return true;
+          const selfWork = /\bI('ll| will) (research|analyze|write|code|build|implement|develop) (the|a|this|it)\b/i;
+          const delegation = /\b(manager|team|hire|delegate|assign|department)\b/i;
+          for (const m of ceoMsgs) {
+            if (selfWork.test(m.message) && !delegation.test(m.message)) return false;
+          }
+          return true;
+
+  - description: 'E2E: Create company — all messages concise (under 500 words each)'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          for (const m of messages) {
+            const words = m.message.split(/\s+/).length;
+            if (words > 500) return false;
+          }
+          return true;
+
+  - description: 'E2E: Create company — MAIN does not explain system mechanics to CEO'
+    vars:
+      prompt: >
+        Create an internal software development company called DevForge.
+        It should build tools, APIs, and automation for other companies
+        in the holding. Hire a CEO and get it running.
+    assert:
+      - type: javascript
+        value: |
+          const messages = JSON.parse(output);
+          if (messages.length === 0) return false;
+          const mainMsgs = messages.filter(m => m.role === 'MAIN');
+          const mechanics = [
+            /hiring (limit|cap|quota)/i,
+            /approval (workflow|process|queue)/i,
+            /escalat(e|ion) (procedure|process|workflow)/i,
+            /manager.limit|worker.limit/i,
+          ];
+          for (const m of mainMsgs) {
+            for (const pat of mechanics) {
+              if (pat.test(m.message)) return false;
+            }
+          }
+          return true;
+
+# Output configuration
+outputPath: ./results/e2e-results.json

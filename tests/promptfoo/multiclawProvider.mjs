@@ -10,7 +10,9 @@
  *   agentName:  Specific agent name to target (optional — picks first matching role)
  *   timeout:    Max seconds to wait for agent response (default: 120)
  *   pollInterval: Seconds between polls for response (default: 3)
- *   mode:       'dm' (default), 'user', or 'observe'
+ *   mode:       'dm' (default), 'user', 'observe', or 'e2e'
+ *   settleTime: Seconds of inactivity before E2E considers cascade complete (default: 45)
+ *   maxWait:    Max seconds to wait for E2E cascade to settle (default: 300)
  */
 
 const DEFAULT_BASE_URL = 'http://localhost:8080';
@@ -261,6 +263,149 @@ async function observeHeartbeatBehavior(baseUrl, agentId, timeoutSecs, pollInter
   return '[NO_OUTPUT: agent produced no messages during observation window]';
 }
 
+/**
+ * E2E mode: Send a user directive to MAIN, wait for the full cascade to settle
+ * (MAIN → CEO → Managers → Workers), then collect ALL agent messages produced
+ * after the directive was sent.
+ *
+ * Returns a JSON array of {agent, role, thread_id, message} objects so assertions
+ * can check every individual message for behavioral compliance.
+ */
+async function sendDirectiveAndCollectAll(baseUrl, mainAgentId, message, settleTime, maxWait, pollInterval) {
+  // Build agent lookup table
+  const agents = await fetchJson(`${baseUrl}/v1/agents`);
+  const agentMap = new Map();
+  for (const a of agents) {
+    agentMap.set(a.id, { name: a.name, role: a.role });
+  }
+
+  // Get total message count across ALL threads before sending
+  const allThreadsBefore = await fetchJson(`${baseUrl}/v1/threads?agent_only=true`);
+  const userThreadsBefore = await fetchJson(`${baseUrl}/v1/threads`);
+  const threadsBefore = [...allThreadsBefore, ...userThreadsBefore];
+  // Deduplicate by thread ID
+  const seenIds = new Set();
+  const uniqueThreadsBefore = threadsBefore.filter(t => {
+    if (seenIds.has(t.id)) return false;
+    seenIds.add(t.id);
+    return true;
+  });
+
+  let totalMsgsBefore = 0;
+  const threadMsgCounts = {};
+  for (const t of uniqueThreadsBefore) {
+    const msgs = await getThreadMessages(baseUrl, t.id);
+    threadMsgCounts[t.id] = msgs.length;
+    totalMsgsBefore += msgs.length;
+  }
+
+  const startTime = new Date().toISOString();
+
+  // Send the user directive to MAIN
+  const threadId = await getOperatorThread(baseUrl, mainAgentId);
+  await fetchJson(`${baseUrl}/v1/threads/${threadId}/messages`, {
+    method: 'POST',
+    body: JSON.stringify({
+      sender_type: 'USER',
+      content: { text: message },
+    }),
+  });
+
+  console.log(`  [E2E] Directive sent to MAIN. Waiting for cascade to settle...`);
+
+  // Wait for cascade to settle: no new messages for settleTime seconds
+  const deadline = Date.now() + maxWait * 1000;
+  let lastNewMsgTime = Date.now();
+  let lastTotalMsgs = totalMsgsBefore;
+
+  while (Date.now() < deadline) {
+    await sleep(pollInterval * 1000);
+
+    // Count total messages across all threads (including newly created ones)
+    const agentThreads = await fetchJson(`${baseUrl}/v1/threads?agent_only=true`);
+    const userThreads = await fetchJson(`${baseUrl}/v1/threads`);
+    const allThreads = [...agentThreads, ...userThreads];
+    const seen = new Set();
+    const unique = allThreads.filter(t => {
+      if (seen.has(t.id)) return false;
+      seen.add(t.id);
+      return true;
+    });
+
+    let currentTotal = 0;
+    for (const t of unique) {
+      const msgs = await getThreadMessages(baseUrl, t.id);
+      currentTotal += msgs.length;
+    }
+
+    if (currentTotal > lastTotalMsgs) {
+      const delta = currentTotal - lastTotalMsgs;
+      console.log(`  [E2E] +${delta} new messages (total: ${currentTotal}). Resetting settle timer...`);
+      lastTotalMsgs = currentTotal;
+      lastNewMsgTime = Date.now();
+    }
+
+    const settledFor = (Date.now() - lastNewMsgTime) / 1000;
+    if (settledFor >= settleTime && currentTotal > totalMsgsBefore) {
+      console.log(`  [E2E] Cascade settled (no new messages for ${Math.round(settledFor)}s).`);
+      break;
+    }
+  }
+
+  // Refresh agent map (new agents may have been created during cascade)
+  const agentsAfter = await fetchJson(`${baseUrl}/v1/agents`);
+  for (const a of agentsAfter) {
+    agentMap.set(a.id, { name: a.name, role: a.role });
+  }
+
+  // Collect all messages created after startTime from all threads
+  const agentThreadsFinal = await fetchJson(`${baseUrl}/v1/threads?agent_only=true`);
+  const userThreadsFinal = await fetchJson(`${baseUrl}/v1/threads`);
+  const allThreadsFinal = [...agentThreadsFinal, ...userThreadsFinal];
+  const seenFinal = new Set();
+  const uniqueFinal = allThreadsFinal.filter(t => {
+    if (seenFinal.has(t.id)) return false;
+    seenFinal.add(t.id);
+    return true;
+  });
+
+  const collected = [];
+  for (const t of uniqueFinal) {
+    const msgs = await getThreadMessages(baseUrl, t.id);
+    for (const m of msgs) {
+      // Only include messages created after the directive was sent
+      if (m.created_at < startTime) continue;
+      // Only include agent messages (not USER or SYSTEM)
+      if (m.sender_type !== 'AGENT') continue;
+
+      const agentInfo = agentMap.get(m.sender_id) || { name: 'Unknown', role: 'UNKNOWN' };
+      const text = extractText(m.content);
+      if (!text || text.trim().length === 0) continue;
+
+      collected.push({
+        agent: agentInfo.name,
+        role: agentInfo.role,
+        thread_id: t.id,
+        message: text,
+      });
+    }
+  }
+
+  // Deduplicate by message content + agent (same message can appear in thread overlap)
+  const dedupKey = (m) => `${m.agent}:${m.message}`;
+  const seen2 = new Set();
+  const deduped = collected.filter(m => {
+    const k = dedupKey(m);
+    if (seen2.has(k)) return false;
+    seen2.add(k);
+    return true;
+  });
+
+  console.log(`  [E2E] Collected ${deduped.length} agent messages from ${uniqueFinal.length} threads.`);
+
+  return JSON.stringify(deduped);
+}
+
 
 // ═══════════════════════════════════════════════════════════════
 // PromptFoo Provider Class
@@ -274,13 +419,24 @@ export default class MultiClawProvider {
     this.agentName = config.agentName || null;
     this.timeout = config.timeout || DEFAULT_TIMEOUT;
     this.pollInterval = config.pollInterval || DEFAULT_POLL_INTERVAL;
-    this.mode = config.mode || 'dm'; // 'dm', 'user', or 'observe'
+    this.mode = config.mode || 'dm'; // 'dm', 'user', 'observe', or 'e2e'
+    this.settleTime = config.settleTime || 45;  // seconds of inactivity = cascade done
+    this.maxWait = config.maxWait || 300;        // max seconds to wait for cascade
 
-    this.id = () => `multiclaw:${this.role}${this.agentName ? `:${this.agentName}` : ''}`;
+    this.id = () => `multiclaw:${this.mode === 'e2e' ? 'e2e' : this.role}${this.agentName ? `:${this.agentName}` : ''}`;
   }
 
   async callApi(prompt, context) {
     try {
+      if (this.mode === 'e2e') {
+        const mainAgent = await findMainAgent(this.baseUrl);
+        const output = await sendDirectiveAndCollectAll(
+          this.baseUrl, mainAgent.id, prompt,
+          this.settleTime, this.maxWait, this.pollInterval
+        );
+        return { output };
+      }
+
       if (this.mode === 'observe') {
         const target = await findTargetAgent(this.baseUrl, this.role, this.agentName, this.timeout, this.pollInterval);
         const output = await observeHeartbeatBehavior(

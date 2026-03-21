@@ -13,6 +13,8 @@ set -euo pipefail
 #   ./run.sh              # Full run (setup + eval + results)
 #   ./run.sh --skip-setup # Skip setup, run eval on existing holding
 #   ./run.sh --setup-only # Only do setup, don't run eval
+#   ./run.sh --e2e        # Run E2E tests (setup + full cascade + observe)
+#   ./run.sh --e2e --skip-setup  # E2E on existing holding
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
@@ -20,16 +22,19 @@ cd "$SCRIPT_DIR"
 MULTICLAW_URL="${MULTICLAW_URL:-http://localhost:8080}"
 SKIP_SETUP=false
 SETUP_ONLY=false
+E2E=false
 
 for arg in "$@"; do
   case "$arg" in
     --skip-setup) SKIP_SETUP=true ;;
     --setup-only) SETUP_ONLY=true ;;
+    --e2e) E2E=true ;;
     --help|-h)
-      echo "Usage: $0 [--skip-setup] [--setup-only]"
+      echo "Usage: $0 [--skip-setup] [--setup-only] [--e2e]"
       echo ""
       echo "  --skip-setup  Run eval against existing holding (no reset)"
       echo "  --setup-only  Only set up a fresh holding, don't run eval"
+      echo "  --e2e         Run E2E cascade tests (slow, ~10 min)"
       echo ""
       echo "Environment:"
       echo "  MULTICLAW_URL     Control plane URL (default: http://localhost:8080)"
@@ -65,7 +70,12 @@ if [ "$SKIP_SETUP" = false ]; then
   echo "  Setting up fresh holding for evaluation"
   echo "════════════════════════════════════════════════════════"
   echo ""
-  node setup.mjs
+  if [ "$E2E" = true ]; then
+    # E2E tests create their own companies, so only need MAIN agent ready
+    node setup.mjs --quick
+  else
+    node setup.mjs
+  fi
 
   if [ "$SETUP_ONLY" = true ]; then
     echo "Setup complete. Exiting (--setup-only)."
@@ -86,7 +96,15 @@ echo "════════════════════════�
 echo "  Running PromptFoo evaluation"
 echo "════════════════════════════════════════════════════════"
 echo ""
-promptfoo eval --config promptfooconfig.yaml
+if [ "$E2E" = true ]; then
+  CONFIG_FILE="e2e-promptfooconfig.yaml"
+  RESULTS_FILE="results/e2e-results.json"
+else
+  CONFIG_FILE="promptfooconfig.yaml"
+  RESULTS_FILE="results/eval-results.json"
+fi
+
+promptfoo eval --config "$CONFIG_FILE"
 
 # Show results summary
 echo ""
@@ -94,7 +112,7 @@ echo "════════════════════════�
 echo "  Results"
 echo "════════════════════════════════════════════════════════"
 echo ""
-echo "Results saved to: results/eval-results.json"
+echo "Results saved to: $RESULTS_FILE"
 echo ""
 echo "View interactive results:"
 echo "  promptfoo view"

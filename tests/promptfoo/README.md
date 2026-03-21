@@ -57,6 +57,12 @@ All commands assume you're in the test directory (`cd /opt/multiclaw/tests/promp
 # Only set up a fresh holding (no eval)
 ./run.sh --setup-only
 
+# Run E2E cascade tests (sends directive to MAIN, observes all downstream)
+./run.sh --e2e
+
+# E2E on existing holding (no reset)
+./run.sh --e2e --skip-setup
+
 # Setup script directly
 node setup.mjs              # Full setup (reset + wait for org tree)
 node setup.mjs --quick      # Reset + wait for MAIN only, skip org tree
@@ -135,10 +141,22 @@ Add a new provider entry:
 ```
 tests/promptfoo/
 ├── multiclawProvider.mjs   # Custom PromptFoo provider (talks to MultiClaw API)
-├── promptfooconfig.yaml    # Test definitions and assertions
-├── setup.mjs               # Holding setup/teardown script
-├── run.sh                  # One-command runner
-└── results/                # Eval output (gitignored)
+├── promptfooconfig.yaml       # Unit-style test definitions
+├── e2e-promptfooconfig.yaml   # E2E cascade test definitions
+├── setup.mjs                  # Holding setup/teardown script
+├── run.sh                     # One-command runner
+└── results/                   # Eval output (gitignored)
 ```
 
-The provider sends DMs to agents via `POST /v1/agents/:id/dm` and polls `GET /v1/threads/:id/messages` for responses. For MAIN agent tests, it injects operator messages via `POST /v1/threads/:id/messages`.
+The provider supports four modes:
+
+- **`dm`** — sends DMs from a parent agent to the target, captures the response
+- **`user`** — sends messages as the operator/user to the target
+- **`observe`** — watches agent output during heartbeat cycles (no input sent)
+- **`e2e`** — sends a user directive to MAIN, waits for the full cascade to settle (MAIN → CEO → Managers → Workers), then collects ALL agent messages and returns them as a JSON array for per-message assertion checking
+
+### Unit vs E2E tests
+
+**Unit tests** (`promptfooconfig.yaml`) send targeted prompts to specific agents and check individual responses. Fast (~2 min per test), good for catching specific rule violations.
+
+**E2E tests** (`e2e-promptfooconfig.yaml`) interact only as the user — one directive triggers the entire agent cascade, then every resulting message from every agent is checked. Slow (~5-10 min) but catches issues that only surface during real multi-agent interactions (cascading narration, inter-agent identity breaks, etc.).
