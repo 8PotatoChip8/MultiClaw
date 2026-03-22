@@ -1084,6 +1084,20 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
         })
         .unwrap_or_default();
 
+    // For MAIN agents: remind them to relay CEO status updates to the operator
+    let agent_role: Option<String> = sqlx::query_scalar(
+        "SELECT role FROM agents WHERE id = $1"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+
+    let main_relay_hint = if agent_role.as_deref() == Some("MAIN") {
+        " If a CEO reported progress, completion, issues, or important status — relay a brief summary \
+         to the operator via dm-user. The operator cannot see your DM conversations with CEOs; \
+         you are their only window into what's happening. Even routine milestones (team built, \
+         work started, deliverable ready) should be relayed."
+    } else {
+        ""
+    };
+
     let action_prompt = format!(
         "SYSTEM: The conversation with {} has concluded. \
          Based on what was discussed, take any NEW actions you need to. \
@@ -1093,8 +1107,8 @@ pub async fn handle_action_prompt(state: &AppState, payload: &serde_json::Value)
          If everything discussed is already handled, respond with just: [NO_ACTION_NEEDED] \
          Do NOT repeat or summarize the conversation — just act on what is NEW. \
          After completing actions, save key outcomes and decisions to MEMORY.md (long-term) \
-         or today's daily log in memory/ (working notes).{}{}",
-        sender_name, conversation_context, unbriefed_hint
+         or today's daily log in memory/ (working notes).{}{}{}",
+        sender_name, main_relay_hint, conversation_context, unbriefed_hint
     );
 
     let action_instructions = "You just finished receiving a briefing or directive. \
