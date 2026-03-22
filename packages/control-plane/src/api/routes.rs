@@ -4603,6 +4603,25 @@ async fn agent_dm_user(
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error":"Rate limit exceeded — max 5 user messages per minute"})));
     }
 
+    // Spam prevention: if agent has sent 3+ unanswered messages to the operator,
+    // block further messages until the operator replies. Prevents escalation spam
+    // where agents repeatedly message about the same unresolved issue.
+    let unanswered: Option<i64> = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM messages m \
+         JOIN thread_members tm ON m.thread_id = tm.thread_id AND tm.member_type = 'USER' \
+         WHERE m.sender_id = $1 AND m.sender_type = 'AGENT' \
+           AND m.created_at > COALESCE( \
+               (SELECT MAX(m2.created_at) FROM messages m2 \
+                JOIN thread_members tm2 ON m2.thread_id = tm2.thread_id AND tm2.member_type = 'USER' \
+                WHERE m2.sender_type = 'USER' AND m2.thread_id = m.thread_id), \
+               '1970-01-01'::timestamptz)"
+    ).bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
+    if unanswered.unwrap_or(0) >= 3 {
+        return (StatusCode::TOO_MANY_REQUESTS, Json(json!({
+            "error": "You have sent multiple messages to the operator without a response. Wait for the operator to reply before sending more. If the issue is critical, escalate through your chain of command."
+        })));
+    }
+
     // Misrouting guard: detect when an agent mistakenly uses dm-user to message
     // another agent instead of the human operator. Check if the message's first line
     // directly addresses a known agent name in the same holding.
@@ -4733,7 +4752,8 @@ async fn agent_send_file(
         Ok(u) => u,
         Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid sender ID"}))),
     };
-    if let Some(resp) = check_dm_mode(&state, sender_id).await { return resp; }
+    // Note: send-file is NOT blocked by DM mode. Workers need to send files
+    // during DM conversations (e.g., manager asks "send me the report" in a DM).
 
     // Resolve target: UUID or @handle
     let receiver_id: Uuid = if p.target.starts_with('@') {

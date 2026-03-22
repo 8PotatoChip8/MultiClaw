@@ -29,23 +29,35 @@ pub struct IncusProvider;
 
 impl IncusProvider {
     pub async fn new() -> Result<Self> {
-        // Ensure multiclawbr0 exists
+        // Ensure multiclawbr0 exists with NAT enabled for outbound internet
         let output = Command::new("incus")
             .args(&["network", "list", "--format", "json"])
             .output()
             .await?;
-        
+
         if output.status.success() {
             let nets: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap_or_default();
             let exists = nets.iter().any(|n| n.get("name").and_then(|v| v.as_str()) == Some("multiclawbr0"));
             if !exists {
                 Command::new("incus")
-                    .args(&["network", "create", "multiclawbr0"])
+                    .args(&[
+                        "network", "create", "multiclawbr0",
+                        "ipv4.address=10.100.0.1/24",
+                        "ipv4.nat=true",
+                        "ipv6.address=none",
+                    ])
                     .output()
                     .await?;
+                tracing::info!("Created multiclawbr0 bridge with NAT enabled");
+            } else {
+                // Ensure NAT is enabled on existing bridge
+                let _ = Command::new("incus")
+                    .args(&["network", "set", "multiclawbr0", "ipv4.nat", "true"])
+                    .output()
+                    .await;
             }
         }
-        
+
         Ok(Self)
     }
 
