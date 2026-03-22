@@ -7068,7 +7068,7 @@ async fn provision_shared_vm(
 
         // Minimal cloud-init: employee user + dev tools (no OpenClaw, no agentd)
         let cloud_init = format!(
-            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n  - python3-venv\nruncmd:\n  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\n  - apt-get install -y nodejs\n",
             vm_name
         );
 
@@ -7303,7 +7303,7 @@ async fn shared_vm_rebuild(State(state): State<AppState>, Path(id): Path<String>
         let disk_gb = resource_limits.get("disk_gb").and_then(|v| v.as_u64()).unwrap_or(20) as u32;
 
         let cloud_init = format!(
-            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+            "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n  - python3-venv\nruncmd:\n  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\n  - apt-get install -y nodejs\n",
             provider_ref
         );
         let resources = VmResources { vcpus, memory_mb, disk_gb };
@@ -7577,7 +7577,7 @@ async fn trigger_shared_vm_provisioning(state: &AppState, request_id: Uuid) {
 
         tokio::spawn(async move {
             let cloud_init = format!(
-                "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n",
+                "#cloud-config\nhostname: {}\nusers:\n  - name: employee\n    shell: /bin/bash\n    sudo: ALL=(ALL) NOPASSWD:ALL\n    groups: sudo\n    lock_passwd: true\npackage_update: true\npackages:\n  - curl\n  - ca-certificates\n  - jq\n  - git\n  - build-essential\n  - python3\n  - python3-pip\n  - python3-venv\nruncmd:\n  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -\n  - apt-get install -y nodejs\n",
                 vm_name
             );
             let vm_resources = VmResources { vcpus, memory_mb, disk_gb };

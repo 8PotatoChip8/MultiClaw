@@ -8,11 +8,16 @@ users:
     sudo: ALL=(ALL) NOPASSWD:ALL
     lock_passwd: true
 
+package_update: true
 packages:
   - curl
   - ca-certificates
   - jq
   - git
+  - build-essential
+  - python3
+  - python3-pip
+  - python3-venv
 
 write_files:
   - path: /home/employee/.openclaw/openclaw.json
@@ -30,6 +35,10 @@ write_files:
       {{AGENTD_SERVICE}}
 
 runcmd:
+  # Install Node.js 20 LTS via NodeSource
+  - curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+  - apt-get install -y nodejs
+
   # Download and run the custom OpenClaw install script from control-plane
   - curl -fsSL http://{{HOST_IP}}:8080/v1/scripts/install-openclaw.sh -o /tmp/install-openclaw.sh
   - HOST_IP={{HOST_IP}} AGENT_USER=employee bash /tmp/install-openclaw.sh
