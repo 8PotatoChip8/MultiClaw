@@ -4623,8 +4623,8 @@ async fn agent_dm_user(
     }
 
     // Misrouting guard: detect when an agent mistakenly uses dm-user to message
-    // another agent instead of the human operator. Check if the message's first line
-    // directly addresses a known agent name in the same holding.
+    // another agent instead of the human operator. Check if the message
+    // addresses a known agent name in the same holding.
     {
         let holding_id: Option<Uuid> = sqlx::query_scalar("SELECT holding_id FROM agents WHERE id = $1")
             .bind(agent_id).fetch_optional(&state.db).await.ok().flatten();
@@ -4634,11 +4634,11 @@ async fn agent_dm_user(
             ).bind(hid).bind(agent_id).fetch_all(&state.db).await.unwrap_or_default();
 
             let msg_lower = p.message.to_lowercase();
-            // Check first ~200 chars for an agent name (greeting/address pattern)
-            let first_chunk: String = msg_lower.chars().take(200).collect();
+            // Check the full message for agent names — agents often address peers
+            // by name deep in the message body, not just the first line
             for peer in &peer_names {
                 let first_name = peer.split_whitespace().next().unwrap_or(peer).to_lowercase();
-                if first_chunk.contains(&first_name) {
+                if msg_lower.contains(&first_name) {
                     tracing::warn!(
                         "Misrouted dm-user from agent {}: message addresses '{}' — should use /dm endpoint",
                         agent_id, peer
