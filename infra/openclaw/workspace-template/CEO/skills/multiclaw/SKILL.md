@@ -55,6 +55,14 @@ curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/{{AGENT_ID}}/hire-worker \
 ```
 The `preferred_model` field is optional. If omitted, the worker inherits your model ({{MODEL}}). Available models: {{AVAILABLE_MODELS}}.
 
+### Terminate (Fire) an Agent
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/TARGET_AGENT_ID/terminate \
+  -H 'Content-Type: application/json' \
+  -d '{"requester_id": "{{AGENT_ID}}"}'
+```
+Permanently removes an agent from the organization. The agent's container is stopped and they are removed from all threads. You can terminate any manager or worker in your company. This action is irreversible — only use it when an agent is non-functional, insubordinate, or no longer needed.
+
 ### View Financial Ledger
 ```bash
 curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/ledger

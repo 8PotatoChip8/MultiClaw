@@ -978,6 +978,7 @@ pub fn app_router(state: AppState) -> Router {
         .route("/v1/agents/:id/vm/file/pull", post(vm_file_pull))
         .route("/v1/agents/:id/vm/copy-to-sandbox", post(vm_copy_to_sandbox))
         .route("/v1/agents/:id/panic", post(agent_panic))
+        .route("/v1/agents/:id/terminate", post(agent_terminate))
         .route("/v1/agents/:id/thread", get(get_agent_thread))
         .route("/v1/agents/:id/dm", post(agent_dm))
         .route("/v1/agents/:id/dm-user", post(agent_dm_user))
@@ -2179,6 +2180,119 @@ async fn agent_panic(State(state): State<AppState>, Path(id): Path<String>) -> i
     // 3. Broadcast quarantine event to UI
     let _ = state.tx.send(json!({"type":"agent_quarantined","agent_id": uid}).to_string());
     (StatusCode::OK, Json(json!({"status":"quarantined","agent_id": uid})))
+}
+
+#[derive(Debug, Deserialize)]
+struct TerminateRequest {
+    requester_id: Uuid,
+}
+
+async fn agent_terminate(State(state): State<AppState>, Path(id): Path<String>, Json(body): Json<TerminateRequest>) -> impl IntoResponse {
+    let target_id = match Uuid::parse_str(&id) { Ok(u) => u, Err(_) => return (StatusCode::BAD_REQUEST, Json(json!({"error":"Invalid agent ID"}))) };
+
+    // 1. Validate the target agent exists and is ACTIVE
+    let target: Option<(String, Option<Uuid>, Uuid)> = sqlx::query_as(
+        "SELECT role, parent_agent_id, holding_id FROM agents WHERE id = $1"
+    ).bind(target_id).fetch_optional(&state.db).await.unwrap_or(None);
+
+    let (target_role, target_parent, _holding_id) = match target {
+        Some(t) => t,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Agent not found"}))),
+    };
+
+    // Cannot terminate MAIN
+    if target_role == "MAIN" {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"Cannot terminate the MAIN agent"})));
+    }
+
+    // 2. Chain-of-command validation: requester must be the target's direct superior or above
+    let requester_role: Option<String> = sqlx::query_scalar("SELECT role FROM agents WHERE id = $1")
+        .bind(body.requester_id).fetch_optional(&state.db).await.unwrap_or(None);
+    let requester_role = match requester_role {
+        Some(r) => r,
+        None => return (StatusCode::NOT_FOUND, Json(json!({"error":"Requester agent not found"}))),
+    };
+
+    let authorized = match (requester_role.as_str(), target_role.as_str()) {
+        // MAIN can terminate any CEO
+        ("MAIN", "CEO") => true,
+        // CEO can terminate managers/workers in their company
+        ("CEO", "MANAGER") | ("CEO", "WORKER") => {
+            // Check same company
+            let req_company: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM agents WHERE id = $1")
+                .bind(body.requester_id).fetch_optional(&state.db).await.unwrap_or(None);
+            let tgt_company: Option<Uuid> = sqlx::query_scalar("SELECT company_id FROM agents WHERE id = $1")
+                .bind(target_id).fetch_optional(&state.db).await.unwrap_or(None);
+            req_company.is_some() && req_company == tgt_company
+        }
+        // Manager can terminate their own workers (parent_agent_id matches)
+        ("MANAGER", "WORKER") => {
+            target_parent == Some(body.requester_id)
+        }
+        _ => false,
+    };
+
+    if !authorized {
+        return (StatusCode::FORBIDDEN, Json(json!({"error":"You can only terminate agents under your direct authority"})));
+    }
+
+    // 3. Set status to TERMINATED
+    let _ = sqlx::query("UPDATE agents SET status = 'TERMINATED' WHERE id = $1")
+        .bind(target_id).execute(&state.db).await;
+
+    // 4. Stop OpenClaw container
+    match state.openclaw.stop_instance(target_id).await {
+        Ok(()) => tracing::info!("Stopped OpenClaw instance for terminated agent {}", target_id),
+        Err(e) => tracing::warn!("Failed to stop OpenClaw instance for agent {}: {} (may not have one)", target_id, e),
+    }
+
+    // 5. Destroy VMs (desktop + sandbox)
+    if let Some(ref provider) = state.vm_provider {
+        // Desktop VM
+        if let Some(ref vm_ref) = resolve_vm_ref(&state.db, target_id, "desktop").await {
+            let _ = provider.destroy(vm_ref).await;
+            let _ = sqlx::query("DELETE FROM vms WHERE id = (SELECT vm_id FROM agents WHERE id = $1)")
+                .bind(target_id).execute(&state.db).await;
+            let _ = sqlx::query("UPDATE agents SET vm_id = NULL WHERE id = $1")
+                .bind(target_id).execute(&state.db).await;
+            tracing::info!("Destroyed desktop VM '{}' for terminated agent {}", vm_ref, target_id);
+        }
+        // Sandbox VM
+        if let Some(ref vm_ref) = resolve_vm_ref(&state.db, target_id, "sandbox").await {
+            let _ = provider.destroy(vm_ref).await;
+            let _ = sqlx::query("DELETE FROM vms WHERE id = (SELECT sandbox_vm_id FROM agents WHERE id = $1)")
+                .bind(target_id).execute(&state.db).await;
+            let _ = sqlx::query("UPDATE agents SET sandbox_vm_id = NULL WHERE id = $1")
+                .bind(target_id).execute(&state.db).await;
+            tracing::info!("Destroyed sandbox VM '{}' for terminated agent {}", vm_ref, target_id);
+        }
+    }
+
+    // 6. Remove from company_ceos if CEO
+    if target_role == "CEO" {
+        let _ = sqlx::query("DELETE FROM company_ceos WHERE agent_id = $1")
+            .bind(target_id).execute(&state.db).await;
+    }
+
+    // 6. Clear any active DM tracking
+    state.agents_in_dm.write().await.remove(&target_id);
+
+    // 7. Remove from thread memberships
+    let _ = sqlx::query("DELETE FROM thread_members WHERE member_id = $1 AND member_type = 'AGENT'")
+        .bind(target_id).execute(&state.db).await;
+
+    // 8. Broadcast termination event
+    let target_name: Option<String> = sqlx::query_scalar("SELECT name FROM agents WHERE id = $1")
+        .bind(target_id).fetch_optional(&state.db).await.unwrap_or(None);
+    let _ = state.tx.send(json!({
+        "type": "agent_terminated",
+        "agent_id": target_id,
+        "agent_name": target_name.unwrap_or_default(),
+        "terminated_by": body.requester_id
+    }).to_string());
+
+    tracing::info!("Agent {} ({}) terminated by {}", target_id, target_role, body.requester_id);
+    (StatusCode::OK, Json(json!({"status":"terminated","agent_id": target_id})))
 }
 
 // ═══════════════════════════════════════════════════════════════

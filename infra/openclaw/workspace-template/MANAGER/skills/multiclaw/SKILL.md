@@ -42,6 +42,14 @@ The `preferred_model` field is optional. If omitted, the worker inherits your mo
 curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/org-tree
 ```
 
+### Terminate (Fire) a Worker
+```bash
+curl -s -X POST {{MULTICLAW_API_URL}}/v1/agents/TARGET_AGENT_ID/terminate \
+  -H 'Content-Type: application/json' \
+  -d '{"requester_id": "{{AGENT_ID}}"}'
+```
+Permanently removes a worker from your team. The worker's container is stopped and they are removed from all threads. You can only terminate workers that report directly to you. This action is irreversible — only use it when a worker is non-functional, insubordinate, or no longer needed.
+
 ### View Financial Ledger
 ```bash
 curl -s {{MULTICLAW_API_URL}}/v1/companies/{{COMPANY_ID}}/ledger
